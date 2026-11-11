@@ -1,5 +1,7 @@
 # Mac Cleaner
 
+[![CI](https://github.com/WahdanZ/MacCleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/WahdanZ/MacCleaner/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey)
+
 A native macOS app that frees disk space **safely**. It shows every item with its size, removes nothing until you confirm, and sends your own files to the Trash, so you can put them back.
 
 Built for developers: it knows about Xcode, simulators, Android SDKs, Gradle, Flutter, npm/yarn/pnpm/bun, CocoaPods, Docker and `node_modules`. It also covers app caches, logs, large files, duplicates and complete app uninstalls.
@@ -13,6 +15,20 @@ You can use it in three ways:
 | **AI assistants** | Built-in MCP server with 21 tools for Claude, Cursor, Codex, VS Code, Windsurf and Gemini |
 
 All three run the same engine with the same safety rules.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/tour-welcome-dark.png">
+    <img src="docs/screenshots/tour-welcome-light.png" alt="Mac Cleaner welcome tour" width="720">
+  </picture>
+</p>
+
+| | |
+|---|---|
+| ![Find space: Junk Files, Projects, Developer SDKs](docs/screenshots/tour-find-space-dark.png) | ![Your files: Large & Old Files, Duplicates, Storage Analysis](docs/screenshots/tour-your-files-light.png) |
+| ![Apps and System Data](docs/screenshots/tour-apps-system-dark.png) | ![Terminal command and MCP server](docs/screenshots/tour-terminal-ai-dark.png) |
+
+<sub>Pages from the built-in tour, in dark and light mode.</sub>
 
 ---
 
@@ -77,7 +93,7 @@ All three run the same engine with the same safety rules.
 Requirements: macOS 14 or later, Xcode 16 or later.
 
 ```bash
-git clone <this repo> && cd MacCleaner
+git clone https://github.com/WahdanZ/MacCleaner.git && cd MacCleaner
 ./build.sh
 ```
 

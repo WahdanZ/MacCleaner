@@ -334,7 +334,7 @@ private struct InstallCLIButton: View {
 private struct HeroTerminal: View {
     private static let script: [(String, Bool)] = [
         ("mac-cleaner status", true),
-        ("free: 48.2 GB   used: 451.8 GB   total: 500 GB", false),
+        ("free: 48.2 GB   used: 451.8 GB", false),
         ("mac-cleaner clean --recommended", true),
         ("• Xcode DerivedData  ·  2.1 GB", false),
         ("• npm cache  ·  1.4 GB", false),
@@ -387,9 +387,9 @@ private struct HeroTerminal: View {
         timer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { _ in
             Task { @MainActor in
                 guard shown < Self.script.count else {
-                    // Pause on the finished session, then start over.
+                    // Hold the finished session for ~7 s, then start over.
                     typed += 1
-                    if typed > 90 { shown = 0; typed = 0 }
+                    if typed > 200 { shown = 0; typed = 0 }
                     return
                 }
                 let (line, cmd) = Self.script[shown]

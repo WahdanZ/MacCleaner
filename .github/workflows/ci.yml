@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build, self-test, CLI check
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      APP: build/Release/Mac Cleaner.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build (Release, ad-hoc signed)
+        run: |
+          set -o pipefail
+          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
+            CODE_SIGN_IDENTITY=- build | tee build.log | grep -E 'error:|warning:|BUILD (SUCCEEDED|FAILED)' || true
+          grep -q 'BUILD SUCCEEDED' build.log
+
+      - name: Safety self-test
+        run: '"$APP/Contents/MacOS/Mac Cleaner" --selftest'
+
+      - name: Command line check (read-only commands)
+        run: |
+          set -e
+          BIN="$APP/Contents/MacOS/Mac Cleaner"
+          "$BIN" --cli help > /dev/null
+          "$BIN" --cli status --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["free_bytes"] > 0; print("status ok")'
+          "$BIN" --cli tools | grep -q disk_status
+          # A delete command without --yes and without a keyboard must change nothing and exit 2.
+          echo hi > "$HOME/ci-keep.txt"
+          set +e; "$BIN" --cli trash-files "$HOME/ci-keep.txt" < /dev/null; code=$?; set -e
+          test "$code" = 2 && test -f "$HOME/ci-keep.txt" && echo "preview-only ok"
+
+      - name: MCP server check
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | "$APP/Contents/MacOS/Mac Cleaner" --mcp \
+            | python3 -c 'import json,sys; r=[json.loads(l) for l in sys.stdin]; n=len(r[1]["result"]["tools"]); print(n, "tools"); assert n >= 21'
+
+      - name: Package app
+        run: ditto -c -k --keepParent "$APP" MacCleaner-unsigned.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacCleaner-unsigned
+          path: MacCleaner-unsigned.zip
+          retention-days: 14

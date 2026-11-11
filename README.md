@@ -205,19 +205,90 @@ The Xcode project uses a synchronized folder, so new `.swift` files in `MacClean
 
 ## Distribution
 
-`release.sh` builds a Developer ID–signed, notarized, stapled app and DMG. It needs a paid Apple Developer account:
+### Download
 
-1. Create a **Developer ID Application** certificate in Xcode (*Settings › Accounts › Manage Certificates*).
-2. Store notarization credentials once:
+Get the latest DMG from [Releases](https://github.com/WahdanZ/MacCleaner/releases), open it, and drag **Mac Cleaner** to Applications. Each release has a `.sha256` file to check the download:
+
+```bash
+shasum -a 256 -c MacCleaner-1.0.0.dmg.sha256
+```
+
+If a release isn't notarized, macOS blocks it the first time you open it. To allow it, open *System Settings › Privacy & Security* and click **Open Anyway**, or run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Mac Cleaner.app"
+```
+
+### Publish a release (GitHub Actions)
+
+The [Release workflow](.github/workflows/release.yml) builds the app, runs the self-test, packs a DMG and publishes a GitHub Release whenever you push a version tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+- **Version:** taken from the tag (`v1.0.0` becomes `1.0.0`). A tag with a suffix such as `v1.1.0-beta.1` is published as a pre-release.
+- **Release notes:** generated from the commits since the last tag, with install steps on top.
+- **Test build:** to get a DMG without publishing, go to *Actions › Release › Run workflow*. The DMG appears as a download on the run's page.
+
+**Signing is optional.** Without secrets, the DMG is ad-hoc signed and macOS asks users to allow it once (see above). To ship a signed and notarized DMG, add these repository secrets in *Settings › Secrets and variables › Actions*. This needs a paid Apple Developer account.
+
+| Secret | What it is |
+|---|---|
+| `MACOS_CERT_P12` | Your **Developer ID Application** certificate, exported as `.p12` and base64-encoded |
+| `MACOS_CERT_PASSWORD` | The password you gave the `.p12` when exporting it |
+| `APPLE_TEAM_ID` | Your 10-character team ID ([developer.apple.com/account](https://developer.apple.com/account) › Membership) |
+| `APPLE_ID` | The Apple ID email used for notarization |
+| `APPLE_APP_PASSWORD` | An app-specific password for that Apple ID ([account.apple.com](https://account.apple.com) › Sign-In and Security) |
+
+To get the certificate and add the secrets:
+
+1. Create the certificate in Xcode: *Settings › Accounts › Manage Certificates › + › Developer ID Application*.
+2. In **Keychain Access**, find *Developer ID Application: …* under *My Certificates*, right-click it, choose **Export**, and save `cert.p12` with a password.
+3. Add the secrets with the GitHub CLI (or paste them in the web page):
+   ```bash
+   base64 -i cert.p12 | gh secret set MACOS_CERT_P12
+   gh secret set MACOS_CERT_PASSWORD
+   gh secret set APPLE_TEAM_ID
+   gh secret set APPLE_ID
+   gh secret set APPLE_APP_PASSWORD
+   ```
+4. Delete `cert.p12` from your disk.
+
+With all five secrets set, the workflow:
+- signs the app with hardened runtime;
+- notarizes and staples both the app and the DMG;
+- checks the DMG with Gatekeeper before publishing.
+
+The signing keychain on the build machine is deleted at the end of each run.
+
+### Build a DMG on your Mac
+
+**Signed and notarized** (needs the Developer ID certificate in your keychain):
+
+1. Store notarization credentials once:
    ```bash
    xcrun notarytool store-credentials maccleaner-notary --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID
    ```
-3. Run:
+2. Run:
    ```bash
    TEAM_ID=YOUR_TEAM_ID ./release.sh
    ```
 
-The result is `build/Mac Cleaner.dmg`. Before publishing, change `PRODUCT_BUNDLE_IDENTIFIER` (currently `local.maccleaner`) to a reverse-DNS identifier you own.
+The result is `build/Mac Cleaner.dmg`.
+
+**Unsigned, for testing:**
+
+```bash
+./build.sh
+scripts/make-dmg.sh "build/Release/Mac Cleaner.app" "build/MacCleaner-dev.dmg"
+```
+
+### Before the first public release
+
+- Change `PRODUCT_BUNDLE_IDENTIFIER` (currently `local.maccleaner`) to a reverse-DNS identifier you own, such as `io.github.yourname.maccleaner`.
+- Changing it gives the app new settings storage, so protected folders and history start empty, and macOS asks for permissions again.
 
 ---
 

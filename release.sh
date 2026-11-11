@@ -38,13 +38,7 @@ xcrun stapler staple "$APP"
 
 echo "--- DMG"
 DMG="build/Mac Cleaner.dmg"
-STAGE=$(mktemp -d)
-ditto "$APP" "$STAGE/Mac Cleaner.app"
-ln -s /Applications "$STAGE/Applications"
-rm -f "$DMG"
-hdiutil create -volname "Mac Cleaner" -srcfolder "$STAGE" -ov -format UDZO "$DMG" > /dev/null
-rm -rf "$STAGE"
-codesign --sign "$IDENTITY" --timestamp "$DMG"
+scripts/make-dmg.sh "$APP" "$DMG" "$IDENTITY"
 xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$DMG"
 

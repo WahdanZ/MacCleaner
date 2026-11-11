@@ -1,0 +1,152 @@
+name: Release
+
+# Push a version tag to publish a release:   git tag v1.0.0 && git push origin v1.0.0
+# Or run it by hand (Actions › Release › Run workflow) to get a test DMG as an artifact, without publishing.
+#
+# Signing is optional. With these repository secrets the app and DMG are Developer ID–signed and
+# notarized; without them the DMG is ad-hoc signed (users have to allow it in System Settings once).
+#   MACOS_CERT_P12        base64 of your "Developer ID Application" certificate exported as .p12
+#   MACOS_CERT_PASSWORD   password of that .p12
+#   APPLE_TEAM_ID         10-character team ID
+#   APPLE_ID              Apple ID email used for notarization
+#   APPLE_APP_PASSWORD    app-specific password for that Apple ID
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version for a test build (no release is published)
+        default: 0.0.0-test
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build DMG
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      APP: build/Release/Mac Cleaner.app
+      HAS_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' && secrets.APPLE_TEAM_ID != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="$INPUT_VERSION"; fi
+          [[ "$V" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?([-.][A-Za-z0-9.]+)?$ ]] || { echo "Bad version: $V"; exit 1; }
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "DMG=build/MacCleaner-$V.dmg" >> "$GITHUB_ENV"
+          echo "Version $V · signing: $HAS_SIGNING · notarizing: $HAS_NOTARY"
+
+      - name: Import signing certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS=$(uuidgen)
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PASS" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep "Developer ID Application" | grep "($APPLE_TEAM_ID)" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          [[ -n "$IDENTITY" ]] || { echo "No Developer ID Application certificate for team $APPLE_TEAM_ID in MACOS_CERT_P12"; exit 1; }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Build (Developer ID, hardened runtime)
+        if: env.HAS_SIGNING == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -o pipefail
+          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
+            ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_ENTITLEMENTS=MacCleaner/MacCleaner.entitlements \
+            OTHER_CODE_SIGN_FLAGS="--timestamp --keychain $KEYCHAIN" build | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' || true
+          grep -q 'BUILD SUCCEEDED' build.log
+          codesign --verify --strict --deep "$APP"
+
+      - name: Build (ad-hoc signed)
+        if: env.HAS_SIGNING != 'true'
+        run: |
+          set -o pipefail
+          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CODE_SIGN_IDENTITY=- build | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' || true
+          grep -q 'BUILD SUCCEEDED' build.log
+          codesign --force --deep --sign - "$APP"
+
+      - name: Safety self-test
+        run: '"$APP/Contents/MacOS/Mac Cleaner" --selftest > /dev/null && echo "self-test passed"'
+
+      - name: Notarize app
+        if: env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent "$APP" build/app.zip
+          xcrun notarytool submit build/app.zip --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$APP"
+
+      - name: Make DMG
+        run: scripts/make-dmg.sh "$APP" "$DMG" "${IDENTITY:-}"
+
+      - name: Notarize DMG
+        if: env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose "$DMG"
+
+      - name: Checksum
+        run: |
+          cd build && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" && cat "$(basename "$DMG").sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacCleaner-${{ env.VERSION }}
+          path: |
+            ${{ env.DMG }}
+            ${{ env.DMG }}.sha256
+          retention-days: 30
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$HAS_SIGNING" == "true" && "$HAS_NOTARY" == "true" ]]; then
+            INSTALL="Open the DMG and drag **Mac Cleaner** to Applications. This build is signed and notarized by Apple."
+          else
+            INSTALL=$'Open the DMG and drag **Mac Cleaner** to Applications.\n\nThis build is not notarized, so macOS blocks it the first time. To allow it, open **System Settings › Privacy & Security** and click **Open Anyway**, or run:\n\n```\nxattr -dr com.apple.quarantine "/Applications/Mac Cleaner.app"\n```'
+          fi
+          printf '%s\n\nRequires macOS 14 or later. Check the download with `shasum -a 256 -c MacCleaner-%s.dmg.sha256`.\n' "$INSTALL" "$VERSION" > notes.md
+          gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" \
+            --title "Mac Cleaner $VERSION" --notes-file notes.md --generate-notes \
+            $([[ "$VERSION" == *-* ]] && echo --prerelease)
+
+      - name: Remove signing keychain
+        if: always() && env.KEYCHAIN != ''
+        run: security delete-keychain "$KEYCHAIN" || true

@@ -1,0 +1,217 @@
+import Foundation
+
+/// `Mac Cleaner --selftest`: checks every safety rule. Creates only throwaway files under
+/// ~/.maccleaner-selftest and ~/.cache/maccleaner-selftest-*, removes them afterwards,
+/// and restores the Protected list. Exit code 0 = all passed.
+enum SelfTest {
+    private static var passed = 0
+    private static var failed: [String] = []
+
+    private static func check(_ name: String, _ ok: Bool) {
+        if ok { passed += 1 } else { failed.append(name) }
+        print((ok ? "  ✓ " : "  ✗ ") + name)
+    }
+
+    static func run() -> Bool {
+        let fm = FileManager.default
+        let home = SafetyGuard.home
+        let h = { (rel: String) in home.appendingPathComponent(rel) }
+        let sandbox = h(".maccleaner-selftest")
+        let cacheLink = h(".cache/maccleaner-selftest-link")
+        let cacheItem = h(".cache/maccleaner-selftest-item")
+        let savedProtected = ProtectedPaths.all
+        defer {
+            ProtectedPaths.set(savedProtected)
+            try? fm.removeItem(at: sandbox)
+            try? fm.removeItem(at: cacheLink)
+            try? fm.removeItem(at: cacheItem)
+        }
+        try? fm.createDirectory(at: sandbox.appendingPathComponent("keep/inner"), withIntermediateDirectories: true)
+        fm.createFile(atPath: sandbox.appendingPathComponent("keep/inner/file.txt").path, contents: Data("x".utf8))
+        fm.createFile(atPath: sandbox.appendingPathComponent("loose.txt").path, contents: Data("x".utf8))
+        try? fm.createDirectory(at: cacheItem, withIntermediateDirectories: true)
+        try? fm.removeItem(at: cacheLink)
+        try? fm.createSymbolicLink(at: cacheLink, withDestinationURL: h("Documents"))
+
+        print("Cache sweep (SafetyGuard — permanent delete)")
+        check("allows ~/Library/Caches/<app>", SafetyGuard.isAllowed(h("Library/Caches/com.example.app")))
+        check("allows ~/.gradle/caches", SafetyGuard.isAllowed(h(".gradle/caches")))
+        check("allows web cache in Application Support", SafetyGuard.isAllowed(h("Library/Application Support/Example/Cache")))
+        check("allows sandboxed cache contents", SafetyGuard.isAllowed(h("Library/Containers/com.example.app/Data/Library/Caches/x")))
+        check("refuses ~/Library/Caches itself", !SafetyGuard.isAllowed(h("Library/Caches")))
+        check("refuses ~/.cache itself", !SafetyGuard.isAllowed(h(".cache")))
+        check("refuses app data in Application Support", !SafetyGuard.isAllowed(h("Library/Application Support/Example/Data")))
+        check("refuses Apple sandbox caches", !SafetyGuard.isAllowed(h("Library/Containers/com.apple.mail/Data/Library/Caches/x")))
+        check("refuses container data outside Caches", !SafetyGuard.isAllowed(h("Library/Containers/com.example.app/Data/Documents")))
+        check("refuses ~/Documents", !SafetyGuard.isAllowed(h("Documents/x")))
+        check("refuses ~/Downloads", !SafetyGuard.isAllowed(h("Downloads/x")))
+        check("refuses ~/.pub-cache/bin (melos)", !SafetyGuard.isAllowed(h(".pub-cache/bin/melos")))
+        check("refuses iCloud Drive", !SafetyGuard.isAllowed(h("Library/Mobile Documents/com~apple~CloudDocs/x")))
+        check("symlink in a cache root pointing to ~/Documents is refused", !SafetyGuard.isAllowed(cacheLink))
+        check("allows a real folder in ~/.cache", SafetyGuard.isAllowed(cacheItem))
+
+        print("Move to Trash (TrashGuard)")
+        check("refuses home folder", !TrashGuard.canTrash(home))
+        check("refuses ~/Library", !TrashGuard.canTrash(h("Library")))
+        check("refuses ~/Documents itself", !TrashGuard.canTrash(h("Documents")))
+        check("refuses Keychains", !TrashGuard.canTrash(h("Library/Keychains/login.keychain-db")))
+        check("refuses Mail", !TrashGuard.canTrash(h("Library/Mail/V10")))
+        check("refuses ~/.ssh", !TrashGuard.canTrash(h(".ssh/id_ed25519")))
+        check("refuses /System", !TrashGuard.canTrash(URL(fileURLWithPath: "/System/Library/CoreServices")))
+        check("refuses /Users", !TrashGuard.canTrash(URL(fileURLWithPath: "/Users")))
+        check("allows a file in your home", TrashGuard.canTrash(sandbox.appendingPathComponent("loose.txt")))
+        check("allows an app in /Applications", TrashGuard.canTrash(URL(fileURLWithPath: "/Applications/Example.app")))
+
+        print("Password step (AdminGuard)")
+        check("allows a launch daemon plist", AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.helper.plist")))
+        check("allows an audio driver", AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/Example.driver")))
+        check("refuses the LaunchDaemons folder itself", !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons")))
+        check("refuses Apple items", !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/com.apple.x.plist")))
+        check("refuses nested paths", !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/Application Support/X/Y")))
+        check("refuses non-apps in /Applications", !AdminGuard.isAllowed(URL(fileURLWithPath: "/Applications/Utilities")))
+        check("refuses /usr", !AdminGuard.isAllowed(URL(fileURLWithPath: "/usr/local/bin/x")))
+        check("refuses /System", !AdminGuard.isAllowed(URL(fileURLWithPath: "/System/Library/Extensions/x.kext")))
+
+        print("Protected folders")
+        let keep = sandbox.appendingPathComponent("keep")
+        ProtectedPaths.set(savedProtected + [keep.path, cacheItem.path])
+        check("protected folder can't be trashed", !TrashGuard.canTrash(keep))
+        check("file inside a protected folder can't be trashed", !TrashGuard.canTrash(keep.appendingPathComponent("inner/file.txt")))
+        check("parent of a protected folder can't be trashed", !TrashGuard.canTrash(sandbox))
+        check("unprotected sibling can still be trashed", TrashGuard.canTrash(sandbox.appendingPathComponent("loose.txt")))
+        check("protected cache folder is not swept", !SafetyGuard.isAllowed(cacheItem))
+        check("protected path blocked in password step", {
+            ProtectedPaths.set(ProtectedPaths.all + ["/Library/LaunchDaemons/com.example.keep.plist"])
+            return !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.keep.plist"))
+        }())
+        let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true])) as? [String: Any]
+        check("MCP move_to_trash refuses protected even with confirm",
+              (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
+        check("Shredder refuses protected (same rule)", TrashGuard.reason(keep) != nil)
+        check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
+
+        print("Trash and Put Back")
+        ProtectedPaths.set(savedProtected)
+        let rt = sandbox.appendingPathComponent("roundtrip.txt")
+        fm.createFile(atPath: rt.path, contents: Data("roundtrip".utf8))
+        let trashErr = AppEngine.trash(rt, source: "Self-test")
+        let entry = TrashLog.shared.present().first { $0.original == rt.path }
+        check("trash moves the file and logs it", trashErr == nil && !fm.fileExists(atPath: rt.path) && entry != nil)
+        check("logged item is readable in the Trash", entry.map { fm.fileExists(atPath: $0.trashed) } ?? false)
+        if let entry {
+            check("put back restores the file", TrashOps.restore(entry) == nil
+                  && (try? String(contentsOf: rt, encoding: .utf8)) == "roundtrip")
+            check("put back removes the log entry", !TrashLog.shared.present().contains { $0.id == entry.id })
+        }
+        ProtectedPaths.set(savedProtected + [rt.path])
+        check("protected file is refused by trash()", AppEngine.trash(rt, source: "Self-test") != nil && fm.fileExists(atPath: rt.path))
+        ProtectedPaths.set(savedProtected)
+
+        print("Projects (build files)")
+        let proj = sandbox.appendingPathComponent("proj")
+        for d in ["node_modules/pkg", "src", "dist", "build"] {
+            try? fm.createDirectory(at: proj.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        fm.createFile(atPath: proj.appendingPathComponent("package.json").path, contents: Data("{}".utf8))
+        fm.createFile(atPath: proj.appendingPathComponent("node_modules/pkg/index.js").path, contents: Data(repeating: 1, count: 5000))
+        fm.createFile(atPath: proj.appendingPathComponent("src/app.js").path, contents: Data("code".utf8))
+        fm.createFile(atPath: proj.appendingPathComponent("dist/out.js").path, contents: Data(repeating: 1, count: 3000))
+        fm.createFile(atPath: proj.appendingPathComponent("build/x.js").path, contents: Data(repeating: 1, count: 3000))
+        let flutter = sandbox.appendingPathComponent("fapp")
+        try? fm.createDirectory(at: flutter.appendingPathComponent("android/.gradle/x"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: flutter.appendingPathComponent(".dart_tool"), withIntermediateDirectories: true)
+        fm.createFile(atPath: flutter.appendingPathComponent("pubspec.yaml").path, contents: Data("name: x".utf8))
+        fm.createFile(atPath: flutter.appendingPathComponent("android/build.gradle").path, contents: Data("//".utf8))
+        fm.createFile(atPath: flutter.appendingPathComponent(".dart_tool/c").path, contents: Data(repeating: 1, count: 4000))
+        fm.createFile(atPath: flutter.appendingPathComponent("android/.gradle/x/f").path, contents: Data(repeating: 1, count: 4000))
+        let evil = sandbox.appendingPathComponent("evil")
+        try? fm.createDirectory(at: evil, withIntermediateDirectories: true)
+        fm.createFile(atPath: evil.appendingPathComponent("package.json").path, contents: Data("{}".utf8))
+        try? fm.createSymbolicLink(at: evil.appendingPathComponent("node_modules"), withDestinationURL: h("Documents"))
+
+        let found = ProjectEngine.scan(roots: [sandbox]) { _ in }
+        let p = found.first { $0.name == "proj" }
+        let f = found.first { $0.name == "fapp" }
+        check("finds the Node project", p != nil)
+        check("node_modules is a cleanable artifact", p?.artifacts.contains { $0.rel == "node_modules" && !$0.review } == true)
+        check("dist is marked REVIEW", p?.artifacts.contains { $0.rel == "dist" && $0.review } == true)
+        check("build in a Node-only project is marked REVIEW", p?.artifacts.contains { $0.rel == "build" && $0.review } == true)
+        check("source folder is never an artifact", p?.artifacts.contains { $0.rel.hasPrefix("src") } == false)
+        check("nested android/.gradle is attributed to the Flutter project",
+              f?.artifacts.contains { $0.rel == "android/.gradle" } == true && f?.artifacts.contains { $0.rel == ".dart_tool" } == true)
+        check("symlinked node_modules (→ Documents) is not offered", found.first { $0.name == "evil" } == nil)
+        if let p, let nm = p.artifacts.first(where: { $0.rel == "node_modules" }) {
+            let r = ProjectEngine.clean([(nm, p)]) { _ in }
+            check("clean deletes node_modules", r.errors.isEmpty && !fm.fileExists(atPath: nm.url.path))
+            check("clean keeps source and package.json", fm.fileExists(atPath: proj.appendingPathComponent("src/app.js").path)
+                  && fm.fileExists(atPath: proj.appendingPathComponent("package.json").path))
+        }
+        if let f, let dt = f.artifacts.first(where: { $0.rel == ".dart_tool" }) {
+            ProtectedPaths.set(savedProtected + [flutter.path])
+            check("protected project is refused", ProjectEngine.reason(dt, in: f) != nil
+                  && ProjectEngine.clean([(dt, f)]) { _ in }.errors.count == 1 && fm.fileExists(atPath: dt.url.path))
+            check("protected project is skipped by the scan", !ProjectEngine.scan(roots: [sandbox]) { _ in }.contains { $0.name == "fapp" })
+            ProtectedPaths.set(savedProtected)
+        }
+        check("Documents target of the symlink is untouched", fm.fileExists(atPath: h("Documents").path))
+
+        print("Developer SDKs")
+        let sdk = h("Library/Android/sdk")
+        check("allows an NDK version folder", SafetyGuard.isAllowed(sdk.appendingPathComponent("ndk/99.0.0")))
+        check("allows a build-tools version", SafetyGuard.isAllowed(sdk.appendingPathComponent("build-tools/99.0.0")))
+        check("refuses the ndk folder itself", !SafetyGuard.isAllowed(sdk.appendingPathComponent("ndk")))
+        check("refuses the Android SDK root", !SafetyGuard.isAllowed(sdk))
+        check("refuses platform-tools (adb)", !SafetyGuard.isAllowed(sdk.appendingPathComponent("platform-tools")))
+        let outside = SDKItem(id: "x", group: .android, kind: "NDK", name: "fake", detail: "", size: 1,
+                              reveal: nil, action: .delete([sandbox.appendingPathComponent("loose.txt")]), regen: "")
+        check("SDK delete outside SDK folders is refused", SDKEngine.reason(outside) != nil
+              && SDKEngine.remove([outside]).errors.count == 1 && fm.fileExists(atPath: sandbox.appendingPathComponent("loose.txt").path))
+        let badDocker = SDKItem(id: "d", group: .docker, kind: "Docker", name: "system", detail: "", size: 0,
+                                reveal: nil, action: .docker("system"), regen: "")
+        check("only the four fixed Docker prune commands run", SDKEngine.reason(badDocker) != nil)
+        check("Docker sizes parse (1.5GB, 512MB (40%), 0B)", SDKEngine.parseDockerSize("1.5GB") == 1_500_000_000
+              && SDKEngine.parseDockerSize("512MB (40%)") == 512_000_000 && SDKEngine.parseDockerSize("0B") == 0)
+        check("DeviceSupport version is read from the folder name", SDKEngine.versionIn("iPhone15,2 17.5 (21F79)") == "17.5")
+        let aproj = sandbox.appendingPathComponent("aproj/app")
+        try? fm.createDirectory(at: aproj, withIntermediateDirectories: true)
+        try? Data("android {\n compileSdk 35\n ndkVersion \"27.0.1\"\n buildToolsVersion \"34.0.0\"\n}".utf8)
+            .write(to: aproj.appendingPathComponent("build.gradle"))
+        try? Data("android { compileSdk = 36 }".utf8).write(to: sandbox.appendingPathComponent("aproj/build.gradle.kts"))
+        let use = SDKEngine.androidUsage(roots: [sandbox])
+        check("reads compileSdk from Groovy and Kotlin Gradle files", use.platforms["35"] == 1 && use.platforms["36"] == 1)
+        check("reads ndkVersion and buildToolsVersion", use.ndk["27.0.1"] == 1 && use.buildTools["34.0.0"] == 1)
+
+        print("System Data")
+        let att = h("Library/Messages/Attachments")
+        check("a single Messages attachment may be trashed", TrashGuard.canTrash(att.appendingPathComponent("ab/01/GUID/photo.heic")))
+        check("the Attachments folder itself is refused", !TrashGuard.canTrash(att))
+        check("Messages database is refused", !TrashGuard.canTrash(h("Library/Messages/chat.db")))
+        let snapOK = SysItem(id: "s", section: .snapshots, name: "", detail: "", size: nil, reveal: nil, action: .snapshot("2026-11-10-101530"))
+        let snapBad = SysItem(id: "b", section: .snapshots, name: "", detail: "", size: nil, reveal: nil, action: .snapshot("2026-11-10; rm -rf ~"))
+        check("snapshot dates are validated before tmutil runs", SystemDataEngine.reason(snapOK) == nil && SystemDataEngine.reason(snapBad) != nil)
+        check("Mail mailboxes are view only", SystemDataEngine.reason(SysItem(id: "m", section: .mail, name: "", detail: "", size: 1,
+                                                                             reveal: nil, action: .none)) != nil)
+
+        print("Automation (weekly safe clean)")
+        func target(_ id: String, _ c: CacheCategory, _ u: URL, rec: Bool = true) -> CleanTarget {
+            CleanTarget(id: id, category: c, name: id, path: u.path, note: "", action: .removeItem(u),
+                        recommended: rec, sizeBytes: 100, exists: true)
+        }
+        let picked = AutoClean.select([
+            target("ok", .devCache, cacheItem),
+            target("notrec", .devCache, cacheItem, rec: false),
+            target("trash", .trash, h(".Trash/x")),
+            target("dl", .appCaches, h("Downloads/x")),
+            target("docs", .appCaches, h("Documents/x")),
+        ]).map(\.id)
+        check("takes recommended caches", picked.contains("ok"))
+        check("skips not-recommended, Trash, Downloads and Documents", picked == ["ok"])
+        ProtectedPaths.set(savedProtected + [cacheItem.path])
+        check("skips protected caches", AutoClean.select([target("ok", .devCache, cacheItem)]).isEmpty)
+        ProtectedPaths.set(savedProtected)
+
+        print("\n\(passed) passed, \(failed.count) failed")
+        if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
+        return failed.isEmpty
+    }
+}

@@ -125,14 +125,14 @@ enum DiskScanner {
         let base = url.path.hasSuffix("/") ? url.path : url.path + "/"
 
         // Names, URLs and nodes are made only for folders and big files; small files are just counted.
-        // URLs are built from the path string: URL.appendingPathComponent on a URL derived from the home folder
-        // URL can return a decomposed (NFD) path for non-ASCII names, which would not match the guards' paths.
+        // URLs come from the raw path bytes (DirSize.fileURL): appendingPathComponent (macOS 26) and
+        // URL(fileURLWithPath:) (macOS 15) can both return a decomposed (NFD) path for non-ASCII names.
         let readable = DirSize.forEachEntry(atPath: url.path) { k in
             if k.isSymlink { return }
             if k.isDirectory {
                 let name = k.nameString, path = base + name
                 if skipPaths.contains(path) { return }
-                let d = DiskNode(url: URL(fileURLWithPath: path, isDirectory: true), name: name, isDirectory: true)
+                let d = DiskNode(url: DirSize.fileURL(path, isDirectory: true), name: name, isDirectory: true)
                 d.parent = node
                 dirs.append(d)
                 return
@@ -144,7 +144,7 @@ enum DiskScanner {
             localBytes += sz
             if sz >= minFile {
                 let name = k.nameString
-                let f = DiskNode(url: URL(fileURLWithPath: base + name, isDirectory: false), name: name, isDirectory: false)
+                let f = DiskNode(url: DirSize.fileURL(base + name, isDirectory: false), name: name, isDirectory: false)
                 f.size = sz
                 f.fileCount = 1
                 f.modified = k.modifiedDate
@@ -155,9 +155,13 @@ enum DiskScanner {
                 node.smallCount += 1
             }
         }
-        guard readable else {
+        switch readable {
+        case .complete: break
+        case .unreadable:
             node.unreadable = true
             return []
+        case .partial:
+            node.unreadable = true      // keep what was read, but flag the folder as not fully read
         }
         counter.add(files: localFiles, bytes: localBytes, current: url.path)
         return dirs

@@ -47,51 +47,56 @@ enum AppScanner {
     /// Folder listings and the installer-receipt list shared by every app in one scan. Without it each app
     /// re-lists the same ~/Library and /Library folders and starts its own `pkgutil --pkgs`.
     final class Batch: @unchecked Sendable {
-        private let lock = NSLock()
-        private var listings: [String: [String]] = [:]
-        private var pkgs: String??
+        private let listings = Once<String, [String]>()
+        private let jobs = Once<String, LaunchJob>()
+        private let pkgFiles = Once<String, [URL]>()
+        private let pkgs = Once<Int, String?>()
+
+        struct LaunchJob { let label: String?; let program: String? }
 
         func list(_ dir: URL) -> [String] {
-            lock.lock()
-            if let l = listings[dir.path] { lock.unlock(); return l }
-            lock.unlock()
-            let l = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-            lock.lock(); listings[dir.path] = l; lock.unlock()
-            return l
+            listings.get(dir.path) { (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] }
         }
 
-        private var jobs: [String: (label: String?, program: String?)] = [:]
-        private var pkgFiles: [String: [URL]] = [:]
-
         /// Label and program of a launch agent or daemon plist, read once per scan.
-        func launchJob(_ u: URL) -> (label: String?, program: String?) {
-            lock.lock()
-            if let j = jobs[u.path] { lock.unlock(); return j }
-            lock.unlock()
-            let plist = NSDictionary(contentsOf: u)
-            let j = (plist?["Label"] as? String,
-                     (plist?["Program"] as? String) ?? ((plist?["ProgramArguments"] as? [String])?.first))
-            lock.lock(); jobs[u.path] = j; lock.unlock()
-            return j
+        func launchJob(_ u: URL) -> LaunchJob {
+            jobs.get(u.path) {
+                let plist = NSDictionary(contentsOf: u)
+                return LaunchJob(label: plist?["Label"] as? String,
+                                 program: (plist?["Program"] as? String) ?? ((plist?["ProgramArguments"] as? [String])?.first))
+            }
         }
 
         /// `AppScanner.installedItems(pkg:)`, once per package per scan.
-        func installedItems(_ pkg: String) -> [URL] {
-            lock.lock()
-            if let l = pkgFiles[pkg] { lock.unlock(); return l }
-            lock.unlock()
-            let l = AppScanner.installedItems(pkg: pkg)
-            lock.lock(); pkgFiles[pkg] = l; lock.unlock()
-            return l
-        }
+        func installedItems(_ pkg: String) -> [URL] { pkgFiles.get(pkg) { AppScanner.installedItems(pkg: pkg) } }
 
-        func receipts() -> String? {
-            lock.lock()
-            if let p = pkgs { lock.unlock(); return p }
-            lock.unlock()
-            let p = Shell.run("/usr/sbin/pkgutil", ["--pkgs"]).output
-            lock.lock(); pkgs = .some(p); lock.unlock()
-            return p
+        func receipts() -> String? { pkgs.get(0) { Shell.run("/usr/sbin/pkgutil", ["--pkgs"]).output } }
+    }
+
+    /// Computes each key's value once. Callers that ask while it is being computed wait for that result instead
+    /// of starting the same work (a `pkgutil` run, a folder listing) again. Different keys don't wait on each other.
+    final class Once<Key: Hashable, Value>: @unchecked Sendable {
+        private enum Slot { case loading, done(Value) }
+        private let cond = NSCondition()
+        private var slots: [Key: Slot] = [:]
+
+        func get(_ key: Key, _ make: () -> Value) -> Value {
+            cond.lock()
+            while true {
+                switch slots[key] {
+                case .done(let v)?: cond.unlock(); return v
+                case .loading?: cond.wait()
+                case nil:
+                    slots[key] = .loading
+                    cond.unlock()
+                    let v = make()
+                    cond.lock()
+                    slots[key] = .done(v)
+                    cond.broadcast()
+                    cond.unlock()
+                    return v
+                }
+            }
         }
     }
 

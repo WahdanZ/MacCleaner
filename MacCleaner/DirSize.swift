@@ -15,18 +15,24 @@ enum DirSize {
     static let width = max(4, min(ProcessInfo.processInfo.activeProcessorCount, 12))
     private static let bufferSize = 128 * 1024
 
-    static func allocated(atPath path: String) -> Int64 {
+    static func allocated(atPath path: String) -> Int64 { measure(atPath: path).bytes }
+
+    /// The size, and whether every folder below was read to the end. A folder that cannot be opened at all counts
+    /// as 0 every time (as before); one whose listing fails part-way makes the result incomplete, and an
+    /// incomplete size is never cached.
+    static func measure(atPath path: String) -> (bytes: Int64, complete: Bool) {
         let total = Total()
         WalkPool.shared.run { group in visit(path, group, total) }
-        return total.value
+        return (total.value, total.complete)
     }
 
     private static func visit(_ path: String, _ group: WalkPool.Group, _ total: Total) {
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { return }
-        let (bytes, dirs) = list(fd)
+        let (bytes, dirs, read) = list(fd)
         close(fd)   // children are opened by path, so open descriptors never pile up
         total.add(bytes)
+        if read != .complete { total.markIncomplete() }
         let prefix = path.hasSuffix("/") ? path : path + "/"
         for d in dirs {
             let sub = prefix + d
@@ -37,22 +43,25 @@ enum DirSize {
     private final class Total: @unchecked Sendable {
         private let lock = NSLock()
         private var n: Int64 = 0
+        private var whole = true
         var value: Int64 { lock.lock(); defer { lock.unlock() }; return n }
+        var complete: Bool { lock.lock(); defer { lock.unlock() }; return whole }
         func add(_ k: Int64) { if k != 0 { lock.lock(); n += k; lock.unlock() } }
+        func markIncomplete() { lock.lock(); whole = false; lock.unlock() }
     }
 
     /// Allocated bytes of the non-folder entries in an open directory, and the names of its sub-folders.
-    private static func list(_ fd: Int32) -> (Int64, [String]) {
+    private static func list(_ fd: Int32) -> (Int64, [String], Read) {
         var total: Int64 = 0
         var dirs: [String] = []
-        forEach(fd, details: false) { r in
+        let read = forEach(fd, details: false) { r in
             if r.type == fsobj_type_t(VDIR.rawValue) {
                 dirs.append(String(cString: r.name))
             } else {
                 total += r.size
             }
         }
-        return (total, dirs)
+        return (total, dirs, read)
     }
 
     fileprivate static func date(_ t: timespec) -> Date {
@@ -79,20 +88,30 @@ enum DirSize {
         var accessedDate: Date? { accessed.map(DirSize.date) }
     }
 
-    /// Calls `body` for each entry of a folder (with dates and flags). Returns false if it cannot be read.
+    /// A file URL whose path has exactly these bytes. `URL(fileURLWithPath:)` converts the string to its
+    /// file-system form first, which on macOS 15 decomposes non-ASCII names ("ü" → "u" + "̈"); FileManager's own
+    /// URLs (what the scans used before, and what the guards compare against) keep the name as stored.
+    static func fileURL(_ path: String, isDirectory: Bool) -> URL {
+        path.withCString { URL(fileURLWithFileSystemRepresentation: $0, isDirectory: isDirectory, relativeTo: nil) }
+    }
+
+    /// How far a folder listing got.
+    enum Read { case complete, partial, unreadable }
+
+    /// Calls `body` for each entry of a folder (with dates and flags).
     @discardableResult
-    static func forEachEntry(atPath path: String, _ body: (Raw) -> Void) -> Bool {
+    static func forEachEntry(atPath path: String, _ body: (Raw) -> Void) -> Read {
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return .unreadable }
         defer { close(fd) }
         return forEach(fd, details: true, body)
     }
 
     /// Calls `body` for every readable entry of an open directory: name, type, allocated size (0 for folders)
-    /// and, with `details`, modification and access time and BSD flags. Returns false if the folder could not be
-    /// listed at all.
+    /// and, with `details`, modification and access time and BSD flags. `.partial` if the listing failed after
+    /// some entries were read, `.unreadable` if nothing could be read.
     @discardableResult
-    private static func forEach(_ fd: Int32, details: Bool, _ body: (Raw) -> Void) -> Bool {
+    private static func forEach(_ fd: Int32, details: Bool, _ body: (Raw) -> Void) -> Read {
         var req = attrlist()
         req.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
         req.commonattr = attrgroup_t(ATTR_CMN_RETURNED_ATTRS) | attrgroup_t(ATTR_CMN_NAME)
@@ -109,9 +128,9 @@ enum DirSize {
 
         while true {
             let count = getattrlistbulk(fd, &req, buf, bufferSize, 0)
-            if count < 0 && first { return false }
+            if count < 0 { return first ? .unreadable : .partial }   // what was read so far stays counted
             first = false
-            if count <= 0 { break }     // 0 = done, -1 = error part-way: keep what was read
+            if count == 0 { break }
             var entry = buf
             for _ in 0..<count {
                 // Layout (see getattrlistbulk(2)): length, returned set, then the requested attributes in bit
@@ -159,13 +178,14 @@ enum DirSize {
                 body(r)
             }
         }
-        return true
+        return .complete
     }
 }
 
 /// Folder sizes measured in the last minute, so scans that run one after another (Overview, Junk Files,
 /// Applications, Developer Tools) don't walk the same folders again. Every function that deletes, moves to the
-/// Trash or restores files clears it before and after, so the app never shows a size from before its own change.
+/// Trash or restores files clears it before and after, and a walk that overlaps a clear is not stored, so the app
+/// never shows a size from before its own change.
 /// Changes made outside the app show up once an entry is a minute old.
 enum SizeCache {
     static let lifetime: TimeInterval = 60
@@ -180,11 +200,17 @@ enum SizeCache {
         return e.bytes
     }
 
-    static func put(_ path: String, _ bytes: Int64) {
-        lock.lock(); if enabled { sizes[path] = (bytes, Date()) }; lock.unlock()
+    nonisolated(unsafe) private static var gen: UInt64 = 0
+
+    /// Read before measuring and pass to `put`: if the cache was cleared in between (the app deleted something
+    /// while the walk ran), the measurement may be from before that change and is not stored.
+    static var generation: UInt64 { lock.lock(); defer { lock.unlock() }; return gen }
+
+    static func put(_ path: String, _ bytes: Int64, generation: UInt64) {
+        lock.lock(); if enabled && generation == gen { sizes[path] = (bytes, Date()) }; lock.unlock()
     }
 
-    static func clear() { lock.lock(); sizes.removeAll(); lock.unlock() }
+    static func clear() { lock.lock(); gen &+= 1; sizes.removeAll(); lock.unlock() }
 }
 
 /// A fixed set of threads that run folder-listing jobs for every walk in the app (folder sizes, Storage Map).
@@ -205,6 +231,11 @@ final class WalkPool: @unchecked Sendable {
 
     private let cond = NSCondition()
     private var jobs: [(Group, () -> Void)] = []
+    private var peak = 0
+
+    /// The most jobs ever waiting at once (for `bench`): newest-first order keeps the walk depth-first, so
+    /// this stays near "folders per level × depth", not the size of the whole tree.
+    var peakQueued: Int { cond.lock(); defer { cond.unlock() }; return peak }
 
     init(threads: Int) {
         for i in 0..<threads {
@@ -227,6 +258,7 @@ final class WalkPool: @unchecked Sendable {
         cond.lock()
         g.pending += 1
         jobs.append((g, job))   // newest first: a walk that just started is not stuck behind a big one
+        peak = max(peak, jobs.count)
         cond.signal()
         cond.unlock()
     }

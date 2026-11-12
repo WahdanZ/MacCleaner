@@ -374,6 +374,24 @@ enum SelfTest {
         check("size cache: cleared when the app deletes something",
               Cleaner.run([goneTarget]).isEmpty && Scanner.allocatedSize(cx) >= before + 400_000)
 
+        let racedGeneration = SizeCache.generation
+        SizeCache.clear()      // the app deletes something while a walk is still running
+        SizeCache.put(cx.path + "/race", 1, generation: racedGeneration)
+        check("size cache: a walk that overlaps a deletion is not stored", SizeCache.get(cx.path + "/race") == nil)
+
+        // Several walks at once on the shared threads, one of them cancelled: the others still get exact sizes.
+        let cancelled = DiskScanner.Counter { _ in }
+        cancelled.cancel()
+        let expected = Scanner.allocatedSizeSlow(fx)     // fx grew in the size cache checks above
+        var concurrent = [Int64](repeating: -1, count: 6)
+        concurrent.withUnsafeMutableBufferPointer { buf in
+            DispatchQueue.concurrentPerform(iterations: 6) { i in
+                if i == 0 { _ = DiskScanner.scan(root: fx, counter: cancelled); buf[i] = expected; return }
+                buf[i] = DirSize.measure(atPath: fx.path).bytes
+            }
+        }
+        check("walks running at the same time (one cancelled) each get the exact size", concurrent.allSatisfy { $0 == expected })
+
         let dx = sandbox.appendingPathComponent("dups")
         try? fm.createDirectory(at: dx.appendingPathComponent("sub"), withIntermediateDirectories: true)
         let same = Data((0..<400_000).map { UInt8($0 % 251) })

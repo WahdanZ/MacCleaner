@@ -44,6 +44,9 @@ enum Bench {
             print(name.padding(toLength: 12, withPad: " ", startingAt: 0)
                   + String(format: "%8.2f %7.2f %13.3f   ", secs[secs.count / 2], secs[0], results.map(\.stall).max() ?? 0)
                   + last.summary)
+            if name == "storage" || name == "large" || name == "overview" {
+                print("            most folder jobs waiting at once so far: \(WalkPool.shared.peakQueued)")
+            }
             if let dump {
                 let text = last.lines.sorted().joined(separator: "\n") + "\n"
                 try? text.write(to: dump.appendingPathComponent(name + ".tsv"), atomically: true, encoding: .utf8)
@@ -153,16 +156,12 @@ enum Bench {
                 summary = "\(m.report.items.count) items, \(mb(m.report.items.reduce(0) { $0 + ($1.size ?? 0) }))"
                 lines = m.report.items.map { "\($0.id)\t\($0.size ?? -1)" }
             case "overview":
-                // Same measurements as OverviewModel.measure(), without saving the result.
-                let sizes = await Task.detached(priority: .utility) { () -> [Int64] in
-                    let home = SafetyGuard.home
-                    let apps = AppScanner.appURLs().reduce(Int64(0)) { $0 + Scanner.allocatedSize($1) }
-                    let docs = ["Documents", "Downloads", "Desktop", "Movies", "Pictures", "Music"]
-                        .reduce(Int64(0)) { $0 + Scanner.allocatedSize(home.appendingPathComponent($1)) }
-                    return [apps, docs, Scanner.allocatedSize(home.appendingPathComponent("Library"))]
-                }.value
-                summary = "apps \(mb(sizes[0])), documents \(mb(sizes[1])), library \(mb(sizes[2]))"
-                lines = zip(["apps", "documents", "library"], sizes).map { "\($0)\t\($1)" }
+                let m = OverviewModel()
+                m.savesResult = false       // measure without replacing the saved breakdown
+                await m.measure()
+                let b = m.breakdown
+                summary = "apps \(mb(b?.apps ?? 0)), documents \(mb(b?.documents ?? 0)), library \(mb(b?.library ?? 0))"
+                lines = ["apps\t\(b?.apps ?? 0)", "documents\t\(b?.documents ?? 0)", "library\t\(b?.library ?? 0)"]
             default:
                 break
             }

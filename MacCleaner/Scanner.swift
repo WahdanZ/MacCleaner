@@ -331,10 +331,11 @@ enum Scanner {
         guard let v = try? url.resourceValues(forKeys: keys) else { return 0 }
         if v.isSymbolicLink == true { return 0 }
         if v.isDirectory != true { return Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0) }
+        let generation = SizeCache.generation
         if let cached = SizeCache.get(url.path) { return cached }
-        let bytes = DirSize.allocated(atPath: url.path)
-        SizeCache.put(url.path, bytes)
-        return bytes
+        let m = DirSize.measure(atPath: url.path)
+        if m.complete { SizeCache.put(url.path, m.bytes, generation: generation) }
+        return m.bytes
     }
 
     /// The previous folder walk (FileManager enumerator). Kept so the self-test can check DirSize against it.

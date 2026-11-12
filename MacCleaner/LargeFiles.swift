@@ -48,7 +48,7 @@ enum LargeFileScanner {
                 }
                 guard k.isRegularFile, k.size >= floor else { return }
                 let path = dir + "/" + k.nameString
-                let f = BigFile(id: path, url: URL(fileURLWithPath: path), size: k.size,
+                let f = BigFile(id: path, url: DirSize.fileURL(path, isDirectory: false), size: k.size,
                                 modified: k.modifiedDate, lastOpened: k.accessedDate)
                 let isLarge = k.size >= minLarge
                 let isOld = k.size >= minOld && (f.lastTouched ?? .distantPast) < oldBefore
@@ -65,7 +65,7 @@ enum LargeFileScanner {
 
     /// Apps, photo libraries and other bundles: listed as one item, never opened (like `.skipsPackageDescendants`).
     private static func isPackage(_ path: String) -> Bool {
-        (try? URL(fileURLWithPath: path, isDirectory: true).resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
+        (try? DirSize.fileURL(path, isDirectory: true).resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
     }
 
     /// Results and the files-seen count, shared by the walker threads. Progress at most ~8 times a second.

@@ -347,9 +347,16 @@ enum SelfTest {
         let listed = map.children.first { $0.name == "a" }?.children.first { $0.size >= 1_000_000 }
         let reference = (try? fm.contentsOfDirectory(at: fx.appendingPathComponent("a"), includingPropertiesForKeys: nil))?
             .first { $0.lastPathComponent == nfc }   // what the FileManager walk reported for the same file
-        check("Storage Map keeps a non-ASCII name exactly as stored",
-              listed.map { Array($0.name.utf8) == Array(nfc.utf8)
-                  && Array($0.url.path.utf8) == Array((reference?.path ?? "").utf8) } ?? false)
+        let nameOK = listed.map { Array($0.name.utf8) == Array(nfc.utf8) } ?? false
+        let pathOK = listed.map { Array($0.url.path.utf8) == Array((reference?.path ?? "").utf8) } ?? false
+        check("Storage Map keeps a non-ASCII name exactly as stored", nameOK && pathOK)
+        if !(nameOK && pathOK) {
+            let form = { (t: String?) -> String in
+                guard let t else { return "missing" }
+                return t == t.precomposedStringWithCanonicalMapping && Array(t.utf8) == Array(t.precomposedStringWithCanonicalMapping.utf8) ? "NFC" : "NFD"
+            }
+            print("    name \(form(listed?.name)), path \(form(listed?.url.path)), FileManager path \(form(reference?.path))")
+        }
         check("Storage Map lists a 1.5 MB file with its date",
               map.children.contains { $0.name == "big.bin" && !$0.isDirectory && $0.modified != nil && $0.size >= 1_500_000 })
         check("Storage Map total matches its children",

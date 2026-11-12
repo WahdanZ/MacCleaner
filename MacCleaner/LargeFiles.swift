@@ -300,7 +300,7 @@ private struct BigFileRow: View {
                 .font(.system(size: 11)).foregroundStyle(Palette.dim)
             Text(ByteText.string(file.size)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
                 .frame(width: 80, alignment: .trailing)
-            Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "magnifyingglass") }
+            Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Show in Finder")
                 .buttonStyle(.plain).foregroundStyle(Palette.dim).help("Reveal in Finder")
         }
         .padding(.horizontal, 10).padding(.vertical, 7)

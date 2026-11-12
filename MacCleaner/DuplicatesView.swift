@@ -111,7 +111,7 @@ struct DuplicatesView: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Button { dup.lastTrash = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+                Button { dup.lastTrash = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss").buttonStyle(.plain)
             }
             .padding(10)
             .background(Palette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))

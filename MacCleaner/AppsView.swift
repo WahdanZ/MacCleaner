@@ -65,7 +65,7 @@ private struct AppList: View {
                     Text("\(apps.apps.count) APPS").font(.mono(10.5, .bold)).foregroundStyle(Palette.accent)
                     Spacer()
                     Text("caches \(ByteText.string(apps.totalCaches))").font(.mono(10.5)).foregroundStyle(Palette.faint)
-                    Button { Task { await apps.scan() } } label: { Image(systemName: "arrow.clockwise") }
+                    Button { Task { await apps.scan() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Scan again")
                         .buttonStyle(.bordered)
                         .help("Rescan apps")
                 }
@@ -209,7 +209,7 @@ private struct AppDetail: View {
                             .foregroundStyle(m.isError ? Palette.warn : Palette.accent)
                         Text(m.text).font(.callout).lineLimit(4).frame(maxWidth: .infinity, alignment: .leading)
                         Spacer()
-                        Button { apps.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+                        Button { apps.message = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss").buttonStyle(.plain)
                     }
                     .padding(10)
                     .background((m.isError ? Palette.warn : Palette.accent).opacity(0.1),

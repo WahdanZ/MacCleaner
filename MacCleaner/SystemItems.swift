@@ -285,7 +285,7 @@ struct StartupView: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }
+                Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Scan again")
                     .buttonStyle(.bordered)
             }
         }
@@ -334,7 +334,7 @@ struct SystemRow: View {
             }
             Spacer(minLength: 8)
             Text(trailing).font(.system(size: 12, weight: .medium)).foregroundStyle(trailingColor)
-            Button { NSWorkspace.shared.activateFileViewerSelecting([reveal]) } label: { Image(systemName: "magnifyingglass") }
+            Button { NSWorkspace.shared.activateFileViewerSelecting([reveal]) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Show in Finder")
                 .buttonStyle(.plain).foregroundStyle(Palette.dim).help("Reveal in Finder")
             if let secondaryTitle {
                 Button(secondaryTitle, action: secondary).buttonStyle(.bordered).disabled(busy)
@@ -359,7 +359,7 @@ struct MessageBar: View {
                 .foregroundStyle(isError ? Palette.warn : Palette.success)
             Text(text).font(.callout).lineLimit(4).frame(maxWidth: .infinity, alignment: .leading)
             Spacer()
-            Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundStyle(Palette.dim)
+            Button(action: dismiss) { Image(systemName: "xmark") }.accessibilityLabel("Close").buttonStyle(.plain).foregroundStyle(Palette.dim)
         }
         .padding(10)
         .background((isError ? Palette.warn : Palette.success).opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))

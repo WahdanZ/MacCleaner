@@ -16,7 +16,7 @@ struct ProjectsView: View {
                             HStack(spacing: 5) {
                                 Image(systemName: "folder.fill").font(.system(size: 11)).foregroundStyle(Palette.accent)
                                 Text(r.lastPathComponent).font(.system(size: 12, weight: .medium))
-                                Button { m.roots.removeAll { $0 == r } } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                                Button { m.roots.removeAll { $0 == r } } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }.accessibilityLabel("Remove folder")
                                     .buttonStyle(.plain).foregroundStyle(Palette.faint)
                             }
                             .padding(.horizontal, 10).padding(.vertical, 5)
@@ -157,7 +157,7 @@ private struct ProjectRow: View {
                     .font(.mono(10.5)).foregroundStyle(Palette.dim).lineLimit(1).frame(maxWidth: 260, alignment: .trailing)
                 Text(ByteText.string(project.total)).font(.system(size: 14, weight: .semibold)).monospacedDigit()
                     .frame(width: 84, alignment: .trailing)
-                Button { NSWorkspace.shared.activateFileViewerSelecting([project.url]) } label: { Image(systemName: "magnifyingglass") }
+                Button { NSWorkspace.shared.activateFileViewerSelecting([project.url]) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Show in Finder")
                     .buttonStyle(.plain).foregroundStyle(Palette.dim).help("Reveal in Finder")
             }
             .padding(.horizontal, 10).padding(.vertical, 8)

@@ -222,7 +222,7 @@ private struct SDKRow: View {
             Text(ByteText.string(item.size)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
                 .frame(width: 80, alignment: .trailing)
             if let r = item.reveal {
-                Button { NSWorkspace.shared.activateFileViewerSelecting([r]) } label: { Image(systemName: "magnifyingglass") }
+                Button { NSWorkspace.shared.activateFileViewerSelecting([r]) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Show in Finder")
                     .buttonStyle(.plain).foregroundStyle(Palette.dim).help("Reveal in Finder")
             } else {
                 Color.clear.frame(width: 14)

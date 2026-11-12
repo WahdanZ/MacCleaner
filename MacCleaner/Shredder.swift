@@ -182,7 +182,7 @@ struct ShredderView: View {
                                     }
                                     Spacer()
                                     Text(ByteText.string(i.size)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                                    Button { m.items.removeAll { $0.id == i.id } } label: { Image(systemName: "xmark.circle.fill") }
+                                    Button { m.items.removeAll { $0.id == i.id } } label: { Image(systemName: "xmark.circle.fill") }.accessibilityLabel("Remove from list")
                                         .buttonStyle(.plain).foregroundStyle(Palette.faint)
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 7)

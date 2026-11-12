@@ -166,7 +166,7 @@ enum SDKEngine {
             }
             avds.append(SDKItem(id: avd.path, group: .android, kind: "Emulators", name: display,
                                 detail: "Emulator with its saved state and data", size: Scanner.allocatedSize(avd),
-                                reveal: avd, action: .delete([avd, ini]),
+                                reveal: avd, action: .delete([avd, ini]), review: true,
                                 regen: "Device Manager in Android Studio (its data is lost)"))
         }
 
@@ -350,8 +350,9 @@ enum SDKEngine {
         }
     }
 
-    static func remove(_ items: [SDKItem], progress: (String) -> Void = { _ in }) -> (bytes: Int64, errors: [String]) {
-        var bytes: Int64 = 0
+    /// `bytes` = everything removed; `trashed` = the part that went to the Trash (archives).
+    static func remove(_ items: [SDKItem], progress: (String) -> Void = { _ in }) -> (bytes: Int64, trashed: Int64, errors: [String]) {
+        var bytes: Int64 = 0, trashed: Int64 = 0
         var errors: [String] = []
         for item in items {
             progress(item.name)
@@ -380,9 +381,12 @@ enum SDKEngine {
                 let r = Shell.run(dockerPath!, dockerPrune[k]!, timeout: 600)
                 if r.status != 0 { ok = false; errors.append("\(item.name): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "docker failed")") }
             }
-            if ok { bytes += item.size }
+            if ok {
+                bytes += item.size
+                if case .trash = item.action { trashed += item.size }
+            }
         }
-        return (bytes, errors)
+        return (bytes, trashed, errors)
     }
 
     // MARK: Helpers
@@ -455,14 +459,15 @@ final class SDKModel {
         let list = chosen
         guard !list.isEmpty else { return }
         phase = .removing
-        let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, errors: [String]) in
+        let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, trashed: Int64, errors: [String]) in
             SDKEngine.remove(list) { name in Task { @MainActor [weak self] in self?.current = name } }
         }.value
-        HistoryStore.shared.add("Developer SDKs Removed", bytes: r.bytes, symbol: "shippingbox")
+        HistoryStore.shared.add("Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
+        HistoryStore.shared.add("Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)
         message = r.errors.isEmpty
-            ? ("Freed \(ByteText.string(r.bytes)) from \(list.count) item(s)."
+            ? ("Removed \(ByteText.string(r.bytes)) in \(list.count) item(s)."
                + (list.contains { if case .trash = $0.action { return true }; return false } ? " Archives went to the Trash." : ""), false)
-            : ("Freed \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
+            : ("Removed \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
         selected = []
         await load()
     }

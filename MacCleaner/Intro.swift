@@ -44,13 +44,13 @@ struct IntroView: View {
                 .animation(.spring(response: 0.35, dampingFraction: 0.8), value: step)
                 Spacer()
                 if step > 0 {
-                    Button("Back") { go(to: step - 1) }.buttonStyle(GhostButtonStyle())
+                    Button("Back") { go(to: step - 1) }.buttonStyle(.bordered)
                         .keyboardShortcut(.leftArrow, modifiers: [])
                 }
                 Button(step == steps.count - 1 ? "Get started" : "Next") {
                     step == steps.count - 1 ? finish(scan: true) : go(to: step + 1)
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 30).padding(.vertical, 18)
@@ -120,9 +120,9 @@ struct IntroStep {
                     IntroFeature(symbol: "trash", color: Color(hex: 0xF43F5E), title: "Junk Files",
                                  text: "340+ cache, log and temp locations, on a map sized by space.", page: .junk),
                     IntroFeature(symbol: "hammer", color: Color(hex: 0x8B5CF6), title: "Projects",
-                                 text: "node_modules, build, .dart_tool, Pods… in your code projects, with how long since you touched them.", page: .projects),
-                    IntroFeature(symbol: "shippingbox", color: Color(hex: 0x3A8DFF), title: "Developer SDKs",
-                                 text: "Simulator runtimes, Android images, NDKs and Docker data. In-use items are flagged.", page: .sdks),
+                                 text: "node_modules, build, .dart_tool, Pods… in your code projects, with how long since you touched them.", page: .developer),
+                    IntroFeature(symbol: "shippingbox", color: Color(hex: 0x3A8DFF), title: "SDKs & Docker",
+                                 text: "Simulator runtimes, Android images, NDKs and Docker data. In-use items are flagged.", page: .developer),
                   ]),
         IntroStep(symbol: "magnifyingglass", color: Color(hex: 0x14B8C8), kicker: "YOUR FILES",
                   title: "Find the big and the forgotten.",
@@ -132,7 +132,7 @@ struct IntroStep {
                                  text: "Big files and files you haven't opened in months.", page: .large),
                     IntroFeature(symbol: "plus.square.on.square", color: Color(hex: 0x1A7CFF), title: "Duplicates",
                                  text: "Identical files compared by content. One copy always stays.", page: .duplicates),
-                    IntroFeature(symbol: "chart.bar.xaxis", color: Color(hex: 0xF7B731), title: "Storage Analysis",
+                    IntroFeature(symbol: "chart.bar.xaxis", color: Color(hex: 0xF7B731), title: "Storage Map",
                                  text: "Browse every folder by size to see exactly where the space goes.", page: .storage),
                   ]),
         IntroStep(symbol: "square.grid.2x2", color: Color(hex: 0x22A54A), kicker: "APPS & SYSTEM",
@@ -164,7 +164,7 @@ struct IntroStep {
                     IntroFeature(symbol: "terminal", color: Color(hex: 0x8B5CF6), title: "mac-cleaner command",
                                  text: "Commands for everything: status, scan, clean, projects, sdks, uninstall… Run mac-cleaner help to see them all. Add --json for scripts."),
                     IntroFeature(symbol: "point.3.connected.trianglepath.dotted", color: Color(hex: 0x1A7CFF), title: "MCP server",
-                                 text: "21 tools for Claude Code, Claude Desktop, Cursor, Codex, VS Code, Windsurf and Gemini. Set up in Settings › Connect AI."),
+                                 text: "21 tools for Claude Code, Claude Desktop, Cursor, Codex, VS Code, Windsurf and Gemini. Set up in Settings › Integrations."),
                     IntroFeature(symbol: "sparkles", color: Color(hex: 0x22A54A), title: "AI skill",
                                  text: "Teaches your assistant the rules: show every item, never confirm on its own, never touch protected folders."),
                   ], terminal: true),
@@ -206,7 +206,7 @@ private struct StepView: View {
                                 NSWorkspace.shared.open(u)
                             }
                         } label: { Label("Open Full Disk Access settings", systemImage: "lock.open") }
-                            .buttonStyle(GhostButtonStyle())
+                            .buttonStyle(.bordered)
                             .padding(.top, 4)
                     }
                 }
@@ -322,7 +322,7 @@ private struct InstallCLIButton: View {
                     case .failure(let e): note = e.localizedDescription
                     }
                 } label: { Label("Install the mac-cleaner command", systemImage: "terminal") }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
             }
             if let note { Text(note).font(.system(size: 11)).foregroundStyle(Palette.faint) }
         }

@@ -87,6 +87,11 @@ struct TreemapView: View {
                             .frame(width: r.width, height: r.height)
                             .offset(x: r.minX, y: r.minY)
                             .onTapGesture { model.toggle(t.id) }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("\(t.name), \(ByteText.string(t.sizeBytes))")
+                            .accessibilityValue(t.selected ? "Included" : "Excluded")
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction { model.toggle(t.id) }
                             .onHover { inside in
                                 if inside { hovered = t.id } else if hovered == t.id { hovered = nil }
                             }
@@ -96,6 +101,10 @@ struct TreemapView: View {
                             .frame(width: r.width, height: r.height)
                             .offset(x: r.minX, y: r.minY)
                             .onTapGesture { model.toggleAll(ids: Set(small.map(\.id))) }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("\(small.count) smaller items, \(ByteText.string(smallBytes))")
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction { model.toggleAll(ids: Set(small.map(\.id))) }
                             .onHover { inside in
                                 if inside { hovered = "small" } else if hovered == "small" { hovered = nil }
                             }
@@ -170,7 +179,6 @@ private struct TreemapBlock: View {
                         .font(.system(size: big ? 13 : 11, weight: .semibold))
                         .lineLimit(size.width > 140 && size.height > 70 ? 2 : 1)
                         .truncationMode(.tail)
-                        .fixedSize(horizontal: false, vertical: true)
                     Text(ByteText.string(target.sizeBytes))
                         .font(.mono(big ? 12 : 10, .medium))
                         .opacity(0.85)
@@ -198,28 +206,5 @@ private struct TreemapBlock: View {
         .contentShape(Rectangle())
         .animation(.easeOut(duration: 0.15), value: on)
         .animation(.easeOut(duration: 0.12), value: hovered)
-    }
-}
-
-/// Static decorative map for the start screen.
-struct DecorMap: View {
-    private let values: [Double] = [34, 21, 13, 9, 8, 5, 4, 3, 2, 1.5]
-    private let cats: [CacheCategory] = [.android, .xcode, .devCache, .appCaches, .packages,
-                                         .editors, .xcode, .logs, .android, .trash]
-
-    var body: some View {
-        GeometryReader { geo in
-            let rects = Treemap.layout(values, in: CGRect(origin: .zero, size: geo.size))
-            ZStack(alignment: .topLeading) {
-                ForEach(0..<values.count, id: \.self) { i in
-                    let r = Treemap.inset(rects[i], 3)
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(LinearGradient(colors: [cats[i].color, cats[i].color.opacity(0.6)],
-                                             startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: r.width, height: r.height)
-                        .offset(x: r.minX, y: r.minY)
-                }
-            }
-        }
     }
 }

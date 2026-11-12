@@ -17,91 +17,28 @@ enum AppTab: String, CaseIterable, Identifiable {
     }
 }
 
-/// Confirm dialogs for the cache sweep, Storage Analysis, Duplicates and Apps.
-struct FeatureAlerts: ViewModifier {
-    @Environment(CleanerModel.self) private var model
-    @Environment(DiskMapModel.self) private var map
-    @Environment(DupFinder.self) private var dup
-    @Environment(AppsModel.self) private var appsModel
-
-    func body(content: Content) -> some View {
-        @Bindable var model = model
-        @Bindable var map = map
-        @Bindable var dup = dup
-        @Bindable var appsModel = appsModel
-        content
-        .alert("Sweep \(model.chosen.count) item(s)?", isPresented: $model.confirming) {
-            Button("Sweep \(ByteText.string(model.chosenBytes))", role: .destructive) {
-                Task { await model.clean() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(model.chosen.prefix(14).map { "• \($0.name) — \(ByteText.string($0.sizeBytes))" }.joined(separator: "\n")
-                 + (model.chosen.count > 14 ? "\n• …and \(model.chosen.count - 14) more" : "")
-                 + "\n\nCaches are deleted permanently. Documents, Downloads, Desktop, Movies, Pictures, Music and iCloud Drive are not part of a sweep.")
-        }
-        .alert("Move \(map.markedCount) item(s) to the Trash?", isPresented: $map.confirming) {
-            Button("Move \(ByteText.string(map.markedBytes)) to Trash", role: .destructive) {
-                Task { await map.trashMarked() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(map.topLevelMarked.sorted { $0.size > $1.size }.prefix(14)
-                    .map { "• \($0.tildePath) — \(ByteText.string($0.size))" }.joined(separator: "\n")
-                 + (map.markedCount > 14 ? "\n• …and \(map.markedCount - 14) more" : "")
-                 + "\n\nYou can put them back from the Trash. Space is freed when the Trash is emptied.")
-        }
-        .alert("Uninstall \(appsModel.selected?.name ?? "app")?", isPresented: $appsModel.confirmUninstall) {
-            Button("Move to Trash", role: .destructive) { Task { await appsModel.uninstall() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(appsModel.uninstallSummary)
-        }
-        .alert("Clear \(appsModel.selected?.name ?? "app") cache?", isPresented: $appsModel.confirmClear) {
-            Button("Clear \(ByteText.string(appsModel.selected?.cacheSize ?? 0))", role: .destructive) {
-                Task { await appsModel.clearCaches() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            if let a = appsModel.selected {
-                Text(a.caches.prefix(12).map { "• \(Scanner.tilde($0.url)) — \(ByteText.string($0.size))" }.joined(separator: "\n")
-                     + "\n\nCaches are deleted permanently; the app rebuilds them. Quit the app first for the cleanest result.")
-            }
-        }
-        .alert("Move \(dup.marked.count) duplicate(s) to the Trash?", isPresented: $dup.confirming) {
-            Button("Move \(ByteText.string(dup.markedBytes)) to Trash", role: .destructive) {
-                Task { await dup.trashMarked() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(dup.marked.sorted { $0.path < $1.path }.prefix(14).map { "• " + Scanner.tilde($0) }.joined(separator: "\n")
-                 + (dup.marked.count > 14 ? "\n• …and \(dup.marked.count - 14) more" : "")
-                 + "\n\nAt least one copy of every file stays. You can put them back from the Trash.")
-        }
-    }
-}
-
 struct AccessBanner: View {
     @Environment(CleanerModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.s) {
             Image(systemName: "lock.trianglebadge.exclamationmark").foregroundStyle(Palette.warn)
-            Text("Limited access: without Full Disk Access some folders (Trash, Mail, other apps' data) can't be measured, so totals are low.")
-                .font(.system(size: 12)).foregroundStyle(Palette.fg.opacity(0.85))
-            Spacer()
-            Button("Open Full Disk Access settings") {
+                .accessibilityHidden(true)
+            Text("Without Full Disk Access, some folders can't be measured and totals are low.")
+                .font(.callout).lineLimit(2)
+            Spacer(minLength: Space.s)
+            Button("Allow…") {
                 if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
                     NSWorkspace.shared.open(u)
                 }
             }
-            .buttonStyle(GhostButtonStyle())
-            Button("Check again") { model.fullDiskAccess = Scanner.hasFullDiskAccess() }
-                .buttonStyle(GhostButtonStyle())
+            .help("Open System Settings › Privacy & Security › Full Disk Access")
+            Button("Check Again") { model.fullDiskAccess = Scanner.hasFullDiskAccess() }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Palette.warn.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.warn.opacity(0.3)))
+        .controlSize(.small)
+        .padding(.horizontal, Space.m).padding(.vertical, Space.s)
+        .background(Palette.warn.opacity(0.1), in: RoundedRectangle(cornerRadius: Radius.medium, style: .continuous))
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -184,45 +121,24 @@ private struct IdleView: View {
     @Environment(CleanerModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 32) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("~/deep-scan").font(.mono(13, .semibold)).foregroundStyle(Palette.accent)
-                    Text("Find what your\ndev tools left behind.")
-                        .font(.system(size: 36, weight: .bold))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Checks 40+ places: Xcode, simulators, Gradle, emulators, Flutter, npm · yarn · pnpm · bun, Homebrew, CocoaPods, editors, app caches, logs and Trash.")
-                        .foregroundStyle(Palette.dim)
-                        .frame(maxWidth: 440, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button {
-                        Task { await model.scan() }
-                    } label: {
-                        Label("Start deep scan", systemImage: "scope")
-                    }
-                    .buttonStyle(AccentButtonStyle(large: true))
-                    .keyboardShortcut(.defaultAction)
-                    .padding(.top, 8)
-                }
-                Spacer(minLength: 0)
-                DecorMap()
-                    .frame(width: 260, height: 260)
-                    .opacity(0.85)
-                    .rotationEffect(.degrees(-4))
-            }
-            .frame(maxHeight: .infinity)
-
-            HStack(spacing: 6) {
-                Image(systemName: "lock.fill").font(.system(size: 10)).foregroundStyle(Palette.accent)
-                Text("SWEEP NEVER TOUCHES").font(.mono(10, .semibold)).foregroundStyle(Palette.faint)
-                ForEach(["Documents", "Downloads", "Desktop", "Movies", "Pictures", "Music", "iCloud Drive"], id: \.self) {
-                    Text($0).font(.mono(10.5))
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(Palette.fg.opacity(0.06), in: Capsule())
-                }
-            }
+        VStack(spacing: Space.l) {
+            Spacer()
+            Image(systemName: "magnifyingglass").font(.system(size: 40, weight: .light)).foregroundStyle(Palette.dim)
+                .accessibilityHidden(true)
+            Text("Find what your apps and dev tools left behind").font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text("Checks 340+ places: Xcode and simulators, Gradle and emulators, Flutter, npm, yarn, pnpm and bun, Homebrew, CocoaPods, editors, app and browser caches, logs and the Trash. Scanning only reads; nothing is removed until you review it.")
+                .font(.callout).foregroundStyle(Palette.dim).multilineTextAlignment(.center).frame(maxWidth: 480)
+            Button { Task { await model.scan() } } label: { Label("Scan", systemImage: "magnifyingglass") }
+                .buttonStyle(.borderedProminent).controlSize(.large)
+                .keyboardShortcut("r", modifiers: .command)
+            Spacer()
+            Label("Never touched: Documents, Downloads, Desktop, Movies, Pictures, Music, iCloud Drive and protected folders.",
+                  systemImage: "lock")
+                .font(.caption).foregroundStyle(Palette.dim).multilineTextAlignment(.center)
         }
-        .padding(32)
+        .padding(Space.xxl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -348,7 +264,7 @@ private struct EmptyResults: View {
             Image(systemName: "checkmark.seal.fill").font(.system(size: 54)).foregroundStyle(Palette.accent)
             Text("Nothing to sweep").font(.system(size: 26, weight: .bold))
             Text("Every cache location is already empty.").foregroundStyle(Palette.dim)
-            Button("Scan again") { Task { await model.scan() } }.buttonStyle(GhostButtonStyle())
+            Button("Scan again") { Task { await model.scan() } }.buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -376,14 +292,14 @@ private struct DoneView: View {
             }
             HStack(spacing: 10) {
                 if !model.targets.isEmpty {
-                    Button("Back to space map") { model.phase = .results }.buttonStyle(GhostButtonStyle())
+                    Button("Back to space map") { model.phase = .results }.buttonStyle(.bordered)
                 }
                 Button {
                     Task { await model.scan() }
                 } label: {
                     Label("Scan again", systemImage: "scope")
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
             }
             .padding(.top, 10)
             Spacer()
@@ -455,7 +371,7 @@ struct Inspector: View {
                     Button("Recommended") { model.selectRecommended() }
                     Button("None") { model.selectNone() }
                 }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 .disabled(model.targets.isEmpty || model.isBusy)
                 .padding(.top, 8)
             }
@@ -478,7 +394,7 @@ struct Inspector: View {
                         } label: {
                             Image(systemName: allCollapsed ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
                         }
-                        .buttonStyle(GhostButtonStyle())
+                        .buttonStyle(.bordered)
                         .help(allCollapsed ? "Expand all" : "Collapse all")
                     }
                 }
@@ -637,6 +553,7 @@ private struct InspectorRow: View {
 
 struct BottomBar: View {
     @Environment(CleanerModel.self) private var model
+    @Environment(ReviewCenter.self) private var review
     @Environment(DiskMapModel.self) private var map
     @Environment(DupFinder.self) private var dup
     @Environment(AppsModel.self) private var appsModel
@@ -656,40 +573,40 @@ struct BottomBar: View {
                     } label: {
                         Label("Rescan", systemImage: "arrow.clockwise")
                     }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
                     .keyboardShortcut("r")
                     .disabled(model.isBusy)
                 }
                 Button {
-                    model.confirming = true
+                    review.present(ReviewBuild.junk(model) { Task { await model.clean() } })
                 } label: {
                     Label(model.chosen.isEmpty ? "Sweep" : "Sweep \(ByteText.string(model.chosenBytes))",
                           systemImage: "wind")
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(model.chosen.isEmpty || model.isBusy || model.phase == .idle)
             case .disk:
                 if map.markedCount > 0 {
-                    Button("Clear marks") { map.marked = [:] }.buttonStyle(GhostButtonStyle())
+                    Button("Clear marks") { map.marked = [:] }.buttonStyle(.bordered)
                 }
                 Button {
-                    map.confirming = true
+                    review.present(ReviewBuild.diskMap(map) { Task { await map.trashMarked() } })
                 } label: {
                     Label(map.markedCount == 0 ? "Move to Trash" : "Move \(ByteText.string(map.markedBytes)) to Trash",
                           systemImage: "trash")
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(map.markedCount == 0 || map.phase != .done)
             case .duplicates:
                 Button {
-                    dup.confirming = true
+                    review.present(ReviewBuild.duplicates(dup) { Task { await dup.trashMarked() } })
                 } label: {
                     Label(dup.marked.isEmpty ? "Move to Trash" : "Move \(ByteText.string(dup.markedBytes)) to Trash",
                           systemImage: "trash")
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(dup.marked.isEmpty || dup.phase != .done)
             case .apps:

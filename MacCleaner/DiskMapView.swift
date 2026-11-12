@@ -65,7 +65,7 @@ struct DiskMapView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .panel()
                 DiskSidePanel()
-                    .frame(width: 380)
+                    .frame(minWidth: 280, maxWidth: 380)
                     .frame(maxHeight: .infinity)
                     .panel()
             }
@@ -93,13 +93,13 @@ private struct DiskIdle: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 260)
+            .fixedSize()
             Button {
                 map.start()
             } label: {
                 Label("Scan \(map.rootChoice == .home ? "home folder" : "whole disk")", systemImage: "scope")
             }
-            .buttonStyle(AccentButtonStyle(large: true))
+            .buttonStyle(.borderedProminent).controlSize(.large)
             .keyboardShortcut(.defaultAction)
             Text(map.rootChoice == .disk
                  ? "Whole disk includes system folders (view only). Grant Full Disk Access for complete numbers."
@@ -120,7 +120,7 @@ private struct DiskScanning: View {
                 Text("MAPPING \(map.rootChoice == .home ? "HOME FOLDER" : "WHOLE DISK")")
                     .font(.mono(11, .bold)).foregroundStyle(Palette.accent)
                 Spacer()
-                Button("Cancel") { map.cancel() }.buttonStyle(GhostButtonStyle())
+                Button("Cancel") { map.cancel() }.buttonStyle(.bordered)
             }
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(ByteText.string(map.progress.bytes))
@@ -150,7 +150,7 @@ private struct Breadcrumbs: View {
         let _ = map.revision
         HStack(spacing: 6) {
             Button { map.up() } label: { Image(systemName: "chevron.left") }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 .disabled(map.current?.parent == nil)
                 .keyboardShortcut(.upArrow, modifiers: .command)
                 .help("Up one folder (⌘↑)")
@@ -176,7 +176,7 @@ private struct Breadcrumbs: View {
                 Text("· \(c.fileCount.formatted()) files").font(.mono(11)).foregroundStyle(Palette.faint)
             }
             Button { map.start() } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 .help("Rescan")
         }
     }
@@ -362,7 +362,7 @@ private struct DiskSidePanel: View {
                 } label: {
                     Image(systemName: map.expanded.isEmpty ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
                 }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 .help(map.expanded.isEmpty ? "Expand all" : "Collapse all")
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
@@ -426,7 +426,7 @@ private struct DetailCard: View {
                         .help(blocked ?? "Add to the Move to Trash list")
                     }
                 }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 if let why = TrashGuard.reason(n.url), !n.isAggregate, n !== map.root {
                     Label(why, systemImage: "lock.fill").font(.system(size: 10.5)).foregroundStyle(Palette.faint)
                 }

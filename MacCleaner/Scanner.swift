@@ -9,7 +9,7 @@ enum Scanner {
     static let keepByDefault: Set<String> = ["uv"]
     /// ~/Library/Caches entries that are listed elsewhere (or are ours).
     static let claimedLibraryCaches: Set<String> = [
-        "Yarn", "Homebrew", "CocoaPods", "pip", "JetBrains", "com.apple.dt.Xcode", "local.maccleaner",
+        "Yarn", "Homebrew", "CocoaPods", "pip", "JetBrains", "com.apple.dt.Xcode", "io.github.wahdanz.maccleaner", "local.maccleaner",
     ]
     /// App caches that hold something you may want to keep.
     static let reviewAppCaches: [String: String] = [

@@ -163,7 +163,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = local.maccleaner;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.wahdanz.maccleaner;
 				PRODUCT_NAME = "Mac Cleaner";
 				SWIFT_VERSION = 5.0;
 			};
@@ -186,7 +186,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = local.maccleaner;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.wahdanz.maccleaner;
 				PRODUCT_NAME = "Mac Cleaner";
 				SWIFT_VERSION = 5.0;
 			};

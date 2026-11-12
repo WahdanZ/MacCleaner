@@ -415,7 +415,7 @@ final class AppsModel {
         let r = await Task.detached { AppEngine.uninstall(a, picked: picked) }.value
         if r.appRemoved {
             apps.removeAll { $0.id == a.id }
-            HistoryStore.shared.add("\(a.name) Uninstalled", bytes: r.bytes, symbol: "square.grid.2x2")
+            HistoryStore.shared.add("\(a.name) Uninstalled", bytes: r.bytes, symbol: "square.grid.2x2", outcome: .trashed)
         }
         selectedID = visible.first?.id
         message = (r.summary(appName: a.name), !(r.errors.isEmpty && r.appRemoved))
@@ -432,7 +432,7 @@ final class AppsModel {
         let fresh = await Task.detached { AppScanner.info(for: a.url, allIDs: ids) }.value
         if let i = apps.firstIndex(where: { $0.id == a.id }) { apps[i] = fresh }
         let freed = max(0, a.cacheSize - fresh.cacheSize)
-        HistoryStore.shared.add("\(a.name) Cache Cleared", bytes: freed, symbol: "wind")
+        HistoryStore.shared.add("\(a.name) Cache Cleared", bytes: freed, symbol: "wind", outcome: .deleted)
         message = errors.isEmpty
             ? ("Cleared \(ByteText.string(freed)) of \(a.name) caches.", false)
             : ("Cleared \(ByteText.string(freed)). \(errors.count) problem(s): \(errors.prefix(2).joined(separator: "; "))", true)

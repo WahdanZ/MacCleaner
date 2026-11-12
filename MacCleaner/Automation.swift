@@ -117,15 +117,18 @@ final class AutomationModel {
     func runClean(automatic: Bool) async {
         guard !running else { return }
         running = true
+        let before = Scanner.freeBytes()
         let r = await Task.detached(priority: automatic ? .utility : .userInitiated) { AutoClean.run() }.value
+        let measured = max(0, Scanner.freeBytes() - before)
         running = false
         lastRun = Date()
         lastBytes = r.bytes
         UserDefaults.standard.set(lastRun, forKey: AutoKeys.lastRun)
         UserDefaults.standard.set(Int(r.bytes), forKey: AutoKeys.lastBytes)
-        HistoryStore.shared.add(automatic ? "Weekly Safe Clean" : "Safe Clean", bytes: r.bytes, symbol: "calendar.badge.clock")
+        HistoryStore.shared.add(automatic ? "Weekly Safe Clean" : "Safe Clean", bytes: r.bytes, symbol: "calendar.badge.clock",
+                                outcome: .deleted, measuredFreeChange: measured)
         if automatic && r.bytes > 0 {
-            Notifier.post(title: "Weekly clean: \(ByteText.string(r.bytes)) freed",
+            Notifier.post(title: "Weekly clean: \(ByteText.string(r.bytes)) of caches deleted",
                           body: "\(r.count) cache location(s) cleaned. Nothing in your folders was touched.")
         }
         check()
@@ -197,12 +200,6 @@ struct AutomationSettings: View {
                     .font(.system(size: 11)).foregroundStyle(Palette.faint)
             }
             Divider().opacity(0.5)
-            Toggle("Open Mac Cleaner at login (menu bar only, so checks keep running)", isOn: Binding(
-                get: { auto.loginEnabled }, set: { auto.setLogin($0) }))
-            if auto.loginNeedsApproval {
-                Text("Approve it in System Settings › General › Login Items.").font(.system(size: 11)).foregroundStyle(Palette.warn)
-            }
-            Divider().opacity(0.5)
             Toggle("Weekly safe clean", isOn: $weekly)
                 .onChange(of: weekly) { _, on in if on { Notifier.requestPermission() } }
             Text("Recommended caches only (the same ones pre-selected in Junk Files). Never the Trash, Downloads, your folders or anything protected. A notification shows what was freed.")
@@ -211,7 +208,7 @@ struct AutomationSettings: View {
                 Text(lastText).font(.system(size: 12)).foregroundStyle(Palette.dim)
                 Spacer()
                 if auto.running { ProgressView().controlSize(.small) }
-                Button("Run safe clean now") { confirmRun = true }.buttonStyle(GhostButtonStyle()).disabled(auto.running)
+                Button("Run safe clean now") { confirmRun = true }.buttonStyle(.bordered).disabled(auto.running)
             }
         }
         .font(.system(size: 13))

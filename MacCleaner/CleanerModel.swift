@@ -132,7 +132,8 @@ final class CleanerModel {
         refreshDisk()
         result = CleanResult(freed: max(0, freeBytes - before), count: cleaned.count, errors: errors)
         let swept = items.filter { cleaned.contains($0.id) }.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        HistoryStore.shared.add("Junk Files Cleaned", bytes: swept, symbol: "trash")
+        HistoryStore.shared.add("Junk Files Cleaned", bytes: swept, symbol: "trash",
+                                outcome: .deleted, measuredFreeChange: result?.freed)
         phase = .done
     }
 

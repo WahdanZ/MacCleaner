@@ -210,6 +210,28 @@ enum SelfTest {
         check("skips protected caches", AutoClean.select([target("ok", .devCache, cacheItem)]).isEmpty)
         ProtectedPaths.set(savedProtected)
 
+        print("Settings migration (old app ID)")
+        let oldName = "maccleaner.selftest.old", newName = "maccleaner.selftest.new"
+        UserDefaults.standard.setPersistentDomain([ProtectedPaths.key: ["/a/keep", "/b/keep"], "appearance": "dark",
+                                                   "NSWindow Frame x": "1"], forName: oldName)
+        UserDefaults.standard.removePersistentDomain(forName: newName)
+        if let target = UserDefaults(suiteName: newName) {
+            target.set(["/c/mine"], forKey: ProtectedPaths.key)
+            target.set("light", forKey: "appearance")
+            SettingsMigration.migrate(fromDomain: oldName, to: target)
+            check("protected paths are merged, none dropped",
+                  Set(target.stringArray(forKey: ProtectedPaths.key) ?? []) == ["/a/keep", "/b/keep", "/c/mine"])
+            check("settings already set under the new ID win", target.string(forKey: "appearance") == "light")
+            check("system window keys are not copied", target.object(forKey: "NSWindow Frame x") == nil)
+            target.removeObject(forKey: ProtectedPaths.key)
+            check("runs only once", SettingsMigration.migrate(fromDomain: oldName, to: target) == 0
+                  && target.stringArray(forKey: ProtectedPaths.key) == nil)
+        } else {
+            check("test settings domain available", false)
+        }
+        UserDefaults.standard.removePersistentDomain(forName: oldName)
+        UserDefaults.standard.removePersistentDomain(forName: newName)
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

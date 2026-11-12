@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AppsView: View {
     @Environment(AppsModel.self) private var apps
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         switch apps.phase {
@@ -18,7 +19,7 @@ struct AppsView: View {
                 } label: {
                     Label("Scan apps", systemImage: "scope")
                 }
-                .buttonStyle(AccentButtonStyle(large: true))
+                .buttonStyle(.borderedProminent).controlSize(.large)
                 .keyboardShortcut(.defaultAction)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -39,7 +40,7 @@ struct AppsView: View {
         case .done, .working:
             HStack(spacing: 14) {
                 AppList()
-                    .frame(width: 430)
+                    .frame(minWidth: 300, maxWidth: 430)
                     .frame(maxHeight: .infinity)
                     .panel()
                 AppDetail()
@@ -54,6 +55,7 @@ struct AppsView: View {
 
 private struct AppList: View {
     @Environment(AppsModel.self) private var apps
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         @Bindable var apps = apps
@@ -64,7 +66,7 @@ private struct AppList: View {
                     Spacer()
                     Text("caches \(ByteText.string(apps.totalCaches))").font(.mono(10.5)).foregroundStyle(Palette.faint)
                     Button { Task { await apps.scan() } } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(GhostButtonStyle())
+                        .buttonStyle(.bordered)
                         .help("Rescan apps")
                 }
                 HStack(spacing: 6) {
@@ -95,6 +97,7 @@ private struct AppList: View {
 
 private struct AppRow: View {
     @Environment(AppsModel.self) private var apps
+    @Environment(ReviewCenter.self) private var review
     let app: AppInfo
     @State private var hover = false
 
@@ -145,6 +148,7 @@ func lastUsedText(_ d: Date?) -> String {
 
 private struct AppDetail: View {
     @Environment(AppsModel.self) private var apps
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         if let a = apps.selected {
@@ -176,7 +180,7 @@ private struct AppDetail: View {
                     HStack(spacing: 8) {
                         Image(systemName: m.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                             .foregroundStyle(m.isError ? Palette.warn : Palette.accent)
-                        Text(m.text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                        Text(m.text).font(.callout).lineLimit(4).frame(maxWidth: .infinity, alignment: .leading)
                         Spacer()
                         Button { apps.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
                     }
@@ -187,20 +191,20 @@ private struct AppDetail: View {
 
                 HStack(spacing: 8) {
                     Button {
-                        apps.confirmClear = true
+                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { Task { await apps.clearCaches() } }) }
                     } label: {
                         Label(a.cacheSize > 0 ? "Clear cache \(ByteText.string(a.cacheSize))" : "No cache to clear",
                               systemImage: "wind")
                     }
-                    .buttonStyle(AccentButtonStyle())
+                    .buttonStyle(.borderedProminent)
                     .disabled(a.cacheSize == 0 || apps.phase == .working)
 
                     Button {
-                        apps.confirmUninstall = true
+                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { Task { await apps.uninstall() } }) }
                     } label: {
                         Label("Uninstall…", systemImage: "trash")
                     }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
                     .disabled(block != nil || apps.phase == .working)
                     .help(block ?? (running ? "Quits the app, then moves it and the checked leftovers to the Trash"
                                             : "Move the app and the checked leftovers to the Trash"))
@@ -211,14 +215,14 @@ private struct AppDetail: View {
                         } label: {
                             Label(apps.quittingID == a.id ? "Quitting…" : "Quit app", systemImage: "xmark.circle")
                         }
-                        .buttonStyle(GhostButtonStyle())
+                        .buttonStyle(.bordered)
                         .disabled(apps.quittingID != nil)
                         .help("Asks the app to quit, then force-quits after 5 seconds if it doesn't respond")
                     }
                     Button { NSWorkspace.shared.activateFileViewerSelecting([a.url]) } label: {
                         Label("Reveal", systemImage: "magnifyingglass")
                     }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
                     if apps.phase == .working { ProgressView().controlSize(.small) }
                 }
                 if let block {
@@ -286,6 +290,7 @@ private struct StatTile: View {
 
 private struct ItemLine: View {
     @Environment(AppsModel.self) private var apps
+    @Environment(ReviewCenter.self) private var review
     let item: AppLeftover
     let checkable: Bool
 

@@ -1,119 +1,127 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Navigation model
+
+/// Sidebar destinations. Related tools share one destination with a segmented switch in the toolbar
+/// (Projects + SDKs → Developer Tools; Startup Items + Extensions → Startup & Extensions).
 enum SidebarPage: String, CaseIterable, Identifiable {
-    case overview, junk, projects, sdks, large, duplicates, apps, extensions, startup, systemData, storage, shredder
+    case overview, junk, developer, large, duplicates, apps, storage, systemData, startup, shredder
     var id: String { rawValue }
+
+    enum Group: String, CaseIterable, Identifiable {
+        case home = "", cleanUp = "Clean Up", manage = "Manage", utilities = "Utilities"
+        var id: String { rawValue }
+    }
+
+    var group: Group {
+        switch self {
+        case .overview: return .home
+        case .junk, .developer, .large, .duplicates: return .cleanUp
+        case .apps, .storage, .systemData: return .manage
+        case .startup, .shredder: return .utilities
+        }
+    }
 
     var title: String {
         switch self {
         case .overview: return "Overview"
         case .junk: return "Junk Files"
-        case .projects: return "Projects"
-        case .sdks: return "Developer SDKs"
-        case .systemData: return "System Data"
+        case .developer: return "Developer Tools"
         case .large: return "Large & Old Files"
         case .duplicates: return "Duplicates"
-        case .apps: return "Apps"
-        case .extensions: return "Extensions"
-        case .startup: return "Startup Items"
-        case .storage: return "Storage Analysis"
+        case .apps: return "Applications"
+        case .storage: return "Storage Map"
+        case .systemData: return "System Data"
+        case .startup: return "Startup & Extensions"
         case .shredder: return "Shredder"
         }
     }
 
     var symbol: String {
         switch self {
-        case .overview: return "house"
+        case .overview: return "gauge.with.dots.needle.33percent"
         case .junk: return "trash"
-        case .projects: return "hammer"
-        case .sdks: return "shippingbox"
-        case .systemData: return "internaldrive"
-        case .large: return "folder"
+        case .developer: return "hammer"
+        case .large: return "doc.text.magnifyingglass"
         case .duplicates: return "plus.square.on.square"
         case .apps: return "square.grid.2x2"
-        case .extensions: return "puzzlepiece.extension"
-        case .startup: return "power"
         case .storage: return "chart.bar.xaxis"
-        case .shredder: return "printer"
+        case .systemData: return "internaldrive"
+        case .startup: return "power"
+        case .shredder: return "flame"
         }
     }
 
+    /// Short toolbar subtitle.
     var subtitle: String {
         switch self {
-        case .overview: return "Keep your Mac clean, fast, and running at its best."
-        case .junk: return "Developer caches, app caches, logs and temporary files across 340+ locations."
-        case .projects: return "Build files and packages in your code projects: they come back when you build."
-        case .sdks: return "Simulator runtimes, Android SDK parts and Docker data, with what your projects still use."
-        case .systemData: return "Time Machine snapshots, device backups, Mail and Messages: the big parts of System Data."
-        case .large: return "Big files and files you haven't opened in a long time."
-        case .duplicates: return "Identical files, compared by content."
-        case .apps: return "App sizes, caches and complete uninstall with leftovers."
-        case .extensions: return "Plug-ins, preference panes, Quick Look add-ons and drivers."
-        case .startup: return "What starts automatically with your Mac."
-        case .storage: return "See exactly where your space goes, folder by folder."
-        case .shredder: return "Permanently delete files, skipping the Trash."
+        case .overview: return "Storage and recommended cleanup"
+        case .junk: return "Caches, logs and temporary files"
+        case .developer: return "Build files and SDK downloads"
+        case .large: return "Big and forgotten files"
+        case .duplicates: return "Identical files, by content"
+        case .apps: return "Caches and complete uninstall"
+        case .storage: return "Where your space goes"
+        case .systemData: return "Snapshots, backups, Mail, Messages"
+        case .startup: return "What starts with your Mac"
+        case .shredder: return "Delete without the Trash"
         }
     }
 
-    var isTool: Bool { self == .storage || self == .shredder || self == .systemData }
+    /// Pages whose numbers are low without Full Disk Access.
+    var needsFullDiskAccess: Bool { [.junk, .storage, .large, .duplicates, .systemData].contains(self) }
+}
+
+// MARK: - Window
+
+/// Light / Dark / System, applied through AppKit (NSApp.appearance). Changing it this way redraws every
+/// window in place; SwiftUI's preferredColorScheme rebuilt the window and left the sidebar list empty.
+enum AppearanceSetting {
+    @MainActor static func apply(_ value: String) {
+        switch value {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+    }
 }
 
 struct ContentView: View {
     @Environment(CleanerModel.self) private var cleaner
     @Environment(TrashModel.self) private var trash
+    @Environment(ReviewCenter.self) private var review
     @AppStorage("sidebarPage") private var page: SidebarPage = .overview
     @AppStorage("appearance") private var appearance = "system"
-    @State private var showSettings = false
-    @State private var showHelp = false
-    @State private var showIntro = false
     @AppStorage("introSeen") private var introSeen = false
+    @State private var showIntro = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var scheme: ColorScheme? {
-        appearance == "light" ? .light : appearance == "dark" ? .dark : nil
-    }
-
     var body: some View {
-        HStack(spacing: 0) {
-            Sidebar(page: $page)
-                .frame(width: 280)
-            VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .top) {
-                    PageHeader(title: page.title, subtitle: page.subtitle)
-                    Spacer()
-                    Button { showHelp.toggle() } label: { Image(systemName: "questionmark") }
-                        .buttonStyle(CircleIconButtonStyle())
-                        .popover(isPresented: $showHelp, arrowEdge: .bottom) {
-                            HelpView { showHelp = false; showIntro = true }
-                        }
-                        .help("Help")
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                        .buttonStyle(CircleIconButtonStyle())
-                        .help("Settings")
-                }
-                if [.junk, .storage, .large, .duplicates, .systemData].contains(page), !cleaner.fullDiskAccess {
-                    AccessBanner()
-                }
-                content
+        @Bindable var review = review
+        NavigationSplitView {
+            SidebarList(selection: Binding(get: { page }, set: { if let p = $0 { page = p } }))
+                .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 300)
+        } detail: {
+            VStack(alignment: .leading, spacing: Space.m) {
+                if page.needsFullDiskAccess, !cleaner.fullDiskAccess { AccessBanner() }
+                PageContent(page: page)
                     .id(page)
                     .transition(reduceMotion ? .opacity : .asymmetric(
-                        insertion: .opacity.combined(with: .offset(y: 14)).combined(with: .scale(scale: 0.99, anchor: .top)),
+                        insertion: .opacity.combined(with: .offset(y: 10)),
                         removal: .opacity))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .animation(.spring(response: 0.4, dampingFraction: 0.86), value: page)
-            .padding(.horizontal, 34)
-            .padding(.top, 34)
-            .padding(.bottom, 22)
+            .padding(Space.xl)
+            .navigationTitle(page.title)
+            .navigationSubtitle(page.subtitle)
+            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.9), value: page)
         }
-        .background(AppBackground())
-        .foregroundStyle(Palette.fg)
-        .preferredColorScheme(scheme)
-        .modifier(FeatureAlerts())
         .modifier(TrashAlerts())
-        .overlay { CelebrationOverlay() }
-        .sheet(isPresented: $showSettings) { SettingsView() }
+        .onAppear { AppearanceSetting.apply(appearance) }
+        .onChange(of: appearance) { _, v in AppearanceSetting.apply(v) }
+        .overlay(alignment: .bottom) { CompletionToast() }
+        .sheet(item: $review.request) { CleanupReviewSheet(request: $0) }
         .sheet(isPresented: $showIntro) { IntroView() }
         .task {
             if !introSeen {
@@ -121,341 +129,306 @@ struct ContentView: View {
                 showIntro = true
             }
         }
+        .onChange(of: introSeen) { _, seen in if !seen { showIntro = true } }
         .onAppear { cleaner.refreshDisk() }
         .task { await trash.refresh() }
         // Every cleanup is recorded in history; refresh the Trash size after each one.
         .onChange(of: HistoryStore.shared.records.count) { Task { await trash.refresh() } }
-        .onChange(of: page) { Task { await trash.refresh() } }
     }
+}
 
-    @ViewBuilder private var content: some View {
+/// The page for a sidebar destination.
+struct PageContent: View {
+    let page: SidebarPage
+    @Environment(CleanerModel.self) private var cleaner
+
+    var body: some View {
         switch page {
         case .overview:
-            OverviewView(page: $page)
+            OverviewView()
         case .junk:
-            VStack(spacing: 12) {
-                if !cleaner.categories.isEmpty { Legend() }
-                HStack(alignment: .top, spacing: 16) {
-                    Stage().frame(maxWidth: .infinity, maxHeight: .infinity).panel()
-                    Inspector().frame(width: 370).frame(maxHeight: .infinity).panel()
-                }
-                BottomBar(tab: .caches)
-            }
-        case .projects:
-            ProjectsView()
-        case .sdks:
-            DevSDKView()
-        case .systemData:
-            SystemDataView()
+            JunkFilesView()
+        case .developer:
+            DeveloperToolsView()
         case .large:
             LargeFilesView()
         case .duplicates:
-            VStack(spacing: 12) {
+            VStack(spacing: Space.m) {
                 DuplicatesView().frame(maxWidth: .infinity, maxHeight: .infinity).panel()
                 BottomBar(tab: .duplicates)
             }
         case .apps:
             AppsView()
-        case .extensions:
-            ExtensionsView()
-        case .startup:
-            StartupView()
         case .storage:
-            VStack(spacing: 12) {
+            VStack(spacing: Space.m) {
                 DiskMapView()
                 BottomBar(tab: .disk)
             }
+        case .systemData:
+            SystemDataView()
+        case .startup:
+            StartupAndExtensionsView()
         case .shredder:
             ShredderView()
         }
     }
 }
 
-// MARK: - Sidebar
-
-private struct Sidebar: View {
+/// Junk Files: space map and item list side by side; the list can be hidden from the toolbar.
+struct JunkFilesView: View {
     @Environment(CleanerModel.self) private var cleaner
-    @Binding var page: SidebarPage
-    @Namespace private var pill
+    @AppStorage("junkInspector") private var showList = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable().frame(width: 56, height: 56)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Mac Cleaner").font(.system(size: 20, weight: .bold))
-                    Text("Clean · Optimize · Protect").font(.system(size: 13)).foregroundStyle(Palette.dim)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 22)
-
-            ForEach(SidebarPage.allCases.filter { !$0.isTool }) { p in
-                SidebarRow(page: p, selected: page == p, badge: badge(p), pill: pill) { page = p }
-            }
-
-            Rectangle().fill(Palette.stroke).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 12)
-            Text("Tools").font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.dim)
-                .padding(.horizontal, 12).padding(.bottom, 4)
-            ForEach(SidebarPage.allCases.filter(\.isTool)) { p in
-                SidebarRow(page: p, selected: page == p, badge: nil, pill: pill) { page = p }
-            }
-
-            Spacer()
-            DiskCard()
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 50)
-        .padding(.bottom, 16)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(.ultraThinMaterial)
-        .background(Palette.sidebar)
-        .overlay(alignment: .trailing) { Rectangle().fill(Palette.stroke).frame(width: 1) }
-    }
-
-    private func badge(_ p: SidebarPage) -> String? {
-        guard p == .junk, cleaner.hasScanned, cleaner.recommendedBytes > 0 else { return nil }
-        return ByteText.string(cleaner.recommendedBytes)
-    }
-}
-
-private struct SidebarRow: View {
-    let page: SidebarPage
-    let selected: Bool
-    let badge: String?
-    let pill: Namespace.ID
-    let action: () -> Void
-    @State private var hover = false
-    @State private var bounce = 0
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: page.symbol)
-                    .font(.system(size: 18, weight: .regular))
-                    .frame(width: 26)
-                    .foregroundStyle(selected ? Palette.accent : Palette.fg.opacity(0.75))
-                    .symbolEffect(.bounce, value: bounce)
-                Text(page.title).font(.system(size: 16))
-                Spacer()
-                if let badge {
-                    Text(badge).font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Palette.fg.opacity(0.07), in: Capsule())
-                        .foregroundStyle(Palette.dim)
-                }
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background {
-                if selected {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.selection)
-                        .matchedGeometryEffect(id: "pill", in: pill)
-                } else if hover {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.fg.opacity(0.05))
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hover = $0 }
-        .simultaneousGesture(TapGesture().onEnded { bounce += 1 })
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: selected)
-    }
-}
-
-private struct DiskCard: View {
-    @Environment(CleanerModel.self) private var cleaner
-    @Environment(TrashModel.self) private var trash
-
-    var body: some View {
-        let used = cleaner.totalBytes - cleaner.freeBytes
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: "/")).resizable().frame(width: 38, height: 38)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Macintosh HD").font(.system(size: 14, weight: .semibold))
-                    Text("\(ByteText.string(used)) of \(ByteText.string(cleaner.totalBytes)) used")
-                        .font(.system(size: 12)).foregroundStyle(Palette.dim)
-                }
-            }
-            HStack(spacing: 10) {
-                GeometryReader { g in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Palette.fg.opacity(0.1))
-                        Capsule().fill(LinearGradient(colors: [Palette.accent2, barColor], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: g.size.width * (filled ? cleaner.usedFraction : 0))
-                            .animation(.spring(response: 1.0, dampingFraction: 0.85), value: filled)
-                            .animation(.spring(response: 0.6), value: cleaner.usedFraction)
+        VStack(spacing: Space.m) {
+            if !cleaner.categories.isEmpty { Legend() }
+            // The list takes about a third of the width (300–440 pt), so small windows keep a usable map.
+            GeometryReader { g in
+                HStack(spacing: Space.m) {
+                    Stage().frame(maxWidth: .infinity, maxHeight: .infinity).panel()
+                    if showList {
+                        Inspector()
+                            .frame(width: min(440, max(300, g.size.width * 0.34)))
+                            .frame(maxHeight: .infinity)
+                            .panel()
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .frame(height: 7)
-                Text("\(Int((cleaner.usedFraction * 100).rounded()))%").font(.system(size: 13, weight: .medium)).monospacedDigit()
-                    .contentTransition(.numericText(value: cleaner.usedFraction))
-                    .animation(.snappy, value: cleaner.usedFraction)
             }
+            .animation(Motion.standard(reduceMotion), value: showList)
+            BottomBar(tab: .caches)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showList.toggle() } label: { Label("Item List", systemImage: "sidebar.trailing") }
+                    .help(showList ? "Hide the item list" : "Show the item list")
+            }
+        }
+    }
+}
+
+/// Projects and SDKs: two tools for one job (developer storage), switched in the toolbar.
+struct DeveloperToolsView: View {
+    enum Tab: String, CaseIterable, Identifiable { case projects = "Projects", sdks = "SDKs"; var id: String { rawValue } }
+    @AppStorage("developerTab") private var tab: Tab = .projects
+
+    var body: some View {
+        Group {
+            switch tab {
+            case .projects: ProjectsView()
+            case .sdks: DevSDKView()
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Developer Tools", selection: $tab) {
+                    ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .help("Build files in your projects, or SDKs and simulators")
+            }
+        }
+    }
+}
+
+struct StartupAndExtensionsView: View {
+    enum Tab: String, CaseIterable, Identifiable { case startup = "Startup Items", extensions = "Extensions"; var id: String { rawValue } }
+    @AppStorage("startupTab") private var tab: Tab = .startup
+
+    var body: some View {
+        Group {
+            switch tab {
+            case .startup: StartupView()
+            case .extensions: ExtensionsView()
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Startup & Extensions", selection: $tab) {
+                    ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+        }
+    }
+}
+
+// MARK: - Sidebar
+
+private struct SidebarList: View {
+    @Binding var selection: SidebarPage?
+    @Environment(CleanerModel.self) private var cleaner
+
+    var body: some View {
+        List(selection: $selection) {
+            ForEach(SidebarPage.Group.allCases) { g in
+                let pages = SidebarPage.allCases.filter { $0.group == g }
+                if g == .home {
+                    ForEach(pages) { row($0) }
+                } else {
+                    Section(g.rawValue) { ForEach(pages) { row($0) } }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) { SidebarStorage().padding(Space.m) }
+    }
+
+    private func row(_ p: SidebarPage) -> some View {
+        Label(p.title, systemImage: p.symbol)
+            .badge(badge(p))
+            .tag(p)
+    }
+
+    private func badge(_ p: SidebarPage) -> Text? {
+        guard p == .junk, cleaner.hasScanned, cleaner.recommendedBytes > 0 else { return nil }
+        return Text(ByteText.string(cleaner.recommendedBytes))
+    }
+}
+
+/// Startup disk usage and Trash size, pinned to the bottom of the sidebar.
+private struct SidebarStorage: View {
+    @Environment(CleanerModel.self) private var cleaner
+    @Environment(TrashModel.self) private var trash
+    @Environment(AutomationModel.self) private var auto
+
+    var body: some View {
+        let used = max(0, cleaner.totalBytes - cleaner.freeBytes)
+        VStack(alignment: .leading, spacing: Space.s) {
+            HStack(spacing: Space.s) {
+                Image(systemName: "internaldrive").foregroundStyle(Palette.dim)
+                Text("Macintosh HD").font(.callout.weight(.medium))
+                Spacer()
+            }
+            ProgressView(value: Double(used), total: Double(max(cleaner.totalBytes, 1)))
+                .progressViewStyle(.linear)
+                .tint(levelColor)
+            Text("\(ByteText.string(cleaner.freeBytes)) available of \(ByteText.string(cleaner.totalBytes))")
+                .font(.caption).foregroundStyle(Palette.dim).monospacedDigit()
             if trash.displayBytes > 0 {
-                HStack(spacing: 6) {
-                    Image(systemName: "trash").font(.system(size: 11)).foregroundStyle(Palette.dim)
+                HStack(spacing: Space.xs) {
+                    Image(systemName: "trash").font(.caption).foregroundStyle(Palette.dim)
                     Text("Trash \(trash.isExact ? "" : "≥ ")\(ByteText.string(trash.displayBytes))")
-                        .font(.system(size: 12)).foregroundStyle(Palette.dim)
+                        .font(.caption).foregroundStyle(Palette.dim)
                     Spacer()
-                    Button("Empty") { trash.confirmingEmpty = true }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.accent)
+                    Button("Empty…") { trash.confirmingEmpty = true }
+                        .buttonStyle(.link).font(.caption)
                         .disabled(trash.busy)
                 }
             }
         }
-        .padding(14)
-        .panel(radius: 18)
-        .onAppear { cleaner.refreshDisk(); filled = true }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Startup disk: \(ByteText.string(cleaner.freeBytes)) available of \(ByteText.string(cleaner.totalBytes))")
+        .onAppear { cleaner.refreshDisk() }
     }
 
-    @State private var filled = false
-    @Environment(AutomationModel.self) private var auto
-
-    private var barColor: Color {
+    private var levelColor: Color {
         switch auto.level { case .ok: Palette.accent; case .low: Palette.warn; case .critical: Palette.danger }
     }
 }
 
-// MARK: - Settings & help
+// MARK: - Settings window (⌘,)
 
 struct SettingsView: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(CleanerModel.self) private var cleaner
+    var body: some View {
+        TabView {
+            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
+            Form { Section { ProtectedList() } header: { Text("Protected folders and files") } }
+                .formStyle(.grouped)
+                .tabItem { Label("Protection", systemImage: "lock.shield") }
+            Form { Section { AutomationSettings() } header: { Text("Low disk and weekly clean") } }
+                .formStyle(.grouped)
+                .tabItem { Label("Automation", systemImage: "clock.arrow.2.circlepath") }
+            PermissionsSettings().tabItem { Label("Permissions", systemImage: "hand.raised") }
+            Form {
+                Section("AI assistants (MCP)") { IntegrationsView(embedded: true) }
+                Section("Command line") { CLISettingsRow() }
+            }
+            .formStyle(.grouped)
+            .tabItem { Label("Integrations", systemImage: "terminal") }
+        }
+        .frame(width: 640, height: 520)
+    }
+}
+
+private struct GeneralSettings: View {
     @AppStorage("appearance") private var appearance = "system"
-    @State private var showAI = false
+    @AppStorage("introSeen") private var introSeen = true
+    @Environment(AutomationModel.self) private var auto
+    @State private var confirmClear = false
 
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text("Settings").font(.system(size: 22, weight: .bold))
-                Spacer()
-                Button("Done") { dismiss() }.buttonStyle(AccentButtonStyle()).keyboardShortcut(.defaultAction)
-            }
-
-            section("Appearance") {
-                Picker("", selection: $appearance) {
-                    Label("System", systemImage: "circle.lefthalf.filled").tag("system")
-                    Label("Light", systemImage: "sun.max").tag("light")
-                    Label("Dark", systemImage: "moon").tag("dark")
+        Form {
+            Section {
+                Picker("Appearance", selection: $appearance) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
                 }
-                .pickerStyle(.segmented).labelsHidden()
+                Toggle("Open at login (menu bar only, so disk checks keep running)", isOn: Binding(
+                    get: { auto.loginEnabled }, set: { auto.setLogin($0) }))
+                if auto.loginNeedsApproval {
+                    Text("Approve it in System Settings › General › Login Items.").font(.caption).foregroundStyle(Palette.warn)
+                }
             }
+            Section("History") {
+                LabeledContent("Deleted permanently", value: ByteText.string(HistoryStore.shared.totalDeleted))
+                LabeledContent("Moved to Trash", value: ByteText.string(HistoryStore.shared.totalTrashed))
+                if HistoryStore.shared.totalUnclassified > 0 {
+                    LabeledContent("Earlier cleanups (not classified)", value: ByteText.string(HistoryStore.shared.totalUnclassified))
+                }
+                LabeledContent("Cleanups", value: "\(HistoryStore.shared.records.count)")
+                Button("Clear History…", role: .destructive) { confirmClear = true }
+                    .disabled(HistoryStore.shared.records.isEmpty)
+                    .confirmationDialog("Clear the cleanup history?", isPresented: $confirmClear) {
+                        Button("Clear History", role: .destructive) { HistoryStore.shared.clear() }
+                    } message: {
+                        Text("This removes the list of past cleanups. It doesn't change any files.")
+                    }
+            }
+            Section {
+                Button("Show the Welcome Tour") { introSeen = false }
+                LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
 
-            section("Full Disk Access") {
-                HStack {
-                    Label(cleaner.fullDiskAccess ? "Granted: scans see everything" : "Not granted: some folders can't be measured",
-                          systemImage: cleaner.fullDiskAccess ? "checkmark.shield.fill" : "exclamationmark.shield")
+private struct PermissionsSettings: View {
+    @Environment(CleanerModel.self) private var cleaner
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Full Disk Access") {
+                    Label(cleaner.fullDiskAccess ? "Allowed" : "Not allowed",
+                          systemImage: cleaner.fullDiskAccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(cleaner.fullDiskAccess ? Palette.success : Palette.warn)
-                        .font(.system(size: 13))
-                    Spacer()
-                    Button("Open settings") {
+                }
+                Text("Without it, macOS hides the Trash, Mail, Messages and other apps' data, so totals come out low. Nothing is cleaned without your review either way.")
+                    .font(.callout).foregroundStyle(Palette.dim)
+                HStack {
+                    Button("Open Privacy & Security…") {
                         if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
                             NSWorkspace.shared.open(u)
                         }
                     }
-                    .buttonStyle(GhostButtonStyle())
-                    Button("Check") { cleaner.fullDiskAccess = Scanner.hasFullDiskAccess() }.buttonStyle(GhostButtonStyle())
+                    Button("Check Again") { cleaner.fullDiskAccess = Scanner.hasFullDiskAccess() }
                 }
             }
-
-            section("Automation") {
-                AutomationSettings()
+            Section("Also asked when needed") {
+                LabeledContent("Finder automation", value: "to measure and empty the Trash")
+                LabeledContent("Administrator password", value: "for items outside your home folder")
+                LabeledContent("Notifications", value: "for low-disk alerts")
             }
-
-            section("Protected") {
-                ProtectedList()
-            }
-
-            section("Command line") {
-                CLISettingsRow()
-            }
-
-            section("AI assistants") {
-                HStack {
-                    Text("Let Claude, Cursor, Codex and other AI apps use Mac Cleaner (MCP server + skill).")
-                        .font(.system(size: 13)).foregroundStyle(Palette.dim)
-                    Spacer()
-                    Button { showAI = true } label: { Label("Connect AI…", systemImage: "sparkles") }
-                        .buttonStyle(GhostButtonStyle())
-                }
-            }
-
-            section("History") {
-                HStack {
-                    Text("\(HistoryStore.shared.records.count) cleanups · \(ByteText.string(HistoryStore.shared.totalFreed)) freed in total")
-                        .font(.system(size: 13)).foregroundStyle(Palette.dim)
-                    Spacer()
-                    Button("Clear history") { HistoryStore.shared.clear() }.buttonStyle(GhostButtonStyle())
-                }
-            }
-
-            Text("Mac Cleaner \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · Caches are deleted permanently; everything else goes to the Trash.")
-                .font(.system(size: 11)).foregroundStyle(Palette.faint)
         }
-        .padding(26)
-        }
-        .scrollIndicators(.never)
-        .frame(width: 640, height: 760)
-        .background(AppBackground())
-        .sheet(isPresented: $showAI) { IntegrationsView() }
-    }
-
-    private func section<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.faint)
-            content()
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .panel(radius: 14)
-        }
+        .formStyle(.grouped)
     }
 }
-
-private struct HelpView: View {
-    var onTour: () -> Void = {}
-    private let items: [(String, String, String)] = [
-        ("house", "Overview", "Storage at a glance. Scan for Junk, review the recommendations, then Clean."),
-        ("trash", "Junk Files", "Every cache location in detail, with a space map. Caches are deleted permanently and rebuild."),
-        ("hammer", "Projects", "node_modules, build, .dart_tool, Pods… in your code projects. Regenerated by your build tools."),
-        ("shippingbox", "Developer SDKs", "Simulator runtimes, Android SDK parts and Docker data. In-use items are flagged."),
-        ("folder", "Large & Old Files", "Big and forgotten files in your home folder → Trash."),
-        ("plus.square.on.square", "Duplicates", "Identical files by content; one copy always stays."),
-        ("square.grid.2x2", "Apps", "Clear an app's cache, or uninstall it with all leftovers."),
-        ("puzzlepiece.extension", "Extensions", "Plug-ins, panes and drivers from other developers."),
-        ("power", "Startup Items", "Launch agents and daemons: stop, start or remove."),
-        ("internaldrive", "System Data", "Snapshots, iPhone backups, Mail and Messages attachments."),
-        ("chart.bar.xaxis", "Storage Analysis", "Browse every folder by size."),
-        ("printer", "Shredder", "Delete files permanently, skipping the Trash."),
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("How Mac Cleaner works").font(.system(size: 15, weight: .bold))
-            ForEach(items, id: \.1) { i in
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: i.0).frame(width: 20).foregroundStyle(Palette.accent)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(i.1).font(.system(size: 12.5, weight: .semibold))
-                        Text(i.2).font(.system(size: 11.5)).foregroundStyle(Palette.dim)
-                    }
-                }
-            }
-            Text("Nothing is removed without a confirmation that lists every item.")
-                .font(.system(size: 11)).foregroundStyle(Palette.faint).padding(.top, 4)
-            Button(action: onTour) { Label("Take the tour", systemImage: "play.circle") }
-                .buttonStyle(AccentButtonStyle())
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 4)
-        }
-        .padding(18)
-        .frame(width: 360)
-    }
-}
-
 
 /// Settings › Protected: folders and files no feature (or AI tool) may clean, trash or shred.
 struct ProtectedList: View {
@@ -498,7 +471,7 @@ struct ProtectedList: View {
                 panel.prompt = "Protect"
                 if panel.runModal() == .OK { ProtectedPaths.add(panel.urls); paths = ProtectedPaths.all }
             } label: { Label("Add folder or file…", systemImage: "lock.badge.plus") }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
         }
         .onAppear { paths = ProtectedPaths.all }
     }
@@ -526,12 +499,12 @@ struct CLISettingsRow: View {
                         NSPasteboard.general.setString("mac-cleaner help", forType: .string)
                         message = "Copied “mac-cleaner help”. Paste it in Terminal."
                     }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
                     Button("Remove") { CLIInstaller.uninstall(); installed = CLIInstaller.installedAt; message = nil }
-                        .buttonStyle(GhostButtonStyle())
+                        .buttonStyle(.bordered)
                 } else {
                     Button { install() } label: { Label("Install command", systemImage: "terminal") }
-                        .buttonStyle(GhostButtonStyle())
+                        .buttonStyle(.bordered)
                 }
             }
             if let message { Text(message).font(.system(size: 11)).foregroundStyle(Palette.dim).textSelection(.enabled) }

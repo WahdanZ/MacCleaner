@@ -276,6 +276,7 @@ final class ProjectsModel {
         let items = selectedPairs
         guard !items.isEmpty else { return }
         phase = .cleaning
+        let freeBefore = Scanner.freeBytes()
         let r = await Task.detached(priority: .userInitiated) {
             ProjectEngine.clean(items) { p in Task { @MainActor [weak self] in self?.current = p } }
         }.value
@@ -283,10 +284,11 @@ final class ProjectsModel {
         for i in projects.indices { projects[i].artifacts.removeAll { gone.contains($0.id) } }
         projects.removeAll { $0.artifacts.isEmpty }
         selected.subtract(gone)
-        HistoryStore.shared.add("Project Build Files Cleaned", bytes: r.bytes, symbol: "hammer")
+        HistoryStore.shared.add("Project Build Files Cleaned", bytes: r.bytes, symbol: "hammer",
+                                outcome: .deleted, measuredFreeChange: max(0, Scanner.freeBytes() - freeBefore))
         message = r.errors.isEmpty
-            ? ("Freed \(ByteText.string(r.bytes)) from \(Set(items.map(\.1.id)).count) project(s). Rebuild or reinstall packages when you open them again.", false)
-            : ("Freed \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
+            ? ("Deleted \(ByteText.string(r.bytes)) of build files from \(Set(items.map(\.1.id)).count) project(s). Rebuild or reinstall packages when you open them again.", false)
+            : ("Deleted \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
         phase = .done
     }
 }

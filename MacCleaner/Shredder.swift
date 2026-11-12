@@ -78,7 +78,7 @@ final class ShredderModel {
                 items.removeAll { $0.id == i.id }
             }
         }
-        HistoryStore.shared.add("Files Shredded", bytes: bytes, symbol: "printer")
+        HistoryStore.shared.add("Files Shredded", bytes: bytes, symbol: "printer", outcome: .deleted)
         message = errors.isEmpty ? ("Shredded \(ByteText.string(bytes)).", false)
                                  : ("Shredded \(ByteText.string(bytes)). \(errors.count) problem(s): \(errors.prefix(2).joined(separator: "; "))", true)
         working = false
@@ -87,6 +87,7 @@ final class ShredderModel {
 
 struct ShredderView: View {
     @Environment(ShredderModel.self) private var m
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         @Bindable var m = m
@@ -100,7 +101,7 @@ struct ShredderView: View {
                         Text("Shredded items skip the Trash and can't be put back.")
                             .font(.system(size: 13)).foregroundStyle(Palette.dim)
                         Button { m.choose() } label: { Label("Choose files…", systemImage: "plus") }
-                            .buttonStyle(AccentButtonStyle())
+                            .buttonStyle(.borderedProminent)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -135,35 +136,24 @@ struct ShredderView: View {
                     .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
                     .opacity(m.dropTargeted ? 1 : 0)
             )
-            .onDrop(of: [.fileURL], isTargeted: $m.dropTargeted) { providers in
-                for p in providers {
-                    _ = p.loadObject(ofClass: URL.self) { url, _ in
-                        if let url { Task { @MainActor in m.add([url]) } }
-                    }
-                }
-                return true
-            }
+            .dropDestination(for: URL.self) { urls, _ in
+                m.add(urls)
+                return !urls.isEmpty
+            } isTargeted: { m.dropTargeted = $0 }
 
             HStack {
-                Text("On SSDs, macOS may keep old copies of blocks; overwriting reduces but can't guarantee recovery is impossible. FileVault encryption is the real protection.")
-                    .font(.system(size: 11)).foregroundStyle(Palette.faint).fixedSize(horizontal: false, vertical: true)
-                Spacer()
+                Text("On SSDs, macOS may keep old copies of blocks, so overwriting can't guarantee recovery is impossible. FileVault encryption is the real protection.")
+                    .font(.caption).foregroundStyle(Palette.dim).lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if !m.items.isEmpty {
-                    Button("Add more…") { m.choose() }.buttonStyle(GhostButtonStyle())
+                    Button("Add more…") { m.choose() }.buttonStyle(.bordered)
                 }
-                Button { m.confirming = true } label: {
+                Button { review.present(ReviewBuild.shred(m.items) { Task { await m.shred() } }) } label: {
                     Label(m.ready.isEmpty ? "Shred" : "Shred \(ByteText.string(m.total))", systemImage: "flame")
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .disabled(m.ready.isEmpty || m.working)
             }
-        }
-        .alert("Shred \(m.ready.count) item(s) permanently?", isPresented: $m.confirming) {
-            Button("Shred", role: .destructive) { Task { await m.shred() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(m.ready.prefix(12).map { "• \(Scanner.tilde($0.url)) — \(ByteText.string($0.size))" }.joined(separator: "\n")
-                 + "\n\nThis skips the Trash and cannot be undone.")
         }
     }
 }

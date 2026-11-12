@@ -1,4 +1,5 @@
 import AppKit
+import Charts
 import Observation
 import SwiftUI
 
@@ -102,7 +103,7 @@ final class OverviewModel {
             let u = f.url
             if await Task.detached(operation: { AppEngine.trash(u, size: f.size, source: "Old Downloads") }).value == nil { bytes += f.size }
         }
-        HistoryStore.shared.add("Old Downloads Removed", bytes: bytes, symbol: "arrow.down.circle")
+        HistoryStore.shared.add("Old Downloads Moved to Trash", bytes: bytes, symbol: "arrow.down.circle", outcome: .trashed)
         oldDownloads = []
         downloadsSelected = false
         return bytes
@@ -157,194 +158,221 @@ enum RecGroup: String, CaseIterable, Identifiable {
 
 // MARK: - View
 
+/// Dashboard: storage donut + scan hero on top; recommended cleanup beside quick tools, Trash and
+/// recent cleanups below. Two columns when there's room, one column in narrow windows.
 struct OverviewView: View {
-    @Environment(CleanerModel.self) private var cleaner
     @Environment(OverviewModel.self) private var ov
-    @Binding var page: SidebarPage
     @State private var showHistory = false
 
     var body: some View {
-        @Bindable var ov = ov
-        ScrollView {
-            VStack(spacing: 18) {
-                StorageCard()
-                HStack(alignment: .top, spacing: 18) {
-                    RecommendedCard()
-                    VStack(spacing: 18) {
-                        QuickTools(page: $page)
-                        TrashCard()
-                        RecentCleanups(showAll: $showHistory)
+        GeometryReader { g in
+            let wide = g.size.width >= 860
+            ScrollView {
+                VStack(spacing: Space.l) {
+                    if wide {
+                        HStack(alignment: .top, spacing: Space.l) {
+                            StorageCard().frame(maxWidth: .infinity).appearIn(0)
+                            ScanHero().frame(width: min(400, g.size.width * 0.38)).appearIn(1)
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                        HStack(alignment: .top, spacing: Space.l) {
+                            RecommendedCard().frame(maxWidth: .infinity).appearIn(2)
+                            VStack(spacing: Space.l) {
+                                QuickTools().appearIn(3)
+                                TrashCard().appearIn(4)
+                                RecentCleanups(showAll: $showHistory).appearIn(5)
+                            }
+                            .frame(width: min(400, g.size.width * 0.38))
+                        }
+                    } else {
+                        StorageCard().appearIn(0)
+                        ScanHero().appearIn(1)
+                        RecommendedCard().appearIn(2)
+                        QuickTools().appearIn(3)
+                        TrashCard().appearIn(4)
+                        RecentCleanups(showAll: $showHistory).appearIn(5)
                     }
-                    .frame(width: 520)
                 }
+                .padding(.bottom, Space.l)
             }
-            .padding(.bottom, 8)
+            .scrollIndicators(.automatic)
         }
-        .scrollIndicators(.never)
         .task {
             if ov.breakdown == nil || Date().timeIntervalSince(ov.breakdown!.date) > 3600 { await ov.measure() }
         }
         .sheet(isPresented: $showHistory) { HistorySheet() }
-        .alert("Clean \(ByteText.string(cleaner.chosenBytes + (ov.downloadsSelected ? ov.oldDownloadsBytes : 0)))?",
-               isPresented: $ov.confirming) {
-            Button("Clean", role: .destructive) {
-                Task {
-                    ov.cleaning = true
-                    if !cleaner.chosen.isEmpty { await cleaner.clean() }
-                    if ov.downloadsSelected { _ = await ov.trashDownloads() }
-                    ov.cleaning = false
-                    await ov.measure()
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(cleanSummary)
-        }
-    }
-
-    private var cleanSummary: String {
-        var lines: [String] = []
-        for g in RecGroup.allCases where g != .downloads {
-            let sel = cleaner.targets.filter { g.categories.contains($0.category) && $0.selected }
-            if !sel.isEmpty { lines.append("• \(g.title): \(sel.count) item(s), \(ByteText.string(sel.reduce(0) { $0 + $1.sizeBytes }))") }
-        }
-        let other = cleaner.chosen.filter { c in !RecGroup.allCases.contains { $0.categories.contains(c.category) } }
-        if !other.isEmpty { lines.append("• Other selected: \(other.count) item(s)") }
-        if ov.downloadsSelected {
-            lines.append("• Old downloads → Trash: \(ov.oldDownloads.count) item(s), \(ByteText.string(ov.oldDownloadsBytes))")
-            lines += ov.oldDownloads.prefix(6).map { "    \($0.url.lastPathComponent) — \(ByteText.string($0.size))" }
-        }
-        return lines.joined(separator: "\n")
-            + "\n\nCaches and logs are deleted permanently (they rebuild). Downloads go to the Trash."
     }
 }
 
-// MARK: Storage
+/// Card title row used across the dashboard.
+private struct CardHeader<Trailing: View>: View {
+    let title: String
+    @ViewBuilder var trailing: () -> Trailing
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.title3.weight(.semibold))
+            Spacer()
+            trailing()
+        }
+    }
+}
+
+// MARK: Storage donut
 
 private struct StorageCard: View {
     @Environment(CleanerModel.self) private var cleaner
     @Environment(OverviewModel.self) private var ov
+    @Environment(\.accessibilityReduceMotion) private var reduce
+    /// 0 → 1 when the card appears: the ring sweeps around once.
+    @State private var sweep: Double = 0
+
+    struct Slice: Identifiable { let id: String; let color: Color; let bytes: Int64 }
+
+    /// Slices scaled by the sweep, plus an invisible remainder so the drawn part grows clockwise.
+    private var drawn: [(Slice, Double)] {
+        let all = slices.map { ($0, Double(max($0.bytes, 0))) }
+        let total = max(all.reduce(0) { $0 + $1.1 }, 1)
+        return all.map { ($0.0, $0.1 * sweep) } + [(Slice(id: "_rest", color: .clear, bytes: 0), total * (1 - sweep))]
+    }
+
+    private var slices: [Slice] {
+        if let b = ov.breakdown {
+            return [Slice(id: "Apps", color: Palette.apps, bytes: b.apps),
+                    Slice(id: "Documents & Media", color: Palette.documents, bytes: b.documents),
+                    Slice(id: "Library", color: Palette.library, bytes: b.library),
+                    Slice(id: "macOS & Other", color: Palette.other, bytes: b.other),
+                    Slice(id: "Available", color: Palette.available, bytes: b.available)]
+        }
+        return [Slice(id: "Used", color: Palette.apps, bytes: max(0, cleaner.totalBytes - cleaner.freeBytes)),
+                Slice(id: "Available", color: Palette.available, bytes: cleaner.freeBytes)]
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 36) {
-                Donut()
-                    .frame(width: 210, height: 210)
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Storage Usage").font(.system(size: 15)).foregroundStyle(Palette.dim)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(ByteText.string(usedBytes)).font(.system(size: 26, weight: .bold))
-                        Text("Used").font(.system(size: 17)).foregroundStyle(Palette.dim)
-                    }
-                    .padding(.bottom, 4)
-                    ForEach(rows, id: \.0) { r in
-                        HStack {
-                            Circle().fill(r.1).frame(width: 11, height: 11)
-                            Text(r.0).font(.system(size: 15))
-                            Spacer(minLength: 24)
-                            Text(r.2).font(.system(size: 15)).foregroundStyle(Palette.dim).monospacedDigit()
-                        }
-                        .frame(width: 250)
-                    }
-                    if ov.measuring {
-                        Label("Measuring…", systemImage: "hourglass").font(.system(size: 11)).foregroundStyle(Palette.faint)
-                    }
+        let used = max(0, cleaner.totalBytes - cleaner.freeBytes)
+        HStack(alignment: .center, spacing: Space.xxl) {
+            Chart(drawn, id: \.0.id) { s, value in
+                SectorMark(angle: .value("Size", value),
+                           innerRadius: .ratio(0.66), angularInset: s.id == "_rest" ? 0 : 1.5)
+                    .cornerRadius(4)
+                    .foregroundStyle(s.color)
+            }
+            .chartLegend(.hidden)
+            .overlay {
+                VStack(spacing: Space.xxs) {
+                    Text(ByteText.string(cleaner.totalBytes)).font(.title2.weight(.semibold)).monospacedDigit()
+                        .contentTransition(.numericText())
+                    Text("Total Storage").font(.caption).foregroundStyle(Palette.dim)
                 }
             }
-            .padding(28)
+            .frame(width: 190, height: 190)
+            .onAppear {
+                if reduce { sweep = 1 } else { withAnimation(.easeOut(duration: 0.9).delay(0.1)) { sweep = 1 } }
+            }
+            .animation(Motion.standard(reduce), value: ov.breakdown?.used)
+            .accessibilityElement()
+            .accessibilityLabel("Storage")
+            .accessibilityValue(slices.map { "\($0.id) \(ByteText.string($0.bytes))" }.joined(separator: ", "))
 
-            Rectangle().fill(Palette.stroke).frame(width: 1).padding(.vertical, 28)
-
-            ScanHero()
-                .padding(32)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: Space.s) {
+                CardHeader(title: "Storage") {
+                    if ov.measuring {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button { Task { cleaner.refreshDisk(); await ov.measure() } } label: {
+                            Label("Measure Again", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless).labelStyle(.iconOnly).help("Measure storage again")
+                    }
+                }
+                HStack(alignment: .firstTextBaseline, spacing: Space.s) {
+                    Text(ByteText.string(used)).font(.largeTitle.weight(.semibold)).monospacedDigit()
+                        .contentTransition(.numericText(value: Double(used)))
+                        .animation(Motion.standard(reduce), value: used)
+                    Text("used").font(.title3).foregroundStyle(Palette.dim)
+                }
+                .padding(.bottom, Space.xs)
+                ForEach(slices) { s in
+                    HStack(spacing: Space.s) {
+                        Circle().fill(s.color).frame(width: 9, height: 9)
+                        Text(s.id).font(.callout)
+                        Spacer(minLength: Space.m)
+                        Text(ByteText.string(s.bytes)).font(.callout).foregroundStyle(Palette.dim).monospacedDigit()
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                if ov.breakdown == nil {
+                    Text(ov.measuring ? "Measuring folders…" : "Measuring apps, documents and Library takes a moment.")
+                        .font(.caption).foregroundStyle(Palette.faint)
+                }
+            }
         }
-        .panel(radius: 24)
-    }
-
-    private var usedBytes: Int64 { ov.breakdown?.used ?? (Scanner.totalBytes() - Scanner.freeBytes()) }
-
-    private var rows: [(String, Color, String)] {
-        guard let b = ov.breakdown else {
-            return [("Used", Palette.apps, ByteText.string(usedBytes)),
-                    ("Available", Palette.available, ByteText.string(Scanner.freeBytes()))]
-        }
-        return [("Apps", Palette.apps, ByteText.string(b.apps)),
-                ("Documents", Palette.documents, ByteText.string(b.documents)),
-                ("Library", Palette.library, ByteText.string(b.library)),
-                ("System & Other", Palette.other, ByteText.string(b.other)),
-                ("Available", Palette.available, ByteText.string(b.available))]
+        .padding(Space.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .panel()
     }
 }
 
-private struct Donut: View {
-    @Environment(OverviewModel.self) private var ov
-    @State private var grow: Double = 0
-
-    var body: some View {
-        let b = ov.breakdown
-        let total = Double(max(b?.total ?? Scanner.totalBytes(), 1))
-        let parts: [(Double, Color)] = b.map {
-            [(Double($0.apps), Palette.apps), (Double($0.documents), Palette.documents), (Double($0.library), Palette.library),
-             (Double($0.other), Palette.other), (Double($0.available), Palette.available)]
-        } ?? [(Double(Scanner.totalBytes() - Scanner.freeBytes()), Palette.apps), (Double(Scanner.freeBytes()), Palette.available)]
-        let fractions = parts.map { $0.0 / total }
-        let starts = fractions.indices.map { i in fractions.prefix(i).reduce(0, +) }
-        ZStack {
-            ForEach(parts.indices, id: \.self) { i in
-                let gap = fractions[i] > 0.02 ? 0.004 : 0
-                Circle()
-                    .trim(from: (starts[i] + gap) * grow, to: max(starts[i] + gap, starts[i] + fractions[i] - gap) * grow)
-                    .stroke(parts[i].1, style: StrokeStyle(lineWidth: 28, lineCap: .butt))
-                    .rotationEffect(.degrees(-90))
-            }
-            VStack(spacing: 2) {
-                Text(ByteText.string(Int64(total))).font(.system(size: 26, weight: .bold))
-                Text("Total Storage").font(.system(size: 14)).foregroundStyle(Palette.dim)
-            }
-        }
-        .padding(14)
-        .animation(.easeInOut(duration: 0.6), value: b?.used)
-        .onAppear { withAnimation(.spring(response: 1.1, dampingFraction: 0.9).delay(0.1)) { grow = 1 } }
-    }
-}
+// MARK: Scan hero
 
 private struct ScanHero: View {
     @Environment(CleanerModel.self) private var cleaner
     @Environment(OverviewModel.self) private var ov
+    @Environment(\.accessibilityReduceMotion) private var reduce
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            IconTile(symbol: "paintbrush.pointed.fill", color: Palette.accent, size: 54)
-            Text(cleaner.hasScanned ? "\(ByteText.string(cleaner.recommendedBytes)) can be cleaned" : "Find and remove\nunnecessary files")
-                .font(.system(size: 28, weight: .bold))
+        VStack(alignment: .leading, spacing: Space.m) {
+            RoundedRectangle(cornerRadius: 52 * 0.24, style: .continuous)
+                .fill(Palette.accent.opacity(0.14))
+                .overlay(
+                    Image(systemName: cleaner.phase == .scanning ? "magnifyingglass" : "wand.and.sparkles")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundStyle(Palette.accent)
+                        .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(.pulse, options: .repeating, isActive: cleaner.phase == .scanning && !reduce)
+                )
+                .frame(width: 52, height: 52)
+                .accessibilityHidden(true)
+            Text(cleaner.hasScanned && cleaner.phase != .scanning
+                 ? "\(ByteText.string(cleaner.recommendedBytes)) can be cleaned"
+                 : "Find and remove unnecessary files")
+                .font(.title.weight(.bold))
                 .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.numericText())
+                .animation(Motion.standard(reduce), value: cleaner.recommendedBytes)
             Text(cleaner.hasScanned
-                 ? "Scanned \(cleaner.progressTotal) locations. Review the recommendations below, then clean."
-                 : "Scan your Mac for junk, temporary files, caches and other items you can safely clean.")
-                .font(.system(size: 15)).foregroundStyle(Palette.dim)
+                 ? "Review the recommendations, then clean. Nothing is removed until you confirm."
+                 : "Scan for caches, logs, leftovers and old downloads you can safely remove.")
+                .font(.callout).foregroundStyle(Palette.dim)
                 .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: Space.s)
             if cleaner.phase == .scanning {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: Space.s) {
                     ProgressView(value: Double(cleaner.progressDone), total: Double(max(cleaner.progressTotal, 1)))
-                        .tint(Palette.accent)
-                    Text("Scanning \(cleaner.progressDone) of \(cleaner.progressTotal) locations · \(ByteText.string(cleaner.runningBytes)) found")
-                        .font(.system(size: 12)).foregroundStyle(Palette.dim)
+                    Text("\(cleaner.progressDone) of \(cleaner.progressTotal) locations · \(ByteText.string(cleaner.runningBytes)) found")
+                        .font(.caption).foregroundStyle(Palette.dim).monospacedDigit()
                 }
-                .frame(maxWidth: 380)
             } else {
-                Button {
-                    Task {
-                        async let a: Void = cleaner.scan()
-                        async let b: Void = ov.scanDownloads()
-                        _ = await (a, b)
-                    }
-                } label: {
-                    Label(cleaner.hasScanned ? "Scan Again" : "Scan for Junk", systemImage: "play.fill")
+                Button { scan() } label: {
+                    Label(cleaner.hasScanned ? "Scan Again" : "Scan for Junk", systemImage: "magnifyingglass")
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(AccentButtonStyle(large: true))
-                .disabled(cleaner.isBusy)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.extraLarge)
+                .disabled(cleaner.isBusy || ov.cleaning)
+                .keyboardShortcut("r", modifiers: .command)
+                Text("Scanning only reads your disk.").font(.caption).foregroundStyle(Palette.faint)
             }
+        }
+        .padding(Space.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .panel()
+    }
+
+    private func scan() {
+        Task {
+            async let a: Void = cleaner.scan()
+            async let b: Void = ov.scanDownloads()
+            _ = await (a, b)
         }
     }
 }
@@ -354,65 +382,107 @@ private struct ScanHero: View {
 private struct RecommendedCard: View {
     @Environment(CleanerModel.self) private var cleaner
     @Environment(OverviewModel.self) private var ov
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         let total = RecGroup.allCases.reduce(Int64(0)) { $0 + bytes($1) }
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Recommended Cleanup").font(.system(size: 20, weight: .bold))
-                Spacer()
+        VStack(alignment: .leading, spacing: Space.m) {
+            CardHeader(title: "Recommended Cleanup") {
                 if cleaner.hasScanned {
                     Text("\(ByteText.string(total)) found")
-                        .font(.system(size: 13, weight: .medium))
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(Palette.fg.opacity(0.06), in: Capsule())
+                        .font(.callout.weight(.medium)).monospacedDigit()
+                        .contentTransition(.numericText(value: Double(total)))
+                        .animation(.snappy, value: total)
+                        .padding(.horizontal, Space.s).padding(.vertical, Space.xxs)
+                        .background(Palette.tile, in: Capsule())
                 }
             }
-            .padding(.bottom, 12)
-
-            ForEach(RecGroup.allCases) { g in
-                Divider().opacity(0.6)
-                HStack(spacing: 14) {
-                    IconTile(symbol: g.symbol, color: g.color, size: 42)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(g.title).font(.system(size: 15, weight: .semibold))
-                        Text(g.subtitle).font(.system(size: 12.5)).foregroundStyle(Palette.dim).lineLimit(1)
-                    }
-                    Spacer()
-                    Text(scanned(g) ? ByteText.string(bytes(g)) : "—")
-                        .font(.system(size: 15)).monospacedDigit().foregroundStyle(Palette.dim)
-                    Button { toggle(g) } label: {
-                        CheckSquare(on: isOn(g), color: Palette.accent)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!scanned(g) || bytes(g) == 0 || cleaner.isBusy)
+            VStack(spacing: 0) {
+                ForEach(RecGroup.allCases) { g in
+                    if g != RecGroup.allCases.first { Divider().padding(.leading, 52) }
+                    row(g)
                 }
-                .padding(.vertical, 12)
             }
 
-            Spacer(minLength: 16)
+            Spacer(minLength: 0)
 
             if let r = cleaner.result, cleaner.phase == .done {
-                Label("Freed \(ByteText.string(r.freed)) · \(r.count) item(s)", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 13)).foregroundStyle(Palette.success).padding(.bottom, 10)
+                Label("Last cleanup deleted \(r.count) item(s). Free space went up by \(ByteText.string(r.freed)).",
+                      systemImage: "checkmark.circle")
+                    .font(.callout).foregroundStyle(Palette.success)
             }
+            Label("Documents, Desktop, media, iCloud Drive and protected folders are never included.", systemImage: "lock.shield")
+                .font(.caption).foregroundStyle(Palette.dim)
 
-            Button { ov.confirming = true } label: {
-                Label(cleanTitle, systemImage: "sparkles")
+            VStack(spacing: Space.xs) {
+                Button { presentReview() } label: {
+                    Text(buttonTitle).frame(maxWidth: .infinity)
+                        .contentTransition(.numericText())
+                        .animation(.snappy, value: selectedTotal)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.extraLarge)
+                .disabled(selectedTotal == 0 || cleaner.isBusy || ov.cleaning)
+                .keyboardShortcut(.return, modifiers: .command)
+                if selectedTotal > 0 {
+                    Text(selectionText).font(.caption).foregroundStyle(Palette.dim).monospacedDigit()
+                }
             }
-            .buttonStyle(WideAccentButtonStyle())
-            .disabled(selectedTotal == 0 || cleaner.isBusy || ov.cleaning)
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, minHeight: 420)
-        .panel(radius: 22)
+        .padding(Space.xl)
+        .frame(maxWidth: .infinity, minHeight: 380, alignment: .topLeading)
+        .panel()
+    }
+
+    private func row(_ g: RecGroup) -> some View {
+        let enabled = scanned(g) && bytes(g) > 0 && !cleaner.isBusy
+        return HStack(spacing: Space.m) {
+            IconTile(symbol: g.symbol, color: g.color, size: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(g.title).font(.body.weight(.semibold))
+                Text(g.subtitle).font(.callout).foregroundStyle(Palette.dim).lineLimit(1)
+            }
+            Spacer(minLength: Space.s)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(scanned(g) ? ByteText.string(bytes(g)) : "—").font(.body).monospacedDigit()
+                Text(g == .downloads ? "to Trash" : "deleted").font(.caption2).foregroundStyle(Palette.faint)
+            }
+            Toggle(isOn: Binding(get: { isOn(g) }, set: { _ in toggle(g) })) { EmptyView() }
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .disabled(!enabled)
+                .accessibilityLabel(g.title)
+        }
+        .padding(.vertical, Space.s)
+        .contentShape(Rectangle())
+        .onTapGesture { if enabled { toggle(g) } }
+    }
+
+    private var buttonTitle: String {
+        if ov.cleaning || cleaner.phase == .cleaning { return "Cleaning…" }
+        if !cleaner.hasScanned { return "Scan First to Clean" }
+        return selectedTotal > 0 ? "Review & Clean \(ByteText.string(selectedTotal))…" : "Select Items to Clean"
     }
 
     private var selectedTotal: Int64 { cleaner.chosenBytes + (ov.downloadsSelected ? ov.oldDownloadsBytes : 0) }
-    private var cleanTitle: String {
-        if ov.cleaning || cleaner.phase == .cleaning { return "Cleaning…" }
-        if !cleaner.hasScanned { return "Scan first to clean" }
-        return "Clean \(ByteText.string(selectedTotal))"
+    private var selectionText: String {
+        var parts: [String] = []
+        if cleaner.chosenBytes > 0 { parts.append("\(ByteText.string(cleaner.chosenBytes)) deleted") }
+        if ov.downloadsSelected && ov.oldDownloadsBytes > 0 { parts.append("\(ByteText.string(ov.oldDownloadsBytes)) to Trash") }
+        return parts.joined(separator: " · ") + " · you'll see every item first"
+    }
+
+    private func presentReview() {
+        let downloads = ov.downloadsSelected ? ov.oldDownloads : []
+        review.present(ReviewBuild.overview(cleaner, downloads: downloads) {
+            Task {
+                ov.cleaning = true
+                if !cleaner.chosen.isEmpty { await cleaner.clean() }
+                if ov.downloadsSelected { _ = await ov.trashDownloads() }
+                ov.cleaning = false
+                await ov.measure()
+            }
+        })
     }
 
     private func items(_ g: RecGroup) -> [CleanTarget] {
@@ -433,36 +503,36 @@ private struct RecommendedCard: View {
     }
 }
 
-// MARK: Quick tools + recent
+// MARK: Quick tools
 
 private struct QuickTools: View {
-    @Binding var page: SidebarPage
+    @AppStorage("sidebarPage") private var page: SidebarPage = .overview
+
+    private let tools: [(String, String, Color, SidebarPage)] = [
+        ("Developer", "hammer", Color(nsColor: .systemPurple), .developer),
+        ("Large & Old", "doc.text.magnifyingglass", Color(nsColor: .systemTeal), .large),
+        ("Duplicates", "plus.square.on.square", Color(nsColor: .systemBlue), .duplicates),
+        ("Apps", "square.grid.2x2", Color(nsColor: .systemGreen), .apps),
+        ("Storage Map", "chart.bar.xaxis", Color(nsColor: .systemYellow), .storage),
+        ("System Data", "internaldrive", Color(nsColor: .systemPink), .systemData),
+        ("Startup", "power", Color(nsColor: .systemOrange), .startup),
+        ("Shredder", "flame", Color(nsColor: .systemRed), .shredder),
+    ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Quick Tools").font(.system(size: 20, weight: .bold))
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
-                tile("Projects", "hammer", Color(hex: 0x8B5CF6), .projects).appearIn(0)
-                tile("SDKs", "shippingbox", Color(hex: 0x3A8DFF), .sdks).appearIn(1)
-                tile("Large & Old", "laptopcomputer", Color(hex: 0x14B8C8), .large).appearIn(2)
-                tile("Duplicates", "plus.square.on.square", Color(hex: 0x1A7CFF), .duplicates).appearIn(3)
-                tile("Apps", "square.grid.2x2", Color(hex: 0x22A54A), .apps).appearIn(4)
-                tile("System Data", "internaldrive", Color(hex: 0xF0559C), .systemData).appearIn(5)
-                tile("Startup", "power", Color(hex: 0xF97316), .startup).appearIn(6)
-                tile("Storage", "chart.bar.xaxis", Color(hex: 0xF7B731), .storage).appearIn(7)
+        VStack(alignment: .leading, spacing: Space.m) {
+            CardHeader(title: "Quick Tools") { EmptyView() }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Space.s), count: 4), spacing: Space.s) {
+                ForEach(tools, id: \.0) { t in
+                    QuickTile(title: t.0, symbol: t.1, color: t.2) { page = t.3 }
+                }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(radius: 22)
-    }
-
-    private func tile(_ title: String, _ symbol: String, _ color: Color, _ target: SidebarPage) -> some View {
-        QuickTile(title: title, symbol: symbol, color: color) { page = target }
+        .padding(Radius.cardPadding)
+        .panel()
     }
 }
 
-/// One Quick Tools tile: same size as its neighbours; hover tints it instead of zooming.
 private struct QuickTile: View {
     let title: String
     let symbol: String
@@ -470,61 +540,60 @@ private struct QuickTile: View {
     let action: () -> Void
     @State private var hover = false
     @State private var bounce = 0
+    @Environment(\.accessibilityReduceMotion) private var reduce
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 8) {
-                Image(systemName: symbol)
-                    .font(.system(size: 22, weight: .medium)).foregroundStyle(color)
-                    .frame(height: 26)
-                    .symbolEffect(.bounce, value: bounce)
-                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.fg).lineLimit(1)
+            VStack(spacing: Space.xs + 2) {
+                Image(systemName: symbol).font(.title2).foregroundStyle(color).frame(height: 26)
+                    .symbolEffect(.bounce, options: .nonRepeating, value: bounce)
+                Text(title).font(.caption.weight(.medium)).foregroundStyle(Palette.fg).lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            .frame(maxWidth: .infinity, minHeight: 76)
-            .background(hover ? color.opacity(0.12) : Palette.panel, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(hover ? color.opacity(0.45) : Palette.stroke))
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .frame(maxWidth: .infinity, minHeight: 66)
+            .background(hover ? color.opacity(0.14) : Palette.tile,
+                        in: RoundedRectangle(cornerRadius: Radius.inner, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Radius.inner, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { h in
-            withAnimation(.easeOut(duration: 0.15)) { hover = h }
-            if h { bounce += 1 }
+            withAnimation(.easeOut(duration: 0.12)) { hover = h }
+            if h && !reduce { bounce += 1 }
         }
+        .help("Open \(title)")
+        .accessibilityLabel("Open \(title)")
     }
 }
+
+// MARK: Recent activity
 
 private struct RecentCleanups: View {
     @Binding var showAll: Bool
     private var history: HistoryStore { HistoryStore.shared }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.s) {
             HStack {
-                Text("Recent Cleanups").font(.system(size: 20, weight: .bold))
+                Text("Recent Cleanups").font(.title3.weight(.semibold))
                 Spacer()
-                Button("See All") { showAll = true }
-                    .buttonStyle(.plain).foregroundStyle(Palette.accent).font(.system(size: 14, weight: .medium))
+                Button("Show All") { showAll = true }
+                    .buttonStyle(.link)
                     .disabled(history.records.isEmpty)
             }
             if history.records.isEmpty {
-                Text("Cleanups you run show up here.").font(.system(size: 13)).foregroundStyle(Palette.dim)
-                    .padding(.vertical, 18)
+                Text("Cleanups you run show up here, with what was deleted and what went to the Trash.")
+                    .font(.callout).foregroundStyle(Palette.dim)
+                    .padding(.vertical, Space.s)
             } else {
-                ForEach(Array(history.records.prefix(3).enumerated()), id: \.1.id) { idx, r in
-                    VStack(spacing: 0) {
-                        Divider().opacity(0.6)
-                        HistoryRow(record: r)
-                    }
-                    .appearIn(idx)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                ForEach(history.records.prefix(3)) { r in
+                    Divider()
+                    HistoryRow(record: r)
                 }
             }
         }
-        .animation(.spring(response: 0.45, dampingFraction: 0.85), value: history.records.first?.id)
-        .padding(20)
+        .padding(Space.xl)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(radius: 22)
+        .panel()
     }
 }
 
@@ -532,19 +601,29 @@ struct HistoryRow: View {
     let record: CleanupRecord
 
     var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "checkmark.circle").font(.system(size: 22)).foregroundStyle(Palette.success)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.title).font(.system(size: 14, weight: .medium))
+        HStack(spacing: Space.m) {
+            Image(systemName: record.outcome == .trashed ? "trash" : "checkmark.circle")
+                .foregroundStyle(record.outcome == .trashed ? Palette.dim : Palette.success)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(record.title).font(.rowTitle)
                 Text(record.date.formatted(Calendar.current.isDateInToday(record.date)
                                            ? .dateTime.hour().minute()
                                            : .dateTime.month(.abbreviated).day().year()))
-                    .font(.system(size: 12)).foregroundStyle(Palette.dim)
+                    .font(.caption).foregroundStyle(Palette.dim)
             }
             Spacer()
-            Text(ByteText.string(record.bytes)).font(.system(size: 14)).monospacedDigit().foregroundStyle(Palette.dim)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(record.resultText).font(.callout).monospacedDigit()
+                if record.outcome == .trashed {
+                    Text("not freed until the Trash is emptied").font(.caption).foregroundStyle(Palette.faint)
+                } else if let m = record.measuredFreeChange {
+                    Text("free space +\(ByteText.string(m))").font(.caption).foregroundStyle(Palette.faint)
+                }
+            }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, Space.xs)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -553,28 +632,23 @@ struct HistorySheet: View {
     private var history: HistoryStore { HistoryStore.shared }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Cleanup History").font(.system(size: 22, weight: .bold))
-                    Text("\(history.records.count) cleanups · \(ByteText.string(history.totalFreed)) in total")
-                        .font(.system(size: 12)).foregroundStyle(Palette.dim)
+        VStack(alignment: .leading, spacing: Space.m) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: Space.xxs) {
+                    Text("Cleanup History").font(.title2.bold())
+                    Text("\(ByteText.string(history.totalDeleted)) deleted · \(ByteText.string(history.totalTrashed)) moved to Trash"
+                         + (history.totalUnclassified > 0 ? " · \(ByteText.string(history.totalUnclassified)) earlier (not classified)" : "")
+                         + " · \(history.records.count) cleanups")
+                        .font(.callout).foregroundStyle(Palette.dim)
                 }
                 Spacer()
-                Button("Clear") { history.clear() }.buttonStyle(GhostButtonStyle()).disabled(history.records.isEmpty)
-                Button("Done") { dismiss() }.buttonStyle(AccentButtonStyle()).keyboardShortcut(.defaultAction)
+                Button("Clear History", role: .destructive) { history.clear() }.disabled(history.records.isEmpty)
+                Button("Done") { dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(history.records) { r in
-                        HistoryRow(record: r)
-                        Divider().opacity(0.5)
-                    }
-                }
-            }
+            List(history.records) { r in HistoryRow(record: r) }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
         }
-        .padding(24)
-        .frame(width: 520, height: 520)
-        .background(AppBackground())
+        .padding(Space.xl)
+        .frame(width: 600, height: 540)
     }
 }

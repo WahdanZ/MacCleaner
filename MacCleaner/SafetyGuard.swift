@@ -158,7 +158,7 @@ enum ProtectedPaths {
     static func reason(_ url: URL) -> String? {
         let p = normalize(url.path)
         for q in all {
-            if p == q || p.hasPrefix(q + "/") { return "Protected (Settings › Protected)" }
+            if p == q || p.hasPrefix(q + "/") { return "Protected (Settings › Protection)" }
             if q.hasPrefix(p + "/") { return "Contains a protected item" }
         }
         return nil

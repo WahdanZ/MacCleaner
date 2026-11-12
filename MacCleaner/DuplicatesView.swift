@@ -33,7 +33,7 @@ struct DuplicatesView: View {
                         .help(r.url.path)
                     }
                     Button { dup.addFolder() } label: { Label("Add folder", systemImage: "plus") }
-                        .buttonStyle(GhostButtonStyle())
+                        .buttonStyle(.bordered)
                 }
             }
             .scrollIndicators(.never)
@@ -47,16 +47,16 @@ struct DuplicatesView: View {
                     Text("10 MB").tag(Int64(10_000_000))
                     Text("100 MB").tag(Int64(100_000_000))
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 300)
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
                 .disabled(busy)
                 Spacer()
                 if dup.phase == .scanning {
-                    Button("Cancel") { dup.cancel() }.buttonStyle(GhostButtonStyle())
+                    Button("Cancel") { dup.cancel() }.buttonStyle(.bordered)
                 } else {
                     Button { dup.start() } label: {
                         Label(dup.phase == .idle ? "Find duplicates" : "Scan again", systemImage: "doc.on.doc")
                     }
-                    .buttonStyle(AccentButtonStyle())
+                    .buttonStyle(.borderedProminent)
                     .disabled(!dup.roots.contains(where: \.on) || busy)
                 }
             }
@@ -134,7 +134,7 @@ struct DuplicatesView: View {
                     dup.expanded = dup.expanded.isEmpty ? Set(dup.groups.map(\.id)) : []
                 }
             }
-            .buttonStyle(GhostButtonStyle())
+            .buttonStyle(.bordered)
             ScrollView {
                 LazyVStack(spacing: 6) {
                     ForEach(dup.groups.prefix(1500)) { g in GroupRow(group: g) }
@@ -204,7 +204,7 @@ private struct GroupRow: View {
                                 .help(f.path)
                             Spacer()
                             Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([f]) }
-                                .buttonStyle(GhostButtonStyle())
+                                .buttonStyle(.bordered)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 3)
                     }

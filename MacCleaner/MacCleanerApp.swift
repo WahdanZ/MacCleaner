@@ -4,6 +4,7 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
+        SettingsMigration.migrate()
         let args = CommandLine.arguments
         if args.count > 1 && args[1] == "--cli" {
             exit(CLI.run(Array(args.dropFirst(2))))
@@ -35,7 +36,7 @@ struct MacCleanerApp: App {
     @State private var sdks = SDKModel()
     @State private var systemData = SystemDataModel()
     @State private var automation = AutomationModel()
-
+    @State private var review = ReviewCenter()
     var body: some Scene {
         Window("Mac Cleaner", id: "main") {
             ContentView()
@@ -54,16 +55,45 @@ struct MacCleanerApp: App {
                 .environment(sdks)
                 .environment(systemData)
                 .environment(automation)
-                .frame(minWidth: 1240, minHeight: 800)
+                .environment(review)
+                .frame(minWidth: 900, minHeight: 600)
         }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentMinSize)
-        .defaultSize(width: 1460, height: 940)
+        .windowToolbarStyle(.unified)
+        .defaultSize(width: 1280, height: 840)
+        .commands {
+            SidebarCommands()
+            NavigationCommands()
+            CommandGroup(replacing: .help) {
+                Button("Welcome Tour") { UserDefaults.standard.set(false, forKey: "introSeen") }
+                Link("Mac Cleaner on GitHub", destination: URL(string: "https://github.com/WahdanZ/MacCleaner")!)
+            }
+        }
+
+        Settings {
+            SettingsView()
+                .environment(model)
+                .environment(automation)
+                .environment(integrations)
+        }
 
         MenuBarExtra {
             MenuBarContent().environment(model).environment(automation)
         } label: {
             Image(nsImage: automation.menuBarImage)
+        }
+    }
+}
+
+/// Go menu: ⌘1…⌘0 jump to each sidebar destination.
+struct NavigationCommands: Commands {
+    @AppStorage("sidebarPage") private var page: SidebarPage = .overview
+
+    var body: some Commands {
+        CommandMenu("Go") {
+            ForEach(Array(SidebarPage.allCases.enumerated()), id: \.1) { i, p in
+                Button(p.title) { page = p }
+                    .keyboardShortcut(KeyEquivalent(Character(String((i + 1) % 10))), modifiers: .command)
+            }
         }
     }
 }
@@ -89,5 +119,31 @@ private struct MenuBarContent: View {
         Button("Rescan") { Task { await model.scan() } }
         Divider()
         Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
+    }
+}
+
+/// Version 1.0.0 used the app ID "local.maccleaner". Settings live per app ID, so on the first launch
+/// under the new ID this copies them over once. Protected paths are merged, never dropped.
+enum SettingsMigration {
+    static let oldDomain = "local.maccleaner"
+    static let doneKey = "settingsMigratedFromLocalDomain"
+
+    /// Returns how many settings were copied.
+    @discardableResult
+    static func migrate(fromDomain: String = oldDomain, to new: UserDefaults = .standard) -> Int {
+        guard !new.bool(forKey: doneKey) else { return 0 }
+        new.set(true, forKey: doneKey)
+        guard let old = UserDefaults.standard.persistentDomain(forName: fromDomain), !old.isEmpty else { return 0 }
+        var copied = 0
+        for (k, v) in old where !k.hasPrefix("NS") && k != ProtectedPaths.key && new.object(forKey: k) == nil {
+            new.set(v, forKey: k)
+            copied += 1
+        }
+        if let oldPaths = old[ProtectedPaths.key] as? [String], !oldPaths.isEmpty {
+            let current = new.stringArray(forKey: ProtectedPaths.key) ?? []
+            new.set(Array(Set(current + oldPaths)).sorted(), forKey: ProtectedPaths.key)
+            copied += 1
+        }
+        return copied
     }
 }

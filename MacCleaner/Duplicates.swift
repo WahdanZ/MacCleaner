@@ -242,7 +242,7 @@ final class DupFinder {
         groups.removeAll { $0.files.count < 2 }
         marked = []
         lastTrash = (count, bytes, errors)
-        HistoryStore.shared.add("Duplicates Removed", bytes: bytes, symbol: "plus.square.on.square")
+        HistoryStore.shared.add("Duplicates Moved to Trash", bytes: bytes, symbol: "plus.square.on.square", outcome: .trashed)
         phase = .done
     }
 

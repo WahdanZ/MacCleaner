@@ -490,42 +490,90 @@ enum AdminGuard {
 
 /// Runs the system part of an uninstall through macOS's own administrator prompt
 /// (`osascript … with administrator privileges`). Files go to a folder in your Trash.
+///
+/// The root script moves the items into a new folder that only root can open: `mktemp -d` makes it in
+/// /private/var/tmp with a random name and mode 700, so no other process can create it first, put links in it or
+/// swap it (that folder is sticky, so nobody else can rename it). The script then hands you only that one folder
+/// (`chown` without `-R`) and prints its path. The items inside keep their system owner: a recursive `chown` as root
+/// would also change the owner of any file that something had hard-linked into a moved folder. The app then moves the
+/// folder to the Trash with the normal API (the Trash itself is privacy-protected even for root).
 enum AdminStep {
     enum Result { case ok(staging: URL), cancelled, failed(String) }
 
+    /// Where the root script makes its staging folder; `mktemp` replaces the X's with random characters.
+    static let stagingParent = "/private/var/tmp"
+    static let stagingPrefix = "MacCleaner-uninstall."
+    static let stagingTemplate = stagingParent + "/" + stagingPrefix + "XXXXXXXXXX"
+
     static func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-    static func run(_ items: [AppLeftover], uid: uid_t) -> Result {
-        let stamp = Int(Date().timeIntervalSince1970)
-        // Staging folder in your home (the Trash itself is privacy-protected even for admin);
-        // the app then moves this folder to the Trash with the normal API.
-        let staging = SafetyGuard.home.appendingPathComponent(".MacCleaner-uninstalled-\(stamp)")
-        let trashDir = staging.path
-        var lines = ["set -u", "mkdir -p \(q(trashDir))"]
+    /// The shell script the password step runs as root. Pure, so the self-test can check it.
+    /// Each item is checked again inside the script, right before it moves: its folder must still be a real folder
+    /// (not a link) owned by `parentOwner` (root). Only the self-test passes other values for `allowed`,
+    /// `parentOwner` and `chown`, to run the script as you on throwaway files.
+    static func script(_ items: [AppLeftover], uid: uid_t,
+                       allowed: (URL) -> Bool = AdminGuard.isAllowed,
+                       parentOwner: uid_t = 0, chown: String = "/usr/sbin/chown") -> String {
+        let safeName = "^[A-Za-z0-9._-]+$"
+        var lines = ["set -u",
+                     "D=$(/usr/bin/mktemp -d \(q(stagingTemplate))) || exit 1"]
         for (i, l) in items.enumerated() {
-            if let label = l.launchLabel, label.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil {
+            if let label = l.launchLabel, label.range(of: safeName, options: .regularExpression) != nil {
                 let domain = l.launchSystem ? "system" : "gui/\(uid)"
-                lines.append("launchctl bootout \(domain)/\(label) 2>/dev/null || true")
+                lines.append("/bin/launchctl bootout \(domain)/\(label) 2>/dev/null || true")
             }
             if let pkg = l.receipt {
-                guard pkg.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else { continue }
-                lines.append("pkgutil --forget \(pkg) >/dev/null 2>&1 || true")
+                guard pkg.range(of: safeName, options: .regularExpression) != nil else { continue }
+                lines.append("/usr/sbin/pkgutil --forget \(pkg) >/dev/null 2>&1 || true")
                 continue
             }
-            guard AdminGuard.isAllowed(l.url) else { continue }
-            let dest = trashDir + "/\(i)-" + l.url.lastPathComponent
-            lines.append("[ -e \(q(l.url.path)) ] && mv -f \(q(l.url.path)) \(q(dest))")
+            guard allowed(l.url) else { continue }
+            let item = l.url.standardizedFileURL
+            let src = q(item.path), dir = q(item.deletingLastPathComponent().path)
+            let dest = q("/\(i)-" + item.lastPathComponent)
+            lines.append("if [ -d \(dir) ] && [ ! -L \(dir) ] && [ \"$(/usr/bin/stat -f %u \(dir))\" = \(parentOwner) ]"
+                         + " && { [ -e \(src) ] || [ -L \(src) ]; }; then /bin/mv -n -- \(src) \"$D\"\(dest); fi")
         }
         if items.contains(where: { $0.url.path.hasPrefix("/Library/Audio/Plug-Ins/HAL/") }) {
-            lines.append("killall coreaudiod 2>/dev/null || true")
+            lines.append("/usr/bin/killall coreaudiod 2>/dev/null || true")
         }
-        lines.append("chown -R \(uid) \(q(trashDir)) 2>/dev/null || true")
-        lines.append("true")
-        let script = lines.joined(separator: "; ")
-        let apple = "do shell script \"" + script.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\" with administrator privileges"
-        let r = Shell.run("/usr/bin/osascript", ["-e", apple])
-        if r.status == 0 { return .ok(staging: staging) }
+        // Only the staging folder itself changes owner, never anything inside it.
+        lines.append("\(q(chown)) \(uid) \"$D\" || exit 1")
+        lines.append("echo \"$D\"")
+        return lines.joined(separator: "; ")
+    }
+
+    /// The staging folder the script printed, if it is exactly what `mktemp` makes from `stagingTemplate`.
+    static func parseStaging(_ output: String?) -> URL? {
+        guard let line = output?.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map({ $0.trimmingCharacters(in: .whitespaces) }).last(where: { !$0.isEmpty }) else { return nil }
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: stagingParent + "/" + stagingPrefix) + "[A-Za-z0-9]{10}$"
+        guard line.range(of: pattern, options: .regularExpression) != nil else { return nil }
+        return URL(fileURLWithPath: line, isDirectory: true)
+    }
+
+    /// A real folder (not a link), owned by `uid` and closed to everyone else.
+    static func isTrustedStaging(_ url: URL, uid: uid_t) -> Bool {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else { return false }
+        return (st.st_mode & S_IFMT) == S_IFDIR && st.st_uid == uid && (st.st_mode & 0o077) == 0
+    }
+
+    /// `do shell script "…"` for osascript, with the script escaped for an AppleScript string.
+    /// `admin: false` runs it as you, without a password (the self-test uses that).
+    static func appleScript(_ script: String, admin: Bool = true) -> String {
+        "do shell script \"" + script.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\"" + (admin ? " with administrator privileges" : "")
+    }
+
+    static func run(_ items: [AppLeftover], uid: uid_t) -> Result {
+        let r = Shell.run("/usr/bin/osascript", ["-e", appleScript(script(items, uid: uid))])
+        if r.status == 0 {
+            guard let staging = parseStaging(r.output), isTrustedStaging(staging, uid: uid) else {
+                return .failed("The password step finished, but its staging folder could not be checked, so it was not sent to the Trash. Look in \(stagingParent) for a folder named \(stagingPrefix)….")
+            }
+            return .ok(staging: staging)
+        }
         let out = r.output ?? ""
         if out.contains("-128") || out.lowercased().contains("cancel") { return .cancelled }
         return .failed(out.trimmingCharacters(in: .whitespacesAndNewlines))

@@ -101,6 +101,7 @@ final class AutomationModel {
     /// Updates the level; posts one notification when it gets worse (and again at most every 12 h).
     func check() {
         freeBytes = Scanner.freeBytes()
+        FreeSpaceLog.shared.record(free: freeBytes, total: Scanner.totalBytes())
         let limit = Self.thresholdBytes
         let new: Level = freeBytes < limit / 2 ? .critical : freeBytes < limit ? .low : .ok
         let worse = new.rawValue > level.rawValue

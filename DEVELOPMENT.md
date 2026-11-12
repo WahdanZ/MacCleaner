@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 96 checks against the safety rules using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 106 checks (the safety rules, plus the Insights forecast and history math) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -63,6 +63,7 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `Shell.swift` | Window: sidebar navigation, page routing, Settings window |
 | `Theme.swift`, `Motion.swift` | Design tokens (colours, spacing, radii, type) and animation roles |
 | `Overview.swift` | Dashboard: storage donut, scan, recommendations, quick tools |
+| `Insights.swift` | Insights card (reclaimed per week, free-space trend and forecast, junk by category) and `FreeSpaceLog`, one free-space reading per day in `free-space.json` |
 | `Review.swift`, `ReviewBuilders.swift` | The Review Cleanup sheet and the item list each feature passes to it |
 | `SafetyGuard.swift` | `SafetyGuard`, `TrashGuard`, `ProtectedPaths` |
 | `Scanner.swift`, `CleanTarget.swift`, `CleanerModel.swift`, `ContentView.swift`, `Treemap.swift` | Junk Files: cache locations, measuring, cleaning, the space map |

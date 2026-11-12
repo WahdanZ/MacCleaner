@@ -49,7 +49,10 @@ struct ReviewRequest: Identifiable {
     let items: [ReviewItem]
     /// Verb for the button, e.g. "Clean", "Uninstall", "Shred".
     let verb: String
-    let perform: () -> Void
+    /// Runs the cleanup with the ids of the rows that were shown and not blocked. Builders map these back to the
+    /// exact objects they listed (captured when the review opened), so what runs is what was reviewed, even if a
+    /// rescan changes the screen's live selection while the sheet is open.
+    let perform: (Set<String>) -> Void
 
     var allowed: [ReviewItem] { items.filter { $0.blocked == nil } }
     var total: Int64 { allowed.reduce(0) { $0 + ($1.size ?? 0) } }
@@ -226,7 +229,7 @@ struct CleanupReviewSheet: View {
                     .controlSize(.large)
                 Button(role: .destructive) {
                     dismiss()
-                    request.perform()
+                    request.perform(Set(request.allowed.map(\.id)))
                 } label: {
                     Text(confirmTitle).padding(.horizontal, Space.s)
                 }

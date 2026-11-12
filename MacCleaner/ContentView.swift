@@ -578,7 +578,7 @@ struct BottomBar: View {
                     .disabled(model.isBusy)
                 }
                 Button {
-                    review.present(ReviewBuild.junk(model) { Task { await model.clean() } })
+                    review.present(ReviewBuild.junk(model) { targets in Task { await model.clean(targets) } })
                 } label: {
                     Label(model.chosen.isEmpty ? "Sweep" : "Sweep \(ByteText.string(model.chosenBytes))",
                           systemImage: "wind")
@@ -591,7 +591,7 @@ struct BottomBar: View {
                     Button("Clear marks") { map.marked = [:] }.buttonStyle(.bordered)
                 }
                 Button {
-                    review.present(ReviewBuild.diskMap(map) { Task { await map.trashMarked() } })
+                    review.present(ReviewBuild.diskMap(map) { nodes in Task { await map.trashMarked(nodes) } })
                 } label: {
                     Label(map.markedCount == 0 ? "Move to Trash" : "Move \(ByteText.string(map.markedBytes)) to Trash",
                           systemImage: "trash")
@@ -601,7 +601,7 @@ struct BottomBar: View {
                 .disabled(map.markedCount == 0 || map.phase != .done)
             case .duplicates:
                 Button {
-                    review.present(ReviewBuild.duplicates(dup) { Task { await dup.trashMarked() } })
+                    review.present(ReviewBuild.duplicates(dup) { urls in Task { await dup.trashMarked(urls) } })
                 } label: {
                     Label(dup.marked.isEmpty ? "Move to Trash" : "Move \(ByteText.string(dup.markedBytes)) to Trash",
                           systemImage: "trash")

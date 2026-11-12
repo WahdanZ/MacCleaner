@@ -502,8 +502,8 @@ final class SDKModel {
 
     func selectUnused() { selected.formUnion(items.filter(\.isUnused).map(\.id)) }
 
-    func remove() async {
-        let list = chosen
+    /// Removes exactly the reviewed items.
+    func remove(_ list: [SDKItem]) async {
         guard !list.isEmpty else { return }
         phase = .removing
         let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, trashed: Int64, errors: [String]) in

@@ -493,11 +493,11 @@ final class AppsModel {
 
     /// Full uninstall: stop background jobs, app + checked leftovers → Trash,
     /// then one password prompt (macOS's own) for items outside your home folder.
-    func uninstall() async {
-        guard let a = selected, uninstallBlock(a) == nil else { return }
+    /// Uninstalls the app that was reviewed, with exactly the reviewed leftovers.
+    func uninstall(_ a: AppInfo, picked: [AppLeftover]) async {
+        guard uninstallBlock(a) == nil else { return }
         phase = .working
         if isRunning(a), !(await quit(a)) { phase = .done; return }
-        let picked = a.leftovers.filter(\.include)
         let r = await Task.detached { AppEngine.uninstall(a, picked: picked) }.value
         if r.appRemoved {
             apps.removeAll { $0.id == a.id }
@@ -509,10 +509,10 @@ final class AppsModel {
     }
 
     /// Deletes the app's disposable caches permanently (cache allow-list only).
-    func clearCaches(_ a: AppInfo) async {
-        guard !a.caches.isEmpty else { return }
+    /// Clears exactly the reviewed caches of the app.
+    func clearCaches(_ a: AppInfo, _ items: [AppLeftover]) async {
+        guard !items.isEmpty else { return }
         phase = .working
-        let items = a.caches
         let errors: [String] = await Task.detached { AppEngine.clearCaches(items) }.value
         let ids = Set(apps.map(\.bundleID))
         let fresh = await Task.detached { AppScanner.info(for: a.url, allIDs: ids) }.value

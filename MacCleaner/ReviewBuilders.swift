@@ -21,48 +21,59 @@ enum ReviewBuild {
         }
     }
 
-    static func junk(_ m: CleanerModel, perform: @escaping () -> Void) -> ReviewRequest {
-        ReviewRequest(title: "Review Junk Cleanup",
-                      explanation: "Caches, logs and build data are deleted permanently. Apps and build tools recreate them when needed. Your documents, Downloads, Desktop, media and iCloud Drive are never part of this cleanup.",
-                      items: cacheItems(m.chosen), verb: "Clean", perform: perform)
+    static func junk(_ m: CleanerModel, perform: @escaping ([CleanTarget]) -> Void) -> ReviewRequest {
+        let targets = m.chosen
+        return ReviewRequest(title: "Review Junk Cleanup",
+                             explanation: "Caches, logs and build data are deleted permanently. Apps and build tools recreate them when needed. Your documents, Downloads, Desktop, media and iCloud Drive are never part of this cleanup.",
+                             items: cacheItems(targets), verb: "Clean",
+                             perform: { ok in perform(targets.filter { ok.contains("cache:\($0.id)") }) })
     }
 
-    static func overview(_ m: CleanerModel, downloads: [BigFile], perform: @escaping () -> Void) -> ReviewRequest {
+    static func overview(_ m: CleanerModel, downloads: [BigFile],
+                         perform: @escaping ([CleanTarget], [BigFile]) -> Void) -> ReviewRequest {
+        let targets = m.chosen
         let dl = downloads.map {
             ReviewItem(id: "dl:\($0.id)", name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size, action: .trash,
                        risk: .review, note: "not opened in 90+ days", blocked: TrashGuard.reason($0.url))
         }
         return ReviewRequest(title: "Review Recommended Cleanup",
                              explanation: "Caches and logs are deleted permanently and rebuild on their own. Old downloads go to the Trash, so you can put them back until you empty it.",
-                             items: cacheItems(m.chosen) + dl, verb: "Clean", perform: perform)
+                             items: cacheItems(targets) + dl, verb: "Clean",
+                             perform: { ok in perform(targets.filter { ok.contains("cache:\($0.id)") },
+                                                      downloads.filter { ok.contains("dl:\($0.id)") }) })
     }
 
     // MARK: Files that go to the Trash
 
+    /// Items going to the Trash; `perform` gets the reviewed, allowed URLs (row id = path).
     static func trashFiles(title: String, explanation: String, _ files: [(URL, Int64, String?)],
-                           perform: @escaping () -> Void) -> ReviewRequest {
-        ReviewRequest(title: title, explanation: explanation,
+                           perform: @escaping ([URL]) -> Void) -> ReviewRequest {
+        let urls = files.map(\.0)
+        return ReviewRequest(title: title, explanation: explanation,
                       items: files.map { u, size, note in
                           ReviewItem(id: u.path, name: u.lastPathComponent, location: u.path, size: size, action: .trash,
                                      note: note, blocked: TrashGuard.reason(u))
                       },
-                      verb: "Move", perform: perform)
+                      verb: "Move", perform: { ok in perform(urls.filter { ok.contains($0.path) }) })
     }
 
-    static func diskMap(_ m: DiskMapModel, perform: @escaping () -> Void) -> ReviewRequest {
-        trashFiles(title: "Move to Trash",
-                   explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
-                   m.topLevelMarked.map { ($0.url, $0.size, $0.isDirectory ? "folder" : nil) }, perform: perform)
+    static func diskMap(_ m: DiskMapModel, perform: @escaping ([DiskNode]) -> Void) -> ReviewRequest {
+        let nodes = m.topLevelMarked
+        return trashFiles(title: "Move to Trash",
+                          explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
+                          nodes.map { ($0.url, $0.size, $0.isDirectory ? "folder" : nil) },
+                          perform: { urls in let ok = Set(urls.map(\.path)); perform(nodes.filter { ok.contains($0.url.path) }) })
     }
 
-    static func largeFiles(_ m: LargeFilesModel, perform: @escaping () -> Void) -> ReviewRequest {
-        trashFiles(title: "Move Large & Old Files to Trash",
-                   explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
-                   m.markedFiles.map { ($0.url, $0.size, $0.lastOpened.map { "last opened " + $0.formatted(date: .abbreviated, time: .omitted) }) },
-                   perform: perform)
+    static func largeFiles(_ m: LargeFilesModel, perform: @escaping ([BigFile]) -> Void) -> ReviewRequest {
+        let files = m.markedFiles
+        return trashFiles(title: "Move Large & Old Files to Trash",
+                          explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
+                          files.map { ($0.url, $0.size, $0.lastOpened.map { "last opened " + $0.formatted(date: .abbreviated, time: .omitted) }) },
+                          perform: { urls in let ok = Set(urls.map(\.path)); perform(files.filter { ok.contains($0.url.path) }) })
     }
 
-    static func duplicates(_ m: DupFinder, perform: @escaping () -> Void) -> ReviewRequest {
+    static func duplicates(_ m: DupFinder, perform: @escaping ([URL]) -> Void) -> ReviewRequest {
         var files: [(URL, Int64, String?)] = []
         for g in m.groups {
             let marked = g.files.filter { m.marked.contains($0) }
@@ -77,7 +88,8 @@ enum ReviewBuild {
 
     // MARK: Apps
 
-    static func uninstall(_ a: AppInfo, running: Bool, perform: @escaping () -> Void) -> ReviewRequest {
+    /// `perform` gets the reviewed leftovers to remove with the app, or is not called if the app row was blocked.
+    static func uninstall(_ a: AppInfo, running: Bool, perform: @escaping ([AppLeftover]) -> Void) -> ReviewRequest {
         var items = [ReviewItem(id: a.url.path, name: "\(a.name).app", location: a.url.path, size: a.appSize,
                                 action: a.url.path.hasPrefix("/Applications/") ? .adminTrash : .trash,
                                 note: running ? "will be quit first" : nil, blocked: ProtectedPaths.reason(a.url))]
@@ -98,37 +110,44 @@ enum ReviewBuild {
                              explanation: "Everything below goes to the Trash, so you can put it back."
                                 + (admin ? " Items outside your home folder need your password once." : "")
                                 + (running ? " \(a.name) is running and will be quit first." : ""),
-                             items: items, verb: "Uninstall", perform: perform)
+                             items: items, verb: "Uninstall",
+                             perform: { ok in
+                                 guard ok.contains(a.url.path) else { return }
+                                 perform(a.leftovers.filter { $0.include && ok.contains($0.id) })
+                             })
     }
 
-    static func appCache(_ a: AppInfo, perform: @escaping () -> Void) -> ReviewRequest {
-        ReviewRequest(title: "Clear \(a.name) Cache",
+    static func appCache(_ a: AppInfo, perform: @escaping ([AppLeftover]) -> Void) -> ReviewRequest {
+        let caches = a.caches
+        return ReviewRequest(title: "Clear \(a.name) Cache",
                       explanation: "Caches are deleted permanently; \(a.name) rebuilds them. Quit the app first for the cleanest result.",
                       items: a.caches.map {
                           let d = AppEngine.cacheDecision($0.url)
                           return ReviewItem(id: $0.id, name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size,
                                             action: .delete, note: d.contentsOnly ? AppEngine.contentsOnlyNote : nil, blocked: d.blocked)
                       },
-                      verb: "Clear", perform: perform)
+                      verb: "Clear", perform: { ok in perform(caches.filter { ok.contains($0.id) }) })
     }
 
     // MARK: Developer tools
 
-    static func projects(_ m: ProjectsModel, perform: @escaping () -> Void) -> ReviewRequest {
-        ReviewRequest(title: "Review Build Files",
+    static func projects(_ m: ProjectsModel, perform: @escaping ([(ProjectArtifact, DevProject)]) -> Void) -> ReviewRequest {
+        let pairs = m.selectedPairs
+        return ReviewRequest(title: "Review Build Files",
                       explanation: "Build output is deleted permanently. Your build tools recreate it (npm install, flutter pub get, the next Gradle or Xcode build). Source code, .git and settings are not touched.",
-                      items: m.selectedPairs.map { a, p in
+                      items: pairs.map { a, p in
                           ReviewItem(id: a.id, name: "\(p.name) › \(a.rel)", location: a.url.path, size: a.size, action: .delete,
                                      risk: a.review ? .review : .safe, note: "comes back with \(a.regen)",
                                      blocked: ProjectEngine.reason(a, in: p))
                       },
-                      verb: "Clean", perform: perform)
+                      verb: "Clean", perform: { ok in perform(pairs.filter { ok.contains($0.0.id) }) })
     }
 
-    static func sdks(_ m: SDKModel, perform: @escaping () -> Void) -> ReviewRequest {
-        ReviewRequest(title: "Review Developer SDKs",
+    static func sdks(_ m: SDKModel, perform: @escaping ([SDKItem]) -> Void) -> ReviewRequest {
+        let chosen = m.chosen
+        return ReviewRequest(title: "Review Developer SDKs",
                       explanation: "Runtimes and SDK parts are deleted permanently and can be downloaded again, which takes time and bandwidth. Xcode archives go to the Trash. Docker volumes and stopped containers hold data that can't be rebuilt.",
-                      items: m.chosen.map { i in
+                      items: chosen.map { i in
                           let action: ReviewItem.Action = {
                               switch i.action {
                               case .simRuntime, .docker, .brew: return .command
@@ -141,31 +160,32 @@ enum ReviewBuild {
                                             risk: i.inUse != nil ? .inUse : i.review ? .review : .safe,
                                             note: i.inUse ?? "comes back with \(i.regen)", blocked: SDKEngine.reason(i))
                       },
-                      verb: "Remove", perform: perform)
+                      verb: "Remove", perform: { ok in perform(chosen.filter { ok.contains($0.id) }) })
     }
 
     // MARK: System Data, Shredder
 
-    static func systemData(_ m: SystemDataModel, perform: @escaping () -> Void) -> ReviewRequest {
-        ReviewRequest(title: "Review System Data",
+    static func systemData(_ m: SystemDataModel, perform: @escaping ([SysItem]) -> Void) -> ReviewRequest {
+        let chosen = m.chosen
+        return ReviewRequest(title: "Review System Data",
                       explanation: "Device backups and attachments go to the Trash; they can't be recreated without the device or the sender. Time Machine snapshots are deleted permanently after you enter your password.",
-                      items: m.chosen.map { i in
+                      items: chosen.map { i in
                           let snapshot: Bool = { if case .snapshot = i.action { return true }; return false }()
                           return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? i.section.rawValue, size: i.size,
                                             action: snapshot ? .command : .trash, risk: i.review ? .review : .safe,
                                             note: snapshot ? "tmutil, needs your password" : i.detail,
                                             blocked: SystemDataEngine.reason(i))
                       },
-                      verb: "Remove", perform: perform)
+                      verb: "Remove", perform: { ok in perform(chosen.filter { ok.contains($0.id) }) })
     }
 
-    static func shred(_ items: [ShredderModel.Item], perform: @escaping () -> Void) -> ReviewRequest {
+    static func shred(_ items: [ShredderModel.Item], perform: @escaping ([ShredderModel.Item]) -> Void) -> ReviewRequest {
         ReviewRequest(title: "Shred Permanently",
                       explanation: "Shredding skips the Trash and cannot be undone.",
                       items: items.map {
                           ReviewItem(id: $0.id, name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size,
                                      action: .delete, risk: .review, note: "cannot be recovered", blocked: $0.blocked)
                       },
-                      verb: "Shred", perform: perform)
+                      verb: "Shred", perform: { ok in perform(items.filter { ok.contains($0.id) }) })
     }
 }

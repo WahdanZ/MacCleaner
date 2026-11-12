@@ -409,6 +409,12 @@ enum Cleaner {
             case .removeItem(let url):
                 remove(url, label: t.name)
             case .removeItems(let urls):
+                // All or nothing, like the review: if any part is refused now (protected since the scan, say),
+                // the whole item is skipped rather than partly deleted.
+                if let refused = urls.first(where: { !SafetyGuard.isAllowed($0) }) {
+                    errors.append("\(t.name): refused, \(ProtectedPaths.reason(refused) ?? "\(refused.lastPathComponent) is outside the allowed cache folders"); nothing in it was removed")
+                    continue
+                }
                 for u in urls { remove(u, label: t.name) }
             case .removeContents(let url):
                 guard SafetyGuard.isAllowed(url, allowContainer: true) else {

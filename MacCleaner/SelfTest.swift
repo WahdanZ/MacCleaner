@@ -576,12 +576,12 @@ enum SelfTest {
                     appSize: 0, lastUsed: nil, leftovers: [], caches: caches.map(cacheEntry))
         }
         let ccApp = testApp([ccBlocked, ccAllowed, ccLater])
-        let ccReview = MainActor.assumeIsolated { ReviewBuild.appCache(ccApp) {} }
+        let ccReview = MainActor.assumeIsolated { ReviewBuild.appCache(ccApp) { _ in } }
         let ccBlockedIDs = Set(ccReview.items.filter { $0.blocked != nil }.map(\.id))
         check("review blocks a cache outside the allow-list, allows the others", ccBlockedIDs == [ccBlocked.path])
         // A sandbox cache folder (path only, never created): the review shows what the engine does.
         let container = h("Library/Containers/com.example.maccleaner-selftest/Data/Library/Caches")
-        let containerRow = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+        let containerRow = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) { _ in } }.items.first
         check("review shows a sandboxed app cache as allowed, contents only, as the engine runs it",
               containerRow?.blocked == nil && containerRow?.note == AppEngine.contentsOnlyNote
               && AppEngine.cacheDecision(container) == AppEngine.CacheDecision(contentsOnly: true, blocked: nil))
@@ -589,7 +589,7 @@ enum SelfTest {
               { () -> Bool in
                   ProtectedPaths.set(savedProtected + [container.path])
                   defer { ProtectedPaths.set(savedProtected) }
-                  let row = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+                  let row = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) { _ in } }.items.first
                   return row?.blocked != nil && AppEngine.cacheDecision(container).blocked != nil
               }())
         ProtectedPaths.set(savedProtected + [ccLater.path])   // protected after the review was shown
@@ -714,6 +714,56 @@ enum SelfTest {
         check("an item in a folder not owned by root is not moved",
               notRootRun.status == 0 && fm.fileExists(atPath: realDir.appendingPathComponent("a.plist").path)
               && notRootRun.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) } == [])
+
+        print("Audit P2 fixes (review = execution, duplicates)")
+        // P2-1: what runs is what the review listed, even if a rescan changes the selection while it is open.
+        let p2Root = cacheItem.appendingPathComponent("p2")
+        let p2A = p2Root.appendingPathComponent("a"), p2B = p2Root.appendingPathComponent("b"), p2C = p2Root.appendingPathComponent("c")
+        for d in [p2A, p2B, p2C] {
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("f").path, contents: Data(count: 4096))
+        }
+        func p2Target(_ id: String, _ action: CleanAction) -> CleanTarget {
+            var t = CleanTarget(id: id, category: .devCache, name: id, path: id, note: "", action: action, sizeBytes: 4096, exists: true)
+            t.selected = true
+            return t
+        }
+        let reviewedRuns: [String] = MainActor.assumeIsolated {
+            let m = CleanerModel()
+            m.targets = [p2Target("p2.a", .removeItem(p2A))]
+            var ran: [String] = []
+            let req = ReviewBuild.junk(m) { ran = $0.map(\.id) }
+            m.targets.append(p2Target("p2.c", .removeItem(p2C)))        // a rescan while the sheet is open
+            req.perform(Set(req.allowed.map(\.id)))
+            return ran
+        }
+        check("review runs only what it listed, not items a rescan added", reviewedRuns == ["p2.a"])
+
+        // P2-2: an item made of several folders is blocked as a whole, and the cleaner keeps it whole.
+        ProtectedPaths.set(savedProtected + [p2B.path])
+        let multi = p2Target("p2.multi", .removeItems([p2A, p2B]))
+        let multiRow = MainActor.assumeIsolated { ReviewBuild.cacheItems([multi]).first }
+        let multiErrors = Cleaner.run([multi])
+        ProtectedPaths.set(savedProtected)
+        check("a multi-folder item with one protected folder is blocked in the review", multiRow?.blocked != nil)
+        check("…and the cleaner removes none of its folders",
+              !multiErrors.isEmpty && fm.fileExists(atPath: p2A.path) && fm.fileExists(atPath: p2B.path))
+
+        // P2-5: a duplicate goes to the Trash only while an identical copy still exists.
+        let dupA = sandbox.appendingPathComponent("p2-dup-a"), dupB = sandbox.appendingPathComponent("p2-dup-b")
+        let dupData = Data((0..<300_000).map { UInt8($0 % 253) })
+        fm.createFile(atPath: dupA.path, contents: dupData)
+        fm.createFile(atPath: dupB.path, contents: dupData)
+        let sameBefore = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        var edited = dupData; edited[150_000] ^= 1
+        fm.createFile(atPath: dupA.path, contents: edited)            // the kept copy is edited after the scan
+        let sameAfterEdit = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        try? fm.removeItem(at: dupA)
+        let sameAfterDelete = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        try? fm.linkItem(at: dupB, to: dupA)
+        let hardLink = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        check("duplicates: identical copies are recognised right before trashing", sameBefore)
+        check("duplicates: an edited, deleted or hard-linked kept copy stops the trash", !sameAfterEdit && !sameAfterDelete && !hardLink)
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

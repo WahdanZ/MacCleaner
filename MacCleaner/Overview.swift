@@ -100,14 +100,19 @@ final class OverviewModel {
         downloadsScanned = true
     }
 
-    func trashDownloads() async -> Int64 {
+    /// Moves exactly the reviewed old downloads to the Trash.
+    func trashDownloads(_ files: [BigFile]) async -> Int64 {
         var bytes: Int64 = 0
-        for f in oldDownloads where TrashGuard.canTrash(f.url) {
+        var moved: Set<String> = []
+        for f in files where TrashGuard.canTrash(f.url) {
             let u = f.url
-            if await Task.detached(operation: { AppEngine.trash(u, size: f.size, source: "Old Downloads") }).value == nil { bytes += f.size }
+            if await Task.detached(operation: { AppEngine.trash(u, size: f.size, source: "Old Downloads") }).value == nil {
+                bytes += f.size
+                moved.insert(f.id)
+            }
         }
         HistoryStore.shared.add("Old Downloads Moved to Trash", bytes: bytes, symbol: "arrow.down.circle", outcome: .trashed)
-        oldDownloads = []
+        oldDownloads.removeAll { moved.contains($0.id) }
         downloadsSelected = false
         return bytes
     }
@@ -482,11 +487,11 @@ private struct RecommendedCard: View {
 
     private func presentReview() {
         let downloads = ov.downloadsSelected ? ov.oldDownloads : []
-        review.present(ReviewBuild.overview(cleaner, downloads: downloads) {
+        review.present(ReviewBuild.overview(cleaner, downloads: downloads) { targets, files in
             Task {
                 ov.cleaning = true
-                if !cleaner.chosen.isEmpty { await cleaner.clean() }
-                if ov.downloadsSelected { _ = await ov.trashDownloads() }
+                if !targets.isEmpty { await cleaner.clean(targets) }
+                if !files.isEmpty { _ = await ov.trashDownloads(files) }
                 ov.cleaning = false
                 await ov.measure()
             }

@@ -185,7 +185,10 @@ private struct AppDetail: View {
                                 items: [ReviewItem(id: a.url.path, name: "\(a.name).app", location: a.url.path, size: a.appSize,
                                                    action: .command, risk: .review, note: "brew uninstall --cask \(token)",
                                                    blocked: ProtectedPaths.reason(a.url))],
-                                verb: "Uninstall", perform: { Task { await apps.uninstallWithBrew(a) } }))
+                                verb: "Uninstall", perform: { ok in
+                                    guard ok.contains(a.url.path) else { return }
+                                    Task { await apps.uninstallWithBrew(a) }
+                                }))
                         }
                         .disabled(apps.phase == .working || a.isSelf)
                     }
@@ -215,7 +218,7 @@ private struct AppDetail: View {
 
                 HStack(spacing: 8) {
                     Button {
-                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { Task { await apps.clearCaches(a) } }) }
+                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { items in Task { await apps.clearCaches(a, items) } }) }
                     } label: {
                         Label(a.cacheSize > 0 ? "Clear cache \(ByteText.string(a.cacheSize))" : "No cache to clear",
                               systemImage: "wind")
@@ -224,7 +227,7 @@ private struct AppDetail: View {
                     .disabled(a.cacheSize == 0 || apps.phase == .working)
 
                     Button {
-                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { Task { await apps.uninstall() } }) }
+                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { picked in Task { await apps.uninstall(a, picked: picked) } }) }
                     } label: {
                         Label("Uninstall…", systemImage: "trash")
                     }

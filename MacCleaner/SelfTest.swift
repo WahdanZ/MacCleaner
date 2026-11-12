@@ -452,6 +452,52 @@ enum SelfTest {
               && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
               && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
 
+        print("Apps › Clear Cache (review = execution)")
+        // Three throwaway caches: one outside the allow-list (blocked), one allowed, and one allowed when the
+        // review is built but protected before Clear runs. Only the allowed one may be deleted.
+        let ccBlocked = sandbox.appendingPathComponent("appcache-blocked")
+        let ccAllowed = h(".cache/maccleaner-selftest-appcache")
+        let ccLater = h(".cache/maccleaner-selftest-appcache-later")
+        defer { try? fm.removeItem(at: ccAllowed); try? fm.removeItem(at: ccLater) }
+        for u in [ccBlocked, ccAllowed, ccLater] {
+            try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            fm.createFile(atPath: u.appendingPathComponent("blob").path, contents: Data("x".utf8))
+        }
+        func cacheEntry(_ u: URL) -> AppLeftover { AppLeftover(id: u.path, url: u, label: "Caches", size: 1, include: true, note: nil) }
+        func testApp(_ caches: [URL]) -> AppInfo {
+            AppInfo(id: sandbox.appendingPathComponent("SelfTest.app").path, url: sandbox.appendingPathComponent("SelfTest.app"),
+                    name: "SelfTest", bundleID: "com.example.maccleaner-selftest", version: "1", isApple: false,
+                    appSize: 0, lastUsed: nil, leftovers: [], caches: caches.map(cacheEntry))
+        }
+        let ccApp = testApp([ccBlocked, ccAllowed, ccLater])
+        let ccReview = MainActor.assumeIsolated { ReviewBuild.appCache(ccApp) {} }
+        let ccBlockedIDs = Set(ccReview.items.filter { $0.blocked != nil }.map(\.id))
+        check("review blocks a cache outside the allow-list, allows the others", ccBlockedIDs == [ccBlocked.path])
+        // A sandbox cache folder (path only, never created): the review shows what the engine does.
+        let container = h("Library/Containers/com.example.maccleaner-selftest/Data/Library/Caches")
+        let containerRow = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+        check("review shows a sandboxed app cache as allowed, contents only, as the engine runs it",
+              containerRow?.blocked == nil && containerRow?.note == AppEngine.contentsOnlyNote
+              && AppEngine.cacheDecision(container) == AppEngine.CacheDecision(contentsOnly: true, blocked: nil))
+        check("a protected sandboxed app cache is blocked in the review and by the engine",
+              { () -> Bool in
+                  ProtectedPaths.set(savedProtected + [container.path])
+                  defer { ProtectedPaths.set(savedProtected) }
+                  let row = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+                  return row?.blocked != nil && AppEngine.cacheDecision(container).blocked != nil
+              }())
+        ProtectedPaths.set(savedProtected + [ccLater.path])   // protected after the review was shown
+        let ccErrors = AppEngine.clearCaches(ccApp.caches)
+        ProtectedPaths.set(savedProtected)
+        check("Clear leaves the item the review marked blocked untouched",
+              fm.fileExists(atPath: ccBlocked.appendingPathComponent("blob").path))
+        check("Clear deletes the item the review allowed", !fm.fileExists(atPath: ccAllowed.path))
+        check("Clear re-checks right before deleting: protected after the review → skipped",
+              fm.fileExists(atPath: ccLater.appendingPathComponent("blob").path))
+        check("skipped items are reported, one line each",
+              ccErrors.count == 2 && ccErrors.contains { $0.hasPrefix(ccBlocked.lastPathComponent + ":") && $0.hasSuffix("skipped") }
+              && ccErrors.contains { $0.hasPrefix(ccLater.lastPathComponent + ":") && $0.hasSuffix("skipped") })
+
         print("Password step staging (admin uninstall)")
         // The root script stages items in a fresh random folder only root can open, never in a folder another process
         // can create first, and gives you only that folder: a recursive chown as root would hand you any root-owned

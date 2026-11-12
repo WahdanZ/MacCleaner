@@ -331,8 +331,7 @@ enum SelfTest {
         let nfc = "F\u{00FC}hrung \u{00E9}t\u{00E9}"   // precomposed ü and é, as most apps save them
         let nfcFile = open(fx.path + "/a/" + nfc, O_CREAT | O_WRONLY | O_TRUNC, 0o644)   // raw bytes, no conversion
         if nfcFile >= 0 { _ = [UInt8](repeating: 1, count: 1_200_000).withUnsafeBytes { write(nfcFile, $0.baseAddress, $0.count) }; close(nfcFile) }
-        // Open it once by its decomposed spelling: the kernel's name cache then holds that form, which is what
-        // getattrlistbulk reports. The scan must still give the stored spelling.
+        // Also open it once by its decomposed spelling, as some apps do. The scan must still give the stored spelling.
         let nfdFile = open(fx.path + "/a/" + nfc.decomposedStringWithCanonicalMapping, O_RDONLY)
         if nfdFile >= 0 { close(nfdFile) }
         try? fm.createSymbolicLink(at: fx.appendingPathComponent("link-to-dir"), withDestinationURL: h("Library"))
@@ -366,6 +365,55 @@ enum SelfTest {
         let groups = DupEngine.run(roots: [dx], minSize: 1, cancel: DupEngine.Cancel()) { _ in }
         check("duplicates: one group of three, hard link and look-alike left out",
               groups.count == 1 && groups[0].files.count == 3 && !groups[0].files.contains { $0.lastPathComponent == "other" })
+
+        print("Updates")
+        check("version order: 1.10.0 > 1.9.2, 1.2.1 > 1.2, v1.3.0 > 1.3.0-beta",
+              Updater.isNewer("1.10.0", than: "1.9.2") && Updater.isNewer("1.2.1", than: "1.2")
+              && Updater.isNewer("v1.3.0", than: "1.3.0-beta"))
+        check("no update to the same, an older or a pre-release version",
+              !Updater.isNewer("1.2.0", than: "1.2") && !Updater.isNewer("1.1.9", than: "1.2.0")
+              && !Updater.isNewer("1.2.0-beta", than: "1.2.0"))
+        func releaseJSON(prerelease: Bool = false, dmgHost: String = "github.com") -> Data {
+            let base = "https://\(dmgHost)/WahdanZ/MacCleaner/releases/download/v1.3.0/"
+            return Data("""
+            {"tag_name":"v1.3.0","draft":false,"prerelease":\(prerelease),"body":"## What's new\\n- faster",
+             "html_url":"https://github.com/WahdanZ/MacCleaner/releases/tag/v1.3.0",
+             "assets":[{"name":"MacCleaner-1.3.0.dmg","size":5700000,"browser_download_url":"\(base)MacCleaner-1.3.0.dmg"},
+                       {"name":"MacCleaner-1.3.0.dmg.sha256","size":90,"browser_download_url":"\(base)MacCleaner-1.3.0.dmg.sha256"}]}
+            """.utf8)
+        }
+        let rel = Updater.parseRelease(releaseJSON())
+        check("reads the release: version, DMG, checksum and size",
+              rel?.version == "1.3.0" && rel?.dmg.lastPathComponent == "MacCleaner-1.3.0.dmg"
+              && rel?.checksum?.lastPathComponent == "MacCleaner-1.3.0.dmg.sha256" && rel?.size == 5_700_000)
+        check("ignores downloads that aren't on github.com", Updater.parseRelease(releaseJSON(dmgHost: "example.com")) == nil)
+        check("ignores drafts and pre-releases", Updater.parseRelease(releaseJSON(prerelease: true)) == nil)
+        let hash = String(repeating: "ab", count: 32)
+        check("reads a shasum line; rejects anything else",
+              Updater.parseChecksum("\(hash)  MacCleaner-1.3.0.dmg\n") == hash
+              && Updater.parseChecksum("not a hash") == nil && Updater.parseChecksum("") == nil)
+        check("Developer ID team from codesign; none for ad-hoc",
+              Updater.parseTeamID("Identifier=x\nTeamIdentifier=ABCDE12345\n") == "ABCDE12345"
+              && Updater.parseTeamID("TeamIdentifier=not set\n") == nil && Updater.parseTeamID(nil) == nil)
+        let sumFile = sandbox.appendingPathComponent("sum.bin")
+        fm.createFile(atPath: sumFile.path, contents: Data("abc".utf8))
+        check("SHA-256 of a file", (try? Updater.sha256(of: sumFile))
+              == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        // The swap script, on throwaway apps: the new copy replaces the old one and nothing is left behind.
+        let apps = sandbox.appendingPathComponent("apps"), work = sandbox.appendingPathComponent("MacCleaner-update-test")
+        let oldApp = apps.appendingPathComponent("Test.app"), newApp = work.appendingPathComponent("Test.app")
+        try? fm.createDirectory(at: oldApp.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: newApp.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        fm.createFile(atPath: oldApp.appendingPathComponent("Contents/old").path, contents: Data())
+        fm.createFile(atPath: newApp.appendingPathComponent("Contents/new").path, contents: Data())
+        let script = sandbox.appendingPathComponent("swap.sh")
+        try? Updater.swapScript.write(to: script, atomically: true, encoding: .utf8)
+        let swap = Shell.run("/bin/sh", [script.path, "2147483647", oldApp.path, newApp.path, work.path, "0"], timeout: 60)
+        let left = (try? fm.contentsOfDirectory(atPath: apps.path)) ?? []
+        check("update swap: new app in place, old copy and download folder removed",
+              swap.status == 0 && fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/new").path)
+              && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
+              && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

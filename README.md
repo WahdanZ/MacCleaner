@@ -81,7 +81,7 @@ A short welcome tour explains everything on first launch.
 - **Protect anything.** Add folders or files in **Settings › Protection**. Nothing in Mac Cleaner, its command line or an AI assistant can touch them.
 - **No system files.** Apple's own apps and system folders are never removed.
 - **Honest numbers.** Mac Cleaner tells you what was actually deleted and what only moved to the Trash.
-- **Private.** No accounts, analytics or tracking. Your data stays on your Mac.
+- **Private.** No accounts, analytics or tracking. Your data stays on your Mac. The only thing it asks the internet is GitHub, once a day, whether there's a new version (you can turn that off).
 
 ---
 
@@ -142,6 +142,9 @@ Anything that went to the Trash can be put back, from the **Put Back** button on
 
 **Is it safe to delete caches?**
 Yes. Caches are copies apps keep to load faster, and apps rebuild them. An app may start a little slower the first time afterwards.
+
+**How do I update it?**
+Mac Cleaner checks GitHub once a day and tells you when a new version is out, with what changed. Click **Install and Relaunch**: it downloads the new version, checks it against the release's checksum, and reopens. You can also choose **Mac Cleaner › Check for Updates…**, or turn the daily check off in *Settings › General*.
 
 **How do I remove Mac Cleaner?**
 Quit it and drag it from Applications to the Trash. If you installed the Terminal command, run `mac-cleaner uninstall-command` first. Your settings live in `~/Library/Preferences/io.github.wahdanz.maccleaner.plist` and `~/Library/Application Support/Mac Cleaner`.

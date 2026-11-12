@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 116 checks (the safety rules, the Insights forecast and history math, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 125 checks (the safety rules, the Insights forecast and history math, the updater's version, release, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -73,6 +73,7 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `SystemData.swift`, `SystemItems.swift`, `Shredder.swift` | System Data, Startup & Extensions, Shredder |
 | `Trash*.swift`, `History.swift` | Trash size, empty, Put Back log; cleanup history |
 | `Automation.swift` | Low-disk alert, weekly safe clean, open at login |
+| `Updates.swift` | In-app updates from GitHub Releases: daily check, Software Update window, download, checks, swap and relaunch |
 | `CLI.swift`, `MCPServer.swift`, `Integrations*.swift` | Command line, MCP server, AI app setup |
 | `Intro.swift` | Welcome tour |
 | `SelfTest.swift` | Safety self-test |
@@ -201,7 +202,7 @@ The server's `instructions` tell the assistant to show every item to the user an
 The product page lives in [`website/`](website/) (one `index.html`, one `style.css`, icons and the share image) and is published to GitHub Pages at <https://wahdanz.github.io/MacCleaner/> by [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
 
 - **Build:** [`scripts/build-site.sh`](scripts/build-site.sh) copies `website/` and `docs/screenshots/` into `_site/` and fills `{{VERSION}}` and `{{DMG_SIZE}}` from the newest release tag, so the download button always points at the latest DMG without any JavaScript.
-- **When it publishes:** on pushes to `main` that touch `website/`, `docs/screenshots/` or the workflow, and whenever a release is published.
+- **When it publishes:** on pushes to `main` that touch `website/`, `docs/screenshots/` or the workflow, and after every release (the Release workflow starts it, because GitHub doesn't let a release made by a workflow trigger other workflows).
 - **Rules:** no scripts, trackers, web fonts or third-party requests (a Content-Security-Policy meta tag enforces it). Screenshots come from the app with personal names blurred.
 - **Preview locally:** `scripts/build-site.sh /tmp/site && python3 -m http.server -d /tmp/site 8765`.
 - **One-time setup:** *Settings › Pages › Build and deployment › Source: GitHub Actions*.
@@ -222,6 +223,13 @@ git push origin v1.1.0
 - **Version:** taken from the tag (`v1.1.0` becomes `1.1.0`). A tag with a suffix such as `v1.2.0-beta.1` becomes a pre-release.
 - **Release notes:** generated from the commits since the last tag, with install steps on top.
 - **Test build:** *Actions › Release › Run workflow* builds a DMG as a download on the run's page, without publishing.
+- **In-app updates** read the latest non-pre-release from the GitHub API, so keep the asset names `MacCleaner-<version>.dmg` and `MacCleaner-<version>.dmg.sha256`; without the checksum file the app refuses to install. Before installing, the app checks:
+  - the SHA-256;
+  - that the app inside has the same app ID and the advertised version;
+  - `codesign --verify --strict`;
+  - once releases are Developer ID–signed, that the same team signed it.
+
+  A small script then waits for the app to quit, swaps the bundle (putting the old one back on failure) and reopens it. If the app's folder isn't writable, or the app runs from a disk image, it offers the download page instead.
 
 ### Signing and notarization (optional)
 

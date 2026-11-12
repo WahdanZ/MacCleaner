@@ -244,17 +244,18 @@ enum SelfTest {
             CleanTarget(id: id, category: c, name: id, path: u.path, note: "", action: .removeItem(u),
                         recommended: rec, sizeBytes: 100, exists: true)
         }
+        let autoCache = h("Library/Caches/com.example.maccleaner-selftest")   // path only, never created
         let picked = AutoClean.select([
-            target("ok", .devCache, cacheItem),
-            target("notrec", .devCache, cacheItem, rec: false),
+            target("ok", .appCaches, autoCache),
+            target("notrec", .appCaches, autoCache, rec: false),
             target("trash", .trash, h(".Trash/x")),
             target("dl", .appCaches, h("Downloads/x")),
             target("docs", .appCaches, h("Documents/x")),
-        ]).map(\.id)
+        ], running: []).map(\.id)
         check("takes recommended caches", picked.contains("ok"))
         check("skips not-recommended, Trash, Downloads and Documents", picked == ["ok"])
-        ProtectedPaths.set(savedProtected + [cacheItem.path])
-        check("skips protected caches", AutoClean.select([target("ok", .devCache, cacheItem)]).isEmpty)
+        ProtectedPaths.set(savedProtected + [autoCache.path])
+        check("skips protected caches", AutoClean.select([target("ok", .appCaches, autoCache)], running: []).isEmpty)
         ProtectedPaths.set(savedProtected)
 
         print("Settings migration (old app ID)")
@@ -764,6 +765,30 @@ enum SelfTest {
         let hardLink = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
         check("duplicates: identical copies are recognised right before trashing", sameBefore)
         check("duplicates: an edited, deleted or hard-linked kept copy stops the trash", !sameAfterEdit && !sameAfterDelete && !hardLink)
+
+        print("Audit P2 fixes (weekly clean scope)")
+        func autoTarget(_ id: String, _ action: CleanAction) -> CleanTarget {
+            CleanTarget(id: id, category: .devCache, name: id, path: id, note: "", action: action, sizeBytes: 4096, exists: true)
+        }
+        let hf = autoTarget("cache.huggingface", .removeItem(h(".cache/huggingface")))
+        let pip = autoTarget("cache.pip", .removeItem(h(".cache/pip")))
+        check("weekly clean: ~/.cache model caches stay, simple tool caches go",
+              AutoClean.select([hf, pip], running: []).map(\.id) == ["cache.pip"])
+        let runningCache = autoTarget("appcache.com.example.running", .removeItem(h("Library/Caches/com.example.running")))
+        let runningBox = autoTarget("container.com.example.running",
+                                    .removeContents(h("Library/Containers/com.example.running/Data/Library/Caches")))
+        check("weekly clean: caches of a running app are skipped",
+              AutoClean.select([runningCache, runningBox], running: ["com.example.running"]).isEmpty
+              && AutoClean.select([runningCache], running: []).count == 1)
+        let logsDir = sandbox.appendingPathComponent("Logs")
+        let crash = logsDir.appendingPathComponent("DiagnosticReports"), appLog = logsDir.appendingPathComponent("SomeApp")
+        for d in [crash, appLog] {
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("x.log").path, contents: Data(count: 4096))
+        }
+        let logs = AutoClean.narrowed(autoTarget("logs.user", .removeItems([crash, appLog])), running: [])
+        check("weekly clean: crash reports are kept, other logs go",
+              { if case .removeItems(let us)? = logs?.action { return us == [appLog] }; return false }())
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

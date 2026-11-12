@@ -19,22 +19,80 @@ enum AutoKeys {
 /// anything protected, or anything outside the allowed cache folders. Only folder and file
 /// actions qualify: commands such as deleting simulators always need a review, and a target with
 /// no paths is refused (an empty list would otherwise pass every check).
+///
+/// Narrower than a manual Junk clean, because nobody reviews it:
+/// - in `~/.cache`, only tools whose caches are cheap to rebuild (`autoDotCache`); model caches such as
+///   huggingface or torch can be many GB to download again, so they stay manual;
+/// - crash reports (`~/Library/Logs/DiagnosticReports`) are kept;
+/// - caches, sandbox caches and web caches of apps that are running are skipped.
 enum AutoClean {
-    static func select(_ targets: [CleanTarget]) -> [CleanTarget] {
+    /// `~/.cache/<name>` folders the weekly clean may empty.
+    static let autoDotCache: Set<String> = [
+        "pip", "pypoetry", "pre-commit", "go-build", "node-gyp", "yarn", "pnpm", "typescript",
+        "black", "ruff", "mypy", "deno",
+    ]
+
+    static func select(_ targets: [CleanTarget], running: Set<String>? = nil) -> [CleanTarget] {
         let downloads = SafetyGuard.home.appendingPathComponent("Downloads").path
-        return targets.filter { t in
-            guard t.recommended, t.isCleanable, t.category != .trash else { return false }
+        let running = running ?? runningAppKeys()
+        return targets.compactMap { t in
+            guard t.recommended, t.isCleanable, t.category != .trash else { return nil }
             switch t.action {
             case .removeItem, .removeItems, .removeContents, .webCachesIn: break
-            case .deleteUnavailableSimulators, .deleteSimRuntime: return false
+            case .deleteUnavailableSimulators, .deleteSimRuntime: return nil
             }
             let paths = urls(t)
-            guard !paths.isEmpty else { return false }
-            return paths.allSatisfy { u in
+            guard !paths.isEmpty else { return nil }
+            let allowed = paths.allSatisfy { u in
                 !SafetyGuard.isInside(u.path, downloads) && !ProtectedPaths.isBlocked(u)
                     && SafetyGuard.isAllowed(u, allowContainer: { if case .removeContents = t.action { return true }; return false }())
             }
+            guard allowed else { return nil }
+            return narrowed(t, running: running)
         }
+    }
+
+    /// The part of a target the weekly clean may take, or nil if none.
+    static func narrowed(_ t: CleanTarget, running: Set<String>) -> CleanTarget? {
+        let dotCache = SafetyGuard.home.appendingPathComponent(".cache").path
+        func keep(_ u: URL) -> Bool {
+            if u.deletingLastPathComponent().path == dotCache, !autoDotCache.contains(u.lastPathComponent) { return false }
+            if u.lastPathComponent == "DiagnosticReports" { return false }
+            if let app = appKey(u), running.contains(app.lowercased()) { return false }
+            return true
+        }
+        switch t.action {
+        case .removeItems(let us):
+            let kept = us.filter(keep)
+            guard !kept.isEmpty else { return nil }
+            guard kept.count != us.count else { return t }
+            var n = t
+            n.action = .removeItems(kept)
+            n.sizeBytes = kept.reduce(0) { $0 + Scanner.allocatedSize($1) }
+            return n.sizeBytes > 0 ? n : nil
+        default:
+            return urls(t).allSatisfy(keep) ? t : nil
+        }
+    }
+
+    /// Bundle ids, names and executable names (lowercased) of the apps running now.
+    static func runningAppKeys() -> Set<String> {
+        var keys = Set<String>()
+        for a in NSWorkspace.shared.runningApplications {
+            for k in [a.bundleIdentifier, a.localizedName, a.executableURL?.lastPathComponent] { if let k { keys.insert(k.lowercased()) } }
+        }
+        return keys
+    }
+
+    /// The app a cache folder belongs to: `~/Library/Caches/<id>`, `~/Library/Containers/<id>/…` or
+    /// `~/Library/Application Support/<name>/…`.
+    static func appKey(_ u: URL) -> String? {
+        let lib = SafetyGuard.home.appendingPathComponent("Library").path + "/"
+        let p = u.standardizedFileURL.path
+        guard p.hasPrefix(lib) else { return nil }
+        let parts = p.dropFirst(lib.count).split(separator: "/").map(String.init)
+        guard parts.count >= 2, ["Caches", "Containers", "Application Support"].contains(parts[0]) else { return nil }
+        return parts[1]
     }
 
     static func urls(_ t: CleanTarget) -> [URL] {

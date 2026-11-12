@@ -134,6 +134,10 @@ struct ContentView: View {
         .task { await trash.refresh() }
         // Every cleanup is recorded in history; refresh the Trash size after each one.
         .onChange(of: HistoryStore.shared.records.count) { Task { await trash.refresh() } }
+        // The CLI and MCP server record cleanups in the same files; show them when the app comes back.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            HistoryStore.shared.reload()
+        }
     }
 }
 

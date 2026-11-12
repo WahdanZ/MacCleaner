@@ -244,17 +244,18 @@ enum SelfTest {
             CleanTarget(id: id, category: c, name: id, path: u.path, note: "", action: .removeItem(u),
                         recommended: rec, sizeBytes: 100, exists: true)
         }
+        let autoCache = h("Library/Caches/com.example.maccleaner-selftest")   // path only, never created
         let picked = AutoClean.select([
-            target("ok", .devCache, cacheItem),
-            target("notrec", .devCache, cacheItem, rec: false),
+            target("ok", .appCaches, autoCache),
+            target("notrec", .appCaches, autoCache, rec: false),
             target("trash", .trash, h(".Trash/x")),
             target("dl", .appCaches, h("Downloads/x")),
             target("docs", .appCaches, h("Documents/x")),
-        ]).map(\.id)
+        ], running: []).map(\.id)
         check("takes recommended caches", picked.contains("ok"))
         check("skips not-recommended, Trash, Downloads and Documents", picked == ["ok"])
-        ProtectedPaths.set(savedProtected + [cacheItem.path])
-        check("skips protected caches", AutoClean.select([target("ok", .devCache, cacheItem)]).isEmpty)
+        ProtectedPaths.set(savedProtected + [autoCache.path])
+        check("skips protected caches", AutoClean.select([target("ok", .appCaches, autoCache)], running: []).isEmpty)
         ProtectedPaths.set(savedProtected)
 
         print("Settings migration (old app ID)")
@@ -576,12 +577,12 @@ enum SelfTest {
                     appSize: 0, lastUsed: nil, leftovers: [], caches: caches.map(cacheEntry))
         }
         let ccApp = testApp([ccBlocked, ccAllowed, ccLater])
-        let ccReview = MainActor.assumeIsolated { ReviewBuild.appCache(ccApp) {} }
+        let ccReview = MainActor.assumeIsolated { ReviewBuild.appCache(ccApp) { _ in } }
         let ccBlockedIDs = Set(ccReview.items.filter { $0.blocked != nil }.map(\.id))
         check("review blocks a cache outside the allow-list, allows the others", ccBlockedIDs == [ccBlocked.path])
         // A sandbox cache folder (path only, never created): the review shows what the engine does.
         let container = h("Library/Containers/com.example.maccleaner-selftest/Data/Library/Caches")
-        let containerRow = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+        let containerRow = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) { _ in } }.items.first
         check("review shows a sandboxed app cache as allowed, contents only, as the engine runs it",
               containerRow?.blocked == nil && containerRow?.note == AppEngine.contentsOnlyNote
               && AppEngine.cacheDecision(container) == AppEngine.CacheDecision(contentsOnly: true, blocked: nil))
@@ -589,7 +590,7 @@ enum SelfTest {
               { () -> Bool in
                   ProtectedPaths.set(savedProtected + [container.path])
                   defer { ProtectedPaths.set(savedProtected) }
-                  let row = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+                  let row = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) { _ in } }.items.first
                   return row?.blocked != nil && AppEngine.cacheDecision(container).blocked != nil
               }())
         ProtectedPaths.set(savedProtected + [ccLater.path])   // protected after the review was shown
@@ -714,6 +715,108 @@ enum SelfTest {
         check("an item in a folder not owned by root is not moved",
               notRootRun.status == 0 && fm.fileExists(atPath: realDir.appendingPathComponent("a.plist").path)
               && notRootRun.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) } == [])
+
+        print("Audit P2 fixes (review = execution, duplicates)")
+        // P2-1: what runs is what the review listed, even if a rescan changes the selection while it is open.
+        let p2Root = cacheItem.appendingPathComponent("p2")
+        let p2A = p2Root.appendingPathComponent("a"), p2B = p2Root.appendingPathComponent("b"), p2C = p2Root.appendingPathComponent("c")
+        for d in [p2A, p2B, p2C] {
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("f").path, contents: Data(count: 4096))
+        }
+        func p2Target(_ id: String, _ action: CleanAction) -> CleanTarget {
+            var t = CleanTarget(id: id, category: .devCache, name: id, path: id, note: "", action: action, sizeBytes: 4096, exists: true)
+            t.selected = true
+            return t
+        }
+        let reviewedRuns: [String] = MainActor.assumeIsolated {
+            let m = CleanerModel()
+            m.targets = [p2Target("p2.a", .removeItem(p2A))]
+            var ran: [String] = []
+            let req = ReviewBuild.junk(m) { ran = $0.map(\.id) }
+            m.targets.append(p2Target("p2.c", .removeItem(p2C)))        // a rescan while the sheet is open
+            req.perform(Set(req.allowed.map(\.id)))
+            return ran
+        }
+        check("review runs only what it listed, not items a rescan added", reviewedRuns == ["p2.a"])
+
+        // P2-2: an item made of several folders is blocked as a whole, and the cleaner keeps it whole.
+        ProtectedPaths.set(savedProtected + [p2B.path])
+        let multi = p2Target("p2.multi", .removeItems([p2A, p2B]))
+        let multiRow = MainActor.assumeIsolated { ReviewBuild.cacheItems([multi]).first }
+        let multiErrors = Cleaner.run([multi])
+        ProtectedPaths.set(savedProtected)
+        check("a multi-folder item with one protected folder is blocked in the review", multiRow?.blocked != nil)
+        check("…and the cleaner removes none of its folders",
+              !multiErrors.isEmpty && fm.fileExists(atPath: p2A.path) && fm.fileExists(atPath: p2B.path))
+
+        // P2-5: a duplicate goes to the Trash only while an identical copy still exists.
+        let dupA = sandbox.appendingPathComponent("p2-dup-a"), dupB = sandbox.appendingPathComponent("p2-dup-b")
+        let dupData = Data((0..<300_000).map { UInt8($0 % 253) })
+        fm.createFile(atPath: dupA.path, contents: dupData)
+        fm.createFile(atPath: dupB.path, contents: dupData)
+        let sameBefore = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        var edited = dupData; edited[150_000] ^= 1
+        fm.createFile(atPath: dupA.path, contents: edited)            // the kept copy is edited after the scan
+        let sameAfterEdit = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        try? fm.removeItem(at: dupA)
+        let sameAfterDelete = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        try? fm.linkItem(at: dupB, to: dupA)
+        let hardLink = DupEngine.identical(dupB, dupA, size: Int64(dupData.count))
+        check("duplicates: identical copies are recognised right before trashing", sameBefore)
+        check("duplicates: an edited, deleted or hard-linked kept copy stops the trash", !sameAfterEdit && !sameAfterDelete && !hardLink)
+
+        print("Audit P2 fixes (weekly clean scope)")
+        func autoTarget(_ id: String, _ action: CleanAction) -> CleanTarget {
+            CleanTarget(id: id, category: .devCache, name: id, path: id, note: "", action: action, sizeBytes: 4096, exists: true)
+        }
+        let hf = autoTarget("cache.huggingface", .removeItem(h(".cache/huggingface")))
+        let pip = autoTarget("cache.pip", .removeItem(h(".cache/pip")))
+        check("weekly clean: ~/.cache model caches stay, simple tool caches go",
+              AutoClean.select([hf, pip], running: []).map(\.id) == ["cache.pip"])
+        let runningCache = autoTarget("appcache.com.example.running", .removeItem(h("Library/Caches/com.example.running")))
+        let runningBox = autoTarget("container.com.example.running",
+                                    .removeContents(h("Library/Containers/com.example.running/Data/Library/Caches")))
+        check("weekly clean: caches of a running app are skipped",
+              AutoClean.select([runningCache, runningBox], running: ["com.example.running"]).isEmpty
+              && AutoClean.select([runningCache], running: []).count == 1)
+        let logsDir = sandbox.appendingPathComponent("Logs")
+        let crash = logsDir.appendingPathComponent("DiagnosticReports"), appLog = logsDir.appendingPathComponent("SomeApp")
+        for d in [crash, appLog] {
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("x.log").path, contents: Data(count: 4096))
+        }
+        let logs = AutoClean.narrowed(autoTarget("logs.user", .removeItems([crash, appLog])), running: [])
+        check("weekly clean: crash reports are kept, other logs go",
+              { if case .removeItems(let us)? = logs?.action { return us == [appLog] }; return false }())
+
+        print("Audit P2 fixes (shared logs)")
+        // P2-3: the window and the CLI/MCP process each keep a log object; neither may erase the other's entries.
+        let sharedLog = sandbox.appendingPathComponent("trash-log-test.json")
+        let inTrashA = sandbox.appendingPathComponent("in-trash-a"), inTrashB = sandbox.appendingPathComponent("in-trash-b")
+        fm.createFile(atPath: inTrashA.path, contents: Data("a".utf8))
+        fm.createFile(atPath: inTrashB.path, contents: Data("b".utf8))
+        let windowLog = TrashLog(file: sharedLog), mcpLog = TrashLog(file: sharedLog)   // both opened before either writes
+        mcpLog.record(original: "/x/a", trashed: inTrashA.path, size: 1, source: "MCP", restorable: true)
+        windowLog.record(original: "/x/b", trashed: inTrashB.path, size: 1, source: "Window", restorable: true)
+        check("Put Back log keeps entries from both the window and the MCP/CLI process",
+              Set(windowLog.present().map(\.source)) == ["MCP", "Window"])
+        let sharedHistory = sandbox.appendingPathComponent("history-test.json")
+        HistoryStore.insert(CleanupRecord(date: Date(), title: "mcp", bytes: 1, symbol: "x"), into: sharedHistory)
+        HistoryStore.insert(CleanupRecord(date: Date(), title: "window", bytes: 1, symbol: "x"), into: sharedHistory)
+        check("history keeps records from both processes",
+              Set((SharedFile.read(sharedHistory) as [CleanupRecord]).map(\.title)) == ["mcp", "window"])
+
+        print("Audit P2 fixes (tools can't hang)")
+        let quick = Shell.run("/bin/echo", ["hi"], timeout: 10)
+        check("a quick tool still returns its output", quick.status == 0 && quick.output == "hi\n")
+        var started = Date()
+        let orphan = Shell.run("/bin/sh", ["-c", "sleep 20 & sleep 20"], timeout: 1)
+        check("a tool whose helper keeps the output open returns after its time limit",
+              Date().timeIntervalSince(started) < 6 && (orphan.output ?? "").contains("timed out"))
+        started = Date()
+        let stubborn = Shell.run("/bin/sh", ["-c", "trap '' TERM; sleep 20"], timeout: 1)
+        check("a tool that ignores SIGTERM is killed", Date().timeIntervalSince(started) < 8 && (stubborn.output ?? "").contains("timed out"))
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

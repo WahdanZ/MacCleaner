@@ -133,6 +133,26 @@ enum DupEngine {
     }
 
     /// Drops hard-link twins and iCloud placeholders.
+    /// True if `a` and `b` are still two different files with the same `size` and byte-for-byte the same content.
+    /// Run right before a copy goes to the Trash, because either file may have changed since the scan.
+    /// iCloud placeholders count as "not the same" (reading them would download them).
+    static func identical(_ a: URL, _ b: URL, size: Int64) -> Bool {
+        var sa = stat(), sb = stat()
+        guard lstat(a.path, &sa) == 0, lstat(b.path, &sb) == 0,
+              (sa.st_mode & S_IFMT) == S_IFREG, (sb.st_mode & S_IFMT) == S_IFREG,
+              sa.st_size == size, sb.st_size == size,
+              (sa.st_flags | sb.st_flags) & 0x4000_0000 == 0,                      // SF_DATALESS
+              !(sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) else { return false }
+        guard let ha = try? FileHandle(forReadingFrom: a), let hb = try? FileHandle(forReadingFrom: b) else { return false }
+        defer { try? ha.close(); try? hb.close() }
+        while true {
+            let da = (try? ha.read(upToCount: 1 << 20)) ?? Data()
+            let db = (try? hb.read(upToCount: 1 << 20)) ?? Data()
+            if da != db { return false }
+            if da.isEmpty { return true }
+        }
+    }
+
     private static func uniqueLocalFiles(_ files: [URL]) -> [URL] {
         var seen = Set<String>()
         return files.filter { f in
@@ -268,18 +288,26 @@ final class DupFinder {
         }
     }
 
-    func trashMarked() async {
-        guard !marked.isEmpty else { return }
+    /// Moves exactly the reviewed copies to the Trash. Right before each one it checks that a copy that stays
+    /// still exists and still has the same content, so editing or deleting the kept copy after the scan never
+    /// leaves you without one.
+    func trashMarked(_ urls: [URL]) async {
+        let chosen = Set(urls)
+        guard !chosen.isEmpty else { return }
         phase = .trashing
         var errors: [String] = []
         var bytes: Int64 = 0
         var count = 0
         for gi in groups.indices {
-            for f in groups[gi].files where marked.contains(f) {
-                // Re-check: never trash the last remaining copy.
-                guard groups[gi].files.count > 1 else { break }
-                if let why = TrashGuard.reason(f) { errors.append("\(f.lastPathComponent): \(why)"); continue }
+            for f in groups[gi].files where chosen.contains(f) {
                 let size = groups[gi].size
+                let keepers = groups[gi].files.filter { !chosen.contains($0) }
+                let still = await Task.detached { keepers.contains { DupEngine.identical(f, $0, size: size) } }.value
+                guard still else {
+                    errors.append("\(f.lastPathComponent): no identical copy is left anymore, so it was kept")
+                    continue
+                }
+                if let why = TrashGuard.reason(f) { errors.append("\(f.lastPathComponent): \(why)"); continue }
                 let r: String? = await Task.detached {
                     AppEngine.trash(f, size: size, source: "Duplicates")
                 }.value

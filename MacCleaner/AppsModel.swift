@@ -70,7 +70,7 @@ enum AppScanner {
         /// `AppScanner.installedItems(pkg:)`, once per package per scan.
         func installedItems(_ pkg: String) -> [URL] { pkgFiles.get(pkg) { AppScanner.installedItems(pkg: pkg) } }
 
-        func receipts() -> String? { pkgs.get(0) { Shell.run("/usr/sbin/pkgutil", ["--pkgs"]).output } }
+        func receipts() -> String? { pkgs.get(0) { Shell.run("/usr/sbin/pkgutil", ["--pkgs"], timeout: 30).output } }
     }
 
     /// Computes each key's value once. Callers that ask while it is being computed wait for that result instead
@@ -282,8 +282,8 @@ enum AppScanner {
     /// Top-level items a package installed into places the admin step may clean
     /// (e.g. an audio driver in /Library/Audio/Plug-Ins/HAL), from `pkgutil --files`.
     static func installedItems(pkg: String) -> [URL] {
-        guard let info = Shell.run("/usr/sbin/pkgutil", ["--pkg-info", pkg]).output,
-              let files = Shell.run("/usr/sbin/pkgutil", ["--files", pkg]).output else { return [] }
+        guard let info = Shell.run("/usr/sbin/pkgutil", ["--pkg-info", pkg], timeout: 30).output,
+              let files = Shell.run("/usr/sbin/pkgutil", ["--files", pkg], timeout: 30).output else { return [] }
         var volume = "/", location = ""
         for line in info.split(separator: "\n") {
             if line.hasPrefix("volume: ") { volume = String(line.dropFirst(8)) }
@@ -493,11 +493,11 @@ final class AppsModel {
 
     /// Full uninstall: stop background jobs, app + checked leftovers → Trash,
     /// then one password prompt (macOS's own) for items outside your home folder.
-    func uninstall() async {
-        guard let a = selected, uninstallBlock(a) == nil else { return }
+    /// Uninstalls the app that was reviewed, with exactly the reviewed leftovers.
+    func uninstall(_ a: AppInfo, picked: [AppLeftover]) async {
+        guard uninstallBlock(a) == nil else { return }
         phase = .working
         if isRunning(a), !(await quit(a)) { phase = .done; return }
-        let picked = a.leftovers.filter(\.include)
         let r = await Task.detached { AppEngine.uninstall(a, picked: picked) }.value
         if r.appRemoved {
             apps.removeAll { $0.id == a.id }
@@ -509,10 +509,10 @@ final class AppsModel {
     }
 
     /// Deletes the app's disposable caches permanently (cache allow-list only).
-    func clearCaches(_ a: AppInfo) async {
-        guard !a.caches.isEmpty else { return }
+    /// Clears exactly the reviewed caches of the app.
+    func clearCaches(_ a: AppInfo, _ items: [AppLeftover]) async {
+        guard !items.isEmpty else { return }
         phase = .working
-        let items = a.caches
         let errors: [String] = await Task.detached { AppEngine.clearCaches(items) }.value
         let ids = Set(apps.map(\.bundleID))
         let fresh = await Task.detached { AppScanner.info(for: a.url, allIDs: ids) }.value
@@ -627,7 +627,7 @@ enum AdminStep {
     }
 
     static func run(_ items: [AppLeftover], uid: uid_t) -> Result {
-        let r = Shell.run("/usr/bin/osascript", ["-e", appleScript(script(items, uid: uid))])
+        let r = Shell.run("/usr/bin/osascript", ["-e", appleScript(script(items, uid: uid))], timeout: 600)
         if r.status == 0 {
             guard let staging = parseStaging(r.output), isTrustedStaging(staging, uid: uid) else {
                 return .failed("The password step finished, but its staging folder could not be checked, so it was not sent to the Trash. Look in \(stagingParent) for a folder named \(stagingPrefix)….")
@@ -670,7 +670,7 @@ enum AppEngine {
         guard !a.isSelf, !a.isApple else { return false }
         let uid = getuid()
         for l in a.leftovers where !l.needsAdmin {
-            if let label = l.launchLabel { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"]) }
+            if let label = l.launchLabel { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15) }
         }
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: a.bundleID)
         let pids = running.map(\.processIdentifier)
@@ -706,7 +706,7 @@ enum AppEngine {
         var r = UninstallResult()
         let uid = getuid()
         for l in picked where !l.needsAdmin {
-            if let label = l.launchLabel { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"]) }
+            if let label = l.launchLabel { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15) }
         }
         var adminItems = picked.filter(\.needsAdmin)
         if let e = trash(a.url, size: a.appSize, source: "Uninstall \(a.name)") {

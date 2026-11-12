@@ -110,7 +110,7 @@ The **Insights** card on the Overview shows how much space you reclaimed each we
 
 In **Settings › Automation**:
 - **Low-disk alert:** the menu bar icon turns orange, then red, and you get a notification when free space drops below your limit (20 GB by default). The menu bar menu also shows the free-space forecast, for example "Reaches 20 GB in about 6 weeks".
-- **Weekly safe clean** (off by default): clears recommended caches only. It never touches the Trash, your Downloads, your folders or anything protected.
+- **Weekly safe clean** (off by default): clears recommended caches only. It never touches the Trash, your Downloads, your folders or anything protected. It also leaves crash reports, model caches in `~/.cache` (only simple tool caches like pip or yarn are cleared) and the caches of apps that are running.
 - **Open at login** (in *Settings › General*), so the checks keep running from the menu bar.
 
 ---

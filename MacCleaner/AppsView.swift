@@ -65,7 +65,7 @@ private struct AppList: View {
                     Text("\(apps.apps.count) APPS").font(.mono(10.5, .bold)).foregroundStyle(Palette.accent)
                     Spacer()
                     Text("caches \(ByteText.string(apps.totalCaches))").font(.mono(10.5)).foregroundStyle(Palette.faint)
-                    Button { Task { await apps.scan() } } label: { Image(systemName: "arrow.clockwise") }
+                    Button { Task { await apps.scan() } } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Scan again")
                         .buttonStyle(.bordered)
                         .help("Rescan apps")
                 }
@@ -185,7 +185,10 @@ private struct AppDetail: View {
                                 items: [ReviewItem(id: a.url.path, name: "\(a.name).app", location: a.url.path, size: a.appSize,
                                                    action: .command, risk: .review, note: "brew uninstall --cask \(token)",
                                                    blocked: ProtectedPaths.reason(a.url))],
-                                verb: "Uninstall", perform: { Task { await apps.uninstallWithBrew(a) } }))
+                                verb: "Uninstall", perform: { ok in
+                                    guard ok.contains(a.url.path) else { return }
+                                    Task { await apps.uninstallWithBrew(a) }
+                                }))
                         }
                         .disabled(apps.phase == .working || a.isSelf)
                     }
@@ -206,7 +209,7 @@ private struct AppDetail: View {
                             .foregroundStyle(m.isError ? Palette.warn : Palette.accent)
                         Text(m.text).font(.callout).lineLimit(4).frame(maxWidth: .infinity, alignment: .leading)
                         Spacer()
-                        Button { apps.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
+                        Button { apps.message = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss").buttonStyle(.plain)
                     }
                     .padding(10)
                     .background((m.isError ? Palette.warn : Palette.accent).opacity(0.1),
@@ -215,7 +218,7 @@ private struct AppDetail: View {
 
                 HStack(spacing: 8) {
                     Button {
-                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { Task { await apps.clearCaches(a) } }) }
+                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { items in Task { await apps.clearCaches(a, items) } }) }
                     } label: {
                         Label(a.cacheSize > 0 ? "Clear cache \(ByteText.string(a.cacheSize))" : "No cache to clear",
                               systemImage: "wind")
@@ -224,7 +227,7 @@ private struct AppDetail: View {
                     .disabled(a.cacheSize == 0 || apps.phase == .working)
 
                     Button {
-                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { Task { await apps.uninstall() } }) }
+                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { picked in Task { await apps.uninstall(a, picked: picked) } }) }
                     } label: {
                         Label("Uninstall…", systemImage: "trash")
                     }

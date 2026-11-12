@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 176 checks (the safety rules, the audit fixes, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 189 checks (the safety rules, the audit fixes, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -79,6 +79,7 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `SelfTest.swift` | Safety self-test |
 | `DirSize.swift` | Fast folder sizing and listing with `getattrlistbulk`, used by every scan |
 | `Bench.swift` | `--cli bench`: times every scan and the longest main-thread stall |
+| `SharedFile.swift` | Locked read-change-write for the JSON files the window and the CLI/MCP process share (Put Back log, history) |
 
 ### Scanning and threads
 
@@ -102,7 +103,7 @@ Design decisions and the UI audit are in [docs/DESIGN.md](docs/DESIGN.md). The f
 
 These are the project's core promise. Keep them true in the app, the CLI and the MCP server.
 
-1. **Review first.** Nothing is removed until the user has seen every item. In the app this is the Review sheet; in the CLI you type `yes` (or pass `--yes`); over MCP a tool returns a preview with a single-use `preview_id`, and only a call with `confirm: true` and that id runs. The id expires after 10 minutes and is tied to the exact items, so a confirm that resolves to a different app, path or selection is refused.
+1. **Review first.** Nothing is removed until the user has seen every item. In the app this is the Review sheet; in the CLI you type `yes` (or pass `--yes`); over MCP a tool returns a preview with a single-use `preview_id`, and only a call with `confirm: true` and that id runs. The id expires after 10 minutes and is tied to the exact items, so a confirm that resolves to a different app, path or selection is refused. The Review sheet runs exactly the rows it showed (captured when it opened), never the screen's live selection.
 2. **Recoverable by default.** Only regenerable data (caches, build output, SDK downloads) is deleted permanently. The user's own files go to the Trash and are logged so Put Back can restore them.
 3. **Guards decide, every time.** The engines re-check the guards right before acting, even if the UI already did:
    - **`SafetyGuard`:** permanent deletion only inside known cache roots. Symlinks are resolved first, and root folders themselves are never removed.

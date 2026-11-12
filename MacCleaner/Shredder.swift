@@ -122,8 +122,10 @@ final class ShredderModel {
         if p.runModal() == .OK { add(p.urls) }
     }
 
-    func shred() async {
-        let list = ready
+    /// Shreds exactly the reviewed items that are still ready (not blocked since).
+    func shred(_ reviewed: [Item]) async {
+        let ids = Set(ready.map(\.id))
+        let list = reviewed.filter { ids.contains($0.id) }
         guard !list.isEmpty else { return }
         working = true
         var bytes: Int64 = 0, problems: [String] = [], partial = 0
@@ -180,7 +182,7 @@ struct ShredderView: View {
                                     }
                                     Spacer()
                                     Text(ByteText.string(i.size)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                                    Button { m.items.removeAll { $0.id == i.id } } label: { Image(systemName: "xmark.circle.fill") }
+                                    Button { m.items.removeAll { $0.id == i.id } } label: { Image(systemName: "xmark.circle.fill") }.accessibilityLabel("Remove from list")
                                         .buttonStyle(.plain).foregroundStyle(Palette.faint)
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 7)
@@ -209,7 +211,7 @@ struct ShredderView: View {
                 if !m.items.isEmpty {
                     Button("Add more…") { m.choose() }.buttonStyle(.bordered)
                 }
-                Button { review.present(ReviewBuild.shred(m.items) { Task { await m.shred() } }) } label: {
+                Button { review.present(ReviewBuild.shred(m.items) { items in Task { await m.shred(items) } }) } label: {
                     Label(m.ready.isEmpty ? "Shred" : "Shred \(ByteText.string(m.total))", systemImage: "flame")
                 }
                 .buttonStyle(.borderedProminent)

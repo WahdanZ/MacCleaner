@@ -149,7 +149,7 @@ private struct Breadcrumbs: View {
     var body: some View {
         let _ = map.revision
         HStack(spacing: 6) {
-            Button { map.up() } label: { Image(systemName: "chevron.left") }
+            Button { map.up() } label: { Image(systemName: "chevron.left") }.accessibilityLabel("Up one folder")
                 .buttonStyle(.bordered)
                 .disabled(map.current?.parent == nil)
                 .keyboardShortcut(.upArrow, modifiers: .command)
@@ -175,7 +175,7 @@ private struct Breadcrumbs: View {
                 Text(ByteText.string(c.size)).font(.mono(13, .bold))
                 Text("· \(c.fileCount.formatted()) files").font(.mono(11)).foregroundStyle(Palette.faint)
             }
-            Button { map.start() } label: { Image(systemName: "arrow.clockwise") }
+            Button { map.start() } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("Scan again")
                 .buttonStyle(.bordered)
                 .help("Rescan")
         }
@@ -207,10 +207,11 @@ private struct DiskTreemap: View {
                         .frame(width: r.width, height: r.height)
                         .offset(x: r.minX, y: r.minY)
                         .onTapGesture(count: 2) { map.open(n) }
-                        .onTapGesture { map.selected = n }
+                        .simultaneousGesture(TapGesture().onEnded { map.selected = n })   // selects at once, no double-click wait
                         .onHover { inside in
                             if inside { hovered = n.id } else if hovered == n.id { hovered = nil }
                         }
+                        .storageItemAccessibility(n, map: map)
                         .help("\(n.name) — \(ByteText.string(n.size))\n\(n.tildePath)\n\(n.canOpen ? "Double-click to open" : "")")
                 }
                 if restBytes > 0, let rr = rects[shown.count] {
@@ -506,6 +507,7 @@ private struct OutlineRow: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(map.expanded.contains(node.id) ? "Collapse \(node.name)" : "Expand \(node.name)")
             } else {
                 Color.clear.frame(width: 12, height: 1)
             }
@@ -535,8 +537,34 @@ private struct OutlineRow: View {
                     in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { map.open(node) }
-        .onTapGesture { map.selected = node }
+        .simultaneousGesture(TapGesture().onEnded { map.selected = node })
         .onHover { hover = $0 }
+        .storageItemAccessibility(node, map: map, expandable: node.isDirectory && !node.isAggregate)
         .help(node.tildePath)
+    }
+}
+
+private extension View {
+    /// One VoiceOver element per Storage Map item: name, size and kind, whether it is marked, and actions to
+    /// select it, open a folder and mark it for the Trash (the same things a click, double-click and the
+    /// checkbox do).
+    func storageItemAccessibility(_ n: DiskNode, map: DiskMapModel, expandable: Bool = false) -> some View {
+        let canTrash = !n.isAggregate && TrashGuard.canTrash(n.url)
+        let kind = n.isAggregate ? "files under 1 MB" : n.isDirectory ? "folder" : "file"
+        return self
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(n.name), \(ByteText.string(n.size)), \(kind)")
+            .accessibilityValue(map.marked[n.id] != nil ? "Marked for Trash" : map.selected === n ? "Selected" : "")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { map.selected = n }
+            .accessibilityActions {
+                if n.canOpen { Button("Open") { map.open(n) } }
+                if expandable {
+                    Button(map.expanded.contains(n.id) ? "Collapse" : "Expand") { map.toggleExpanded(n) }
+                }
+                if canTrash {
+                    Button(map.marked[n.id] != nil ? "Unmark for Trash" : "Mark for Trash") { map.toggleMark(n) }
+                }
+            }
     }
 }

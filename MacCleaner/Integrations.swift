@@ -144,8 +144,8 @@ final class IntegrationsModel {
                 try write(text, to: file)
             case .claudeCode:
                 if let cli = Self.claudeCLI() {
-                    _ = Shell.run(cli, ["mcp", "remove", "mac-cleaner", "-s", "user"])
-                    let r = Shell.run(cli, ["mcp", "add", "mac-cleaner", "-s", "user", "--", SkillText.serverCommand, "--mcp"])
+                    _ = Shell.run(cli, ["mcp", "remove", "mac-cleaner", "-s", "user"], timeout: 60)
+                    let r = Shell.run(cli, ["mcp", "add", "mac-cleaner", "-s", "user", "--", SkillText.serverCommand, "--mcp"], timeout: 60)
                     if r.status != 0 { throw NSError(domain: "claude", code: Int(r.status),
                                                      userInfo: [NSLocalizedDescriptionKey: r.output ?? "claude mcp add failed"]) }
                 } else {
@@ -179,7 +179,7 @@ final class IntegrationsModel {
                 try write(Self.removeTomlBlock(text), to: file)
             case .claudeCode:
                 if let cli = Self.claudeCLI() {
-                    _ = Shell.run(cli, ["mcp", "remove", "mac-cleaner", "-s", "user"])
+                    _ = Shell.run(cli, ["mcp", "remove", "mac-cleaner", "-s", "user"], timeout: 60)
                 } else {
                     try editJSON(Self.home + "/.claude.json") { d in
                         var servers = d["mcpServers"] as? [String: Any] ?? [:]

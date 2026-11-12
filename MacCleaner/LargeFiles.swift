@@ -169,8 +169,8 @@ final class LargeFilesModel {
         if marked.contains(f.id) { marked.remove(f.id) } else { marked.insert(f.id) }
     }
 
-    func trashMarked() async {
-        let items = markedFiles
+    /// Moves exactly the reviewed files to the Trash.
+    func trashMarked(_ items: [BigFile]) async {
         guard !items.isEmpty else { return }
         phase = .trashing
         var bytes: Int64 = 0, errors: [String] = []
@@ -261,7 +261,7 @@ struct LargeFilesView: View {
                         .font(.system(size: 12)).foregroundStyle(Palette.dim)
                 }
                 Spacer()
-                Button { review.present(ReviewBuild.largeFiles(m) { Task { await m.trashMarked() } }) } label: {
+                Button { review.present(ReviewBuild.largeFiles(m) { files in Task { await m.trashMarked(files) } }) } label: {
                     Label(m.marked.isEmpty ? "Move to Trash" : "Move \(ByteText.string(m.markedBytes)) to Trash", systemImage: "trash")
                 }
                 .buttonStyle(.borderedProminent)
@@ -300,7 +300,7 @@ private struct BigFileRow: View {
                 .font(.system(size: 11)).foregroundStyle(Palette.dim)
             Text(ByteText.string(file.size)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
                 .frame(width: 80, alignment: .trailing)
-            Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "magnifyingglass") }
+            Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Show in Finder")
                 .buttonStyle(.plain).foregroundStyle(Palette.dim).help("Reveal in Finder")
         }
         .padding(.horizontal, 10).padding(.vertical, 7)

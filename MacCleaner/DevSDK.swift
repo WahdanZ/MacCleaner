@@ -398,7 +398,7 @@ enum SDKEngine {
             var ok = true
             switch item.action {
             case .simRuntime(let id):
-                let r = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", id])
+                let r = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", id], timeout: 600)
                 if r.status != 0 { ok = false; errors.append("\(item.name): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "simctl failed")") }
             case .delete(let us):
                 for u in us where fm.fileExists(atPath: u.path) {
@@ -502,8 +502,8 @@ final class SDKModel {
 
     func selectUnused() { selected.formUnion(items.filter(\.isUnused).map(\.id)) }
 
-    func remove() async {
-        let list = chosen
+    /// Removes exactly the reviewed items.
+    func remove(_ list: [SDKItem]) async {
         guard !list.isEmpty else { return }
         phase = .removing
         let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, trashed: Int64, errors: [String]) in

@@ -303,8 +303,8 @@ final class DiskMapModel {
     }
 
     /// Moves marked items to the Trash (recoverable) and updates the tree.
-    func trashMarked() async {
-        let items = topLevelMarked
+    /// Moves exactly the reviewed items to the Trash.
+    func trashMarked(_ items: [DiskNode]) async {
         guard !items.isEmpty else { return }
         phase = .trashing
         var errors: [String] = []

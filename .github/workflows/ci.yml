@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token: CI only builds and tests.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build, self-test, CLI check
@@ -18,7 +22,7 @@ jobs:
     env:
       APP: build/Release/Mac Cleaner.app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -54,7 +58,7 @@ jobs:
       - name: Package app
         run: ditto -c -k --keepParent "$APP" MacCleaner-unsigned.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: MacCleaner-unsigned
           path: MacCleaner-unsigned.zip

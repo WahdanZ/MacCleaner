@@ -162,7 +162,7 @@ enum SystemDataEngine {
         if !snaps.isEmpty {
             let before = Scanner.freeBytes()
             let script = snaps.map { "/usr/bin/tmutil deletelocalsnapshots \($0)" }.joined(separator: "; ")
-            let r = Shell.run("/usr/bin/osascript", ["-e", "do shell script \"\(script)\" with administrator privileges"])
+            let r = Shell.run("/usr/bin/osascript", ["-e", "do shell script \"\(script)\" with administrator privileges"], timeout: 900)
             if r.status != 0 {
                 let out = r.output ?? ""
                 if out.contains("-128") { cancelled = true } else { errors.append("Snapshots: \(out.trimmingCharacters(in: .whitespacesAndNewlines))") }
@@ -205,8 +205,9 @@ final class SystemDataModel {
         if selected.contains(i.id) { selected.remove(i.id) } else { selected.insert(i.id) }
     }
 
-    func remove() async {
-        let list = chosen
+    /// Removes exactly the reviewed items.
+    func remove(_ list: [SysItem]) async {
+        guard !list.isEmpty else { return }
         busy = true
         let r = await Task.detached { SystemDataEngine.remove(list) }.value
         HistoryStore.shared.add("Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
@@ -275,7 +276,7 @@ struct SystemDataView: View {
                 Spacer()
                 Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.bordered).disabled(m.busy)
-                Button { review.present(ReviewBuild.systemData(m) { Task { await m.remove() } }) } label: {
+                Button { review.present(ReviewBuild.systemData(m) { items in Task { await m.remove(items) } }) } label: {
                     Label(m.selected.isEmpty ? "Remove" : "Remove \(ByteText.string(m.selectedBytes))", systemImage: "trash")
                         .contentTransition(.numericText())
                 }

@@ -328,8 +328,8 @@ final class ProjectsModel {
         for p in visible { for a in p.artifacts where !a.review && isSelectable(a, p) { selected.insert(a.id) } }
     }
 
-    func clean() async {
-        let items = selectedPairs
+    /// Cleans exactly the reviewed build folders.
+    func clean(_ items: [(ProjectArtifact, DevProject)]) async {
         guard !items.isEmpty else { return }
         phase = .cleaning
         let freeBefore = Scanner.freeBytes()

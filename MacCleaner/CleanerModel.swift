@@ -113,8 +113,8 @@ final class CleanerModel {
         phase = .results
     }
 
-    func clean() async {
-        let items = chosen
+    /// Cleans exactly the reviewed targets (not whatever is selected now).
+    func clean(_ items: [CleanTarget]) async {
         guard !items.isEmpty, !isBusy else { return }
         phase = .cleaning
         runningBytes = 0

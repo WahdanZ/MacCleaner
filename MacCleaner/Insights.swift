@@ -88,6 +88,16 @@ enum InsightMath {
         return starts.map { Week(start: $0, deleted: deleted[$0] ?? 0, trashed: trashed[$0] ?? 0) }
     }
 
+    /// One line for the menu bar menu: "Reaches 20 GB in about 6 weeks".
+    static func shortForecast(days: Double?, limit: Int64, sampleCount: Int) -> String {
+        let alert = ByteText.string(limit)
+        guard let days else {
+            return sampleCount < 3 ? "Forecast: ready after a few days" : "Free space is steady"
+        }
+        if days == 0 { return "Below your \(alert) alert" }
+        return "Reaches \(alert) in \(durationText(days: days))"
+    }
+
     /// "about 3 weeks", "about 5 days", "less than a day".
     static func durationText(days: Double) -> String {
         switch days {

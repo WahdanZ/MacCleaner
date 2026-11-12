@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/WahdanZ/MacCleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/WahdanZ/MacCleaner/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey)
 
-**Free up space on your Mac, without the worry.**
+**Free up space on your Mac, without the worry.** · [Website](https://wahdanz.github.io/MacCleaner/)
 
 Mac Cleaner finds caches, leftovers, old downloads, duplicate files and developer clutter, and shows you every item with its size. Nothing is removed until you've reviewed it. Your own files go to the Trash, so you can put them back.
 
@@ -33,7 +33,7 @@ Mac Cleaner finds caches, leftovers, old downloads, duplicate files and develope
 
 1. Download the latest **`MacCleaner-x.y.z.dmg`** from [Releases](https://github.com/WahdanZ/MacCleaner/releases).
 2. Open it and drag **Mac Cleaner** into **Applications**.
-3. Open Mac Cleaner. The first time, macOS may say it can't check the app for malicious software: open **System Settings › Privacy & Security**, scroll down, and click **Open Anyway**.
+3. Open Mac Cleaner. The app isn't notarized by Apple yet, so the first time macOS says it can't check it. Click **Done** (not **Move to Trash**), then open **System Settings › Privacy & Security**, scroll down, click **Open Anyway** and confirm. On macOS 14 Sonoma you can also Control-click the app and choose **Open**.
 
 Mac Cleaner needs **macOS 14 Sonoma or later**. It's free and open source.
 
@@ -101,7 +101,7 @@ A short welcome tour explains everything on first launch.
 The **Insights** card on the Overview shows how much space you reclaimed each week (deleted vs moved to the Trash), how your free space has changed over the last weeks with a forecast of when it reaches your alert level, and which kinds of junk take the most space. Mac Cleaner notes your free space once a day to draw the trend; only the numbers are kept, on your Mac.
 
 In **Settings › Automation**:
-- **Low-disk alert:** the menu bar icon turns orange, then red, and you get a notification when free space drops below your limit (20 GB by default).
+- **Low-disk alert:** the menu bar icon turns orange, then red, and you get a notification when free space drops below your limit (20 GB by default). The menu bar menu also shows the free-space forecast, for example "Reaches 20 GB in about 6 weeks".
 - **Weekly safe clean** (off by default): clears recommended caches only. It never touches the Trash, your Downloads, your folders or anything protected.
 - **Open at login** (in *Settings › General*), so the checks keep running from the menu bar.
 

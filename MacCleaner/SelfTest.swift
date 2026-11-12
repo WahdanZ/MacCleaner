@@ -304,6 +304,11 @@ enum SelfTest {
         check("this week splits deleted and trashed", weeks.last!.deleted == 3 * gb && weeks.last!.trashed == gb)
         check("older records count as deleted; weeks outside the range are left out",
               weeks.reduce(0) { $0 + $1.deleted } == 5 * gb)
+        check("menu bar forecast wording",
+              InsightMath.shortForecast(days: 26, limit: 20 * gb, sampleCount: 5) == "Reaches 20 GB in about 4 weeks"
+              && InsightMath.shortForecast(days: nil, limit: 20 * gb, sampleCount: 1) == "Forecast: ready after a few days"
+              && InsightMath.shortForecast(days: nil, limit: 20 * gb, sampleCount: 9) == "Free space is steady"
+              && InsightMath.shortForecast(days: 0, limit: 20 * gb, sampleCount: 9) == "Below your 20 GB alert")
         check("forecast wording", InsightMath.durationText(days: 26) == "about 4 weeks"
               && InsightMath.durationText(days: 1) == "about 1 day" && InsightMath.durationText(days: 0.4) == "less than a day")
 

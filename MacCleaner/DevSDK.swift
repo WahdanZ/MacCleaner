@@ -398,7 +398,7 @@ enum SDKEngine {
             var ok = true
             switch item.action {
             case .simRuntime(let id):
-                let r = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", id])
+                let r = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", id], timeout: 600)
                 if r.status != 0 { ok = false; errors.append("\(item.name): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "simctl failed")") }
             case .delete(let us):
                 for u in us where fm.fileExists(atPath: u.path) {

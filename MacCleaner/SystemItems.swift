@@ -168,7 +168,7 @@ enum StartupScanner {
                 let label = p?["Label"] as? String ?? String(f.dropLast(6))
                 let program = (p?["Program"] as? String) ?? ((p?["ProgramArguments"] as? [String])?.first) ?? ""
                 let domain = scope == .system ? "system" : "gui/\(uid)"
-                let running = Shell.run("/bin/launchctl", ["print", "\(domain)/\(label)"]).status == 0
+                let running = Shell.run("/bin/launchctl", ["print", "\(domain)/\(label)"], timeout: 10).status == 0
                 out.append(StartupItem(id: u.path, url: u, label: label, program: program, owner: owner(of: program, label: label),
                                        scope: scope, running: running, runAtLoad: (p?["RunAtLoad"] as? Bool) ?? false))
             }
@@ -208,8 +208,8 @@ final class StartupModel {
         busy = true
         let uid = getuid(), path = s.url.path, label = s.label
         let r = await Task.detached {
-            s.running ? Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"])
-                      : Shell.run("/bin/launchctl", ["bootstrap", "gui/\(uid)", path])
+            s.running ? Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15)
+                      : Shell.run("/bin/launchctl", ["bootstrap", "gui/\(uid)", path], timeout: 15)
         }.value
         if r.status != 0 { message = ("\(s.owner): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "launchctl failed")", true) }
         else { message = (s.running ? "Stopped \(s.owner) until next login." : "Started \(s.owner).", false) }
@@ -223,7 +223,7 @@ final class StartupModel {
         } else if s.scope == .user {
             let uid = getuid(), label = s.label, u = s.url
             let e = await Task.detached { () -> String? in
-                _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"])
+                _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15)
                 return AppEngine.trash(u)
             }.value
             message = e == nil ? ("\(s.owner) removed from startup (moved to Trash).", false) : ("\(s.owner): \(e!)", true)

@@ -807,6 +807,17 @@ enum SelfTest {
         check("history keeps records from both processes",
               Set((SharedFile.read(sharedHistory) as [CleanupRecord]).map(\.title)) == ["mcp", "window"])
 
+        print("Audit P2 fixes (tools can't hang)")
+        let quick = Shell.run("/bin/echo", ["hi"], timeout: 10)
+        check("a quick tool still returns its output", quick.status == 0 && quick.output == "hi\n")
+        var started = Date()
+        let orphan = Shell.run("/bin/sh", ["-c", "sleep 20 & sleep 20"], timeout: 1)
+        check("a tool whose helper keeps the output open returns after its time limit",
+              Date().timeIntervalSince(started) < 6 && (orphan.output ?? "").contains("timed out"))
+        started = Date()
+        let stubborn = Shell.run("/bin/sh", ["-c", "trap '' TERM; sleep 20"], timeout: 1)
+        check("a tool that ignores SIGTERM is killed", Date().timeIntervalSince(started) < 8 && (stubborn.output ?? "").contains("timed out"))
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

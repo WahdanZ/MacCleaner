@@ -99,7 +99,7 @@ enum TrashOps {
         var t = Application("Finder").trash.items();
         t.map(function (i) { return decodeURIComponent(i.url().replace(/^file:\\/\\//, "")).replace(/\\/$/, ""); }).join("\\n");
         """
-        let r = Shell.run("/usr/bin/osascript", ["-l", "JavaScript", "-e", js])
+        let r = Shell.run("/usr/bin/osascript", ["-l", "JavaScript", "-e", js], timeout: 60)
         guard r.status == 0, let out = r.output else { return nil }
         return out.split(separator: "\n").map(String.init).filter { $0.hasPrefix("/") }
     }
@@ -107,7 +107,7 @@ enum TrashOps {
     /// Empties the Trash through Finder. Returns nil on success.
     static func empty() -> String? {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
-        let r = Shell.run("/usr/bin/osascript", ["-e", "tell application \"Finder\" to empty trash"])
+        let r = Shell.run("/usr/bin/osascript", ["-e", "tell application \"Finder\" to empty trash"], timeout: 1800)
         if r.status == 0 {
             TrashLog.shared.clear()
             return nil

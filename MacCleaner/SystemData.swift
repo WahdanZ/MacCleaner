@@ -162,7 +162,7 @@ enum SystemDataEngine {
         if !snaps.isEmpty {
             let before = Scanner.freeBytes()
             let script = snaps.map { "/usr/bin/tmutil deletelocalsnapshots \($0)" }.joined(separator: "; ")
-            let r = Shell.run("/usr/bin/osascript", ["-e", "do shell script \"\(script)\" with administrator privileges"])
+            let r = Shell.run("/usr/bin/osascript", ["-e", "do shell script \"\(script)\" with administrator privileges"], timeout: 900)
             if r.status != 0 {
                 let out = r.output ?? ""
                 if out.contains("-128") { cancelled = true } else { errors.append("Snapshots: \(out.trimmingCharacters(in: .whitespacesAndNewlines))") }

@@ -299,7 +299,7 @@ enum Scanner {
     struct SimRuntime { let id: String; let name: String; let size: Int64 }
 
     static func simRuntimes() -> [SimRuntime] {
-        guard let out = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "list", "-j"]).output,
+        guard let out = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "list", "-j"], timeout: 30).output,
               let data = out.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else { return [] }
         return json.compactMap { key, v in
@@ -319,7 +319,7 @@ enum Scanner {
     }
 
     static func unavailableSimulatorIDs() -> [String] {
-        guard let out = Shell.run("/usr/bin/xcrun", ["simctl", "list", "devices", "unavailable", "-j"]).output,
+        guard let out = Shell.run("/usr/bin/xcrun", ["simctl", "list", "devices", "unavailable", "-j"], timeout: 30).output,
               let data = out.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let runtimes = json["devices"] as? [String: [[String: Any]]] else { return [] }
@@ -424,11 +424,11 @@ enum Cleaner {
                 let kids = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
                 for kid in kids { remove(kid, label: t.name) }
             case .deleteUnavailableSimulators:
-                let r = Shell.run("/usr/bin/xcrun", ["simctl", "delete", "unavailable"])
+                let r = Shell.run("/usr/bin/xcrun", ["simctl", "delete", "unavailable"], timeout: 600)
                 if r.status != 0 { errors.append("Simulators: \(r.output ?? "simctl failed")") }
             case .deleteSimRuntime(let id):
                 guard UUID(uuidString: id) != nil else { errors.append("\(t.name): bad runtime id"); continue }
-                let r = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", id])
+                let r = Shell.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", id], timeout: 600)
                 if r.status != 0 { errors.append("\(t.name): \(r.output ?? "simctl failed")") }
             case .webCachesIn:
                 errors.append("\(t.name): not measured")
@@ -439,8 +439,14 @@ enum Cleaner {
 }
 
 enum Shell {
-    /// Runs a tool and returns its exit status and combined output. With a timeout, the tool is stopped after that many seconds.
-    static func run(_ path: String, _ args: [String], timeout: TimeInterval? = nil,
+    /// Seconds a tool may run when the caller gives no limit.
+    static let defaultTimeout: TimeInterval = 120
+
+    /// Runs a tool and returns its exit status and combined output. Every run has a time limit: after it, the tool
+    /// gets SIGTERM, then SIGKILL (its whole process group when it leads one), and the call returns with
+    /// "(timed out …)" appended. Output is read in the background, so a helper that keeps the pipe open can't
+    /// block the return either.
+    static func run(_ path: String, _ args: [String], timeout: TimeInterval = defaultTimeout,
                     env: [String: String] = [:]) -> (status: Int32, output: String?) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
@@ -449,14 +455,45 @@ enum Shell {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
-        do { try p.run() } catch { return (-1, error.localizedDescription) }
-        if let timeout {
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak p] in
-                if let p, p.isRunning { p.terminate() }
+
+        let out = Output()
+        let reader = pipe.fileHandleForReading
+        reader.readabilityHandler = { h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil; out.finish() } else { out.append(d) }
+        }
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
+        do { try p.run() } catch {
+            reader.readabilityHandler = nil
+            return (-1, error.localizedDescription)
+        }
+
+        var timedOut = false
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            let pid = p.processIdentifier
+            p.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                if getpgid(pid) == pid { kill(-pid, SIGKILL) } else { kill(pid, SIGKILL) }
+                _ = exited.wait(timeout: .now() + 2)
             }
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return (p.terminationStatus, String(data: data, encoding: .utf8))
+        // Let the reader reach the end of the output, but don't wait on a helper that inherited the pipe.
+        out.waitForEnd(seconds: timedOut ? 0.5 : 2)
+        reader.readabilityHandler = nil
+        var text = String(data: out.data, encoding: .utf8)
+        if timedOut { text = (text ?? "") + "\n(timed out after \(Int(timeout)) s)" }
+        return (p.isRunning ? -1 : p.terminationStatus, text)
+    }
+
+    private final class Output: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffer = Data()
+        private let ended = DispatchSemaphore(value: 0)
+        var data: Data { lock.lock(); defer { lock.unlock() }; return buffer }
+        func append(_ d: Data) { lock.lock(); buffer.append(d); lock.unlock() }
+        func finish() { ended.signal() }
+        func waitForEnd(seconds: Double) { _ = ended.wait(timeout: .now() + seconds) }
     }
 }

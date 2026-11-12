@@ -297,18 +297,60 @@ private struct DiskBlock: View {
     }
 }
 
+/// Colour key under the map. Items never break mid-word: in narrow windows the hint is dropped first,
+/// then the items wrap onto a second line.
 private struct KindLegend: View {
+    private let kinds: [DiskNode.Kind] = [.folder, .app, .video, .image, .audio, .archive, .document, .code, .other, .small]
+    private var hint: some View {
+        Text("click = details · double-click = open folder").font(.mono(10)).foregroundStyle(Palette.faint)
+            .lineLimit(1).fixedSize()
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            ForEach([DiskNode.Kind.folder, .app, .video, .image, .audio, .archive, .document, .code, .other, .small],
-                    id: \.self) { k in
-                HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 2).fill(k.color).frame(width: 9, height: 9)
-                    Text(k.label).font(.system(size: 10.5)).foregroundStyle(Palette.dim)
-                }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) { items; Spacer(minLength: 12); hint }
+            HStack(spacing: 12) { items; Spacer(minLength: 0) }
+            FlowRow(spacing: 12, lineSpacing: 6) { items }
+        }
+    }
+
+    @ViewBuilder private var items: some View {
+        ForEach(kinds, id: \.self) { k in
+            HStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 2).fill(k.color).frame(width: 9, height: 9)
+                Text(k.label).font(.system(size: 10.5)).foregroundStyle(Palette.dim).lineLimit(1)
             }
-            Spacer()
-            Text("click = details · double-click = open folder").font(.mono(10)).foregroundStyle(Palette.faint)
+            .fixedSize()
+        }
+    }
+}
+
+/// Lays out children left to right and starts a new line when the next one doesn't fit.
+struct FlowRow: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, line: CGFloat = 0, widest: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0, x + s.width > width { y += line + lineSpacing; x = 0; line = 0 }
+            x += s.width + spacing
+            line = max(line, s.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: min(widest, width), height: y + line)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, line: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + s.width > bounds.maxX { y += line + lineSpacing; x = bounds.minX; line = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing
+            line = max(line, s.height)
         }
     }
 }

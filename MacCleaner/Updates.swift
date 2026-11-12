@@ -6,9 +6,14 @@ import SwiftUI
 ///
 /// Checks at most once a day (Settings › General can turn it off), or when you choose Check for Updates.
 /// "Install and Relaunch" downloads the DMG and installs it only after these checks pass:
-/// its SHA-256 matches the release's .sha256 file; the app inside has this app's ID and the advertised
-/// version; its signature is valid; and once this copy is Developer ID–signed, the new one is signed by
-/// the same team. Then a small script waits for this app to quit, swaps the new copy in and opens it.
+/// - the DMG carries an Ed25519 signature (`.sig` asset) made with the maintainer's release key, which
+///   is kept off GitHub; its public half is `releasePublicKey` below. A release without a valid
+///   signature is never offered or installed, so a leaked GitHub token alone can't push an update;
+/// - its SHA-256 matches the release's .sha256 file;
+/// - the app inside has this app's ID and the advertised version, and its code signature is valid;
+/// - when either copy is Developer ID–signed, both are signed by the same team (`pinnedTeamID` once set),
+///   and Gatekeeper accepts the new one.
+/// Then a small script waits for this app to quit, swaps the new copy in and opens it.
 /// The only request it makes is to api.github.com and the release's own download links; nothing about you is sent.
 @MainActor @Observable
 final class Updater {
@@ -19,12 +24,20 @@ final class Updater {
     static let skipKey = "skippedUpdateVersion"
     static let releasesPage = URL(string: "https://github.com/\(repo)/releases/latest")!
 
+    /// Public half of the release-signing key (Curve25519/Ed25519, raw 32 bytes, base64).
+    /// `swift scripts/release-key.swift init` creates the key pair in the maintainer's keychain and prints this.
+    nonisolated static let releasePublicKey = ""
+    /// The Developer ID team that signs releases, once they are notarized. Set it then, so a copy signed
+    /// by anyone else is refused even by an ad-hoc build.
+    nonisolated static let pinnedTeamID: String? = nil
+
     struct Release: Equatable {
         let version: String
         let notes: String
         let page: URL
         let dmg: URL
         let checksum: URL?
+        let signature: URL?
         let size: Int64
     }
 
@@ -71,7 +84,8 @@ final class Updater {
         do {
             let r = try await Self.fetchLatest()
             lastCheck = Date()
-            if Self.isNewer(r.version, than: Self.currentVersion) {
+            // An unsigned release isn't offered: the maintainer signs it after publishing, and it shows up then.
+            if Self.offerable(r, current: Self.currentVersion) {
                 release = r
                 phase = .available
                 if userInitiated || UserDefaults.standard.string(forKey: Self.skipKey) != r.version { show() }
@@ -100,8 +114,8 @@ final class Updater {
             phase = .failed("Mac Cleaner can't replace itself in “\(folder.path)”. Download the new version and drag it to Applications.")
             return
         }
-        guard let checksumURL = r.checksum else {
-            phase = .failed("This release has no checksum file, so the download can't be checked. Download it from GitHub instead.")
+        guard let checksumURL = r.checksum, let signatureURL = r.signature else {
+            phase = .failed("This release has no checksum or signature, so the download can't be checked. Download it from GitHub instead.")
             return
         }
         phase = .downloading
@@ -113,9 +127,11 @@ final class Updater {
             let dmg = try await download(r.dmg, to: work.appendingPathComponent(r.dmg.lastPathComponent))
             let (sums, resp) = try await URLSession.shared.data(from: checksumURL)
             guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateError("The checksum file didn't download.") }
+            let (sig, sigResp) = try await URLSession.shared.data(from: signatureURL)
+            guard (sigResp as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateError("The signature file didn't download.") }
             phase = .installing
             let staged = try await Task.detached(priority: .userInitiated) {
-                try Self.prepare(dmg: dmg, checksumFile: sums, version: r.version, work: work)
+                try Self.prepare(dmg: dmg, checksumFile: sums, signatureFile: sig, version: r.version, work: work)
             }.value
             try Self.launchSwap(pid: getpid(), app: app, new: staged, work: work, relaunch: true)
             NSApp.terminate(nil)
@@ -204,7 +220,8 @@ extension Updater {
         }
         guard let (dmg, size) = link("MacCleaner-\(version).dmg") else { return nil }
         return Release(version: version, notes: j["body"] as? String ?? "", page: page,
-                       dmg: dmg, checksum: link("MacCleaner-\(version).dmg.sha256")?.0, size: size)
+                       dmg: dmg, checksum: link("MacCleaner-\(version).dmg.sha256")?.0,
+                       signature: link("MacCleaner-\(version).dmg.sig")?.0, size: size)
     }
 
     /// "1.10.0" is newer than "1.9.2"; "1.3.0" is newer than "1.3.0-beta"; a leading "v" is ignored.
@@ -246,7 +263,25 @@ extension Updater {
     }
 
     /// Checks the checksum, mounts the DMG, checks the app in it and copies it out. Returns the copy.
-    nonisolated static func prepare(dmg: URL, checksumFile: Data, version: String, work: URL) throws -> URL {
+    /// Offer a release only when it is newer and signed, and this build knows the release key.
+    nonisolated static func offerable(_ r: Release, current: String, publicKey: String = releasePublicKey) -> Bool {
+        isNewer(r.version, than: current) && r.signature != nil && !publicKey.isEmpty
+    }
+
+    /// True when `signature` (base64 text) is a valid Ed25519 signature of `data` by `publicKey` (base64, raw 32 bytes).
+    nonisolated static func verifySignature(of data: Data, signature: Data, publicKey: String) -> Bool {
+        let text = String(decoding: signature, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let keyData = Data(base64Encoded: publicKey),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyData),
+              let sig = Data(base64Encoded: text) else { return false }
+        return key.isValidSignature(sig, for: data)
+    }
+
+    nonisolated static func prepare(dmg: URL, checksumFile: Data, signatureFile: Data, version: String, work: URL,
+                                    publicKey: String = releasePublicKey) throws -> URL {
+        guard verifySignature(of: try Data(contentsOf: dmg, options: .mappedIfSafe), signature: signatureFile, publicKey: publicKey) else {
+            throw UpdateError("The download isn't signed with Mac Cleaner's release key, so it wasn't installed.")
+        }
         guard let expected = parseChecksum(String(decoding: checksumFile, as: UTF8.self)) else {
             throw UpdateError("The checksum file couldn't be read.")
         }
@@ -280,8 +315,12 @@ extension Updater {
         guard Shell.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], timeout: 120).status == 0 else {
             throw UpdateError("The new version's signature isn't valid, so it wasn't installed.")
         }
-        if let mine = currentTeamID, teamID(of: app) != mine {
+        let theirs = teamID(of: app)
+        if let expected = pinnedTeamID ?? currentTeamID, theirs != expected {
             throw UpdateError("The new version is signed by a different developer, so it wasn't installed.")
+        }
+        if theirs != nil, Shell.run("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path], timeout: 120).status != 0 {
+            throw UpdateError("macOS Gatekeeper doesn't accept the new version, so it wasn't installed.")
         }
     }
 

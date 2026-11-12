@@ -131,16 +131,30 @@ enum TrashGuard {
 
     static func canTrash(_ url: URL) -> Bool { reason(url) == nil }
 
+    private static let structuralKeys = Set(structural.map { $0.lowercased() })
+    private static let sensitiveKeys = sensitive.map { $0.lowercased() }
+
+    /// The path compared by the rules: symlinks in its parent folders resolved (the item itself is not
+    /// followed: trashing a link moves the link), and lower-cased, because the Mac's disk ignores case.
+    /// Without this, ~/documents or ~/link-to-ssh/key would pass an exact comparison.
+    static func key(_ url: URL) -> String {
+        let std = url.standardizedFileURL
+        guard std.path != "/" else { return "/" }
+        let parent = std.deletingLastPathComponent().resolvingSymlinksInPath()
+        return parent.appendingPathComponent(std.lastPathComponent).standardizedFileURL.path.lowercased()
+    }
+
     /// nil when allowed; otherwise why not.
     static func reason(_ url: URL) -> String? {
         if let why = ProtectedPaths.reason(url) { return why }
-        let p = url.standardizedFileURL.path
-        if structural.contains(p) { return "System or account folder" }
+        let p = key(url)
+        let home = Self.home.lowercased()
+        if structuralKeys.contains(p) { return "System or account folder" }
         // Single Messages attachments may go (Messages then shows them as unavailable); the folders stay.
-        let attachments = home + "/Library/Messages/Attachments"
+        let attachments = home + "/library/messages/attachments"
         if SafetyGuard.isInside(p, attachments) && p != attachments { return nil }
-        if sensitive.contains(where: { SafetyGuard.isInside(p, $0) }) { return "Holds passwords, mail or settings" }
-        if SafetyGuard.isInside(p, home) || SafetyGuard.isInside(p, "/Applications") { return nil }
+        if sensitiveKeys.contains(where: { SafetyGuard.isInside(p, $0) }) { return "Holds passwords, mail or settings" }
+        if SafetyGuard.isInside(p, home) || SafetyGuard.isInside(p, "/applications") { return nil }
         return "Outside your home folder (view only)"
     }
 }
@@ -167,9 +181,10 @@ enum ProtectedPaths {
 
     /// nil if fine; otherwise why it's blocked. A path is blocked if it is protected, inside a
     /// protected folder, or contains a protected item (removing it would take the item along).
+    /// Compared without regard to letter case: the Mac's disk ignores case, so ~/documents is ~/Documents.
     static func reason(_ url: URL) -> String? {
-        let p = normalize(url.path)
-        for q in all {
+        let p = normalize(url.path).lowercased()
+        for q in all.map({ $0.lowercased() }) {
             if p == q || p.hasPrefix(q + "/") { return "Protected (Settings › Protection)" }
             if q.hasPrefix(p + "/") { return "Contains a protected item" }
         }

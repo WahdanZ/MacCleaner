@@ -16,13 +16,21 @@ enum AutoKeys {
 }
 
 /// Picks what the automatic clean may delete: recommended caches only. Never the Trash, Downloads,
-/// anything protected, or anything outside the allowed cache folders.
+/// anything protected, or anything outside the allowed cache folders. Only folder and file
+/// actions qualify: commands such as deleting simulators always need a review, and a target with
+/// no paths is refused (an empty list would otherwise pass every check).
 enum AutoClean {
     static func select(_ targets: [CleanTarget]) -> [CleanTarget] {
         let downloads = SafetyGuard.home.appendingPathComponent("Downloads").path
         return targets.filter { t in
             guard t.recommended, t.isCleanable, t.category != .trash else { return false }
-            return urls(t).allSatisfy { u in
+            switch t.action {
+            case .removeItem, .removeItems, .removeContents, .webCachesIn: break
+            case .deleteUnavailableSimulators, .deleteSimRuntime: return false
+            }
+            let paths = urls(t)
+            guard !paths.isEmpty else { return false }
+            return paths.allSatisfy { u in
                 !SafetyGuard.isInside(u.path, downloads) && !ProtectedPaths.isBlocked(u)
                     && SafetyGuard.isAllowed(u, allowContainer: { if case .removeContents = t.action { return true }; return false }())
             }

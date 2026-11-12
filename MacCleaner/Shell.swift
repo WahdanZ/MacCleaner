@@ -357,6 +357,7 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @AppStorage("appearance") private var appearance = "system"
     @AppStorage("introSeen") private var introSeen = true
+    @AppStorage(Updater.autoKey) private var autoUpdate = true
     @Environment(AutomationModel.self) private var auto
     @State private var confirmClear = false
 
@@ -389,9 +390,22 @@ private struct GeneralSettings: View {
                         Text("This removes the list of past cleanups. It doesn't change any files.")
                     }
             }
+            Section("Updates") {
+                LabeledContent("Version", value: Updater.currentVersion)
+                Toggle("Check for updates automatically (once a day, from GitHub)", isOn: $autoUpdate)
+                HStack {
+                    Button(Updater.shared.updateAvailable ? "Show Update…" : "Check Now") {
+                        if Updater.shared.updateAvailable { Updater.shared.show() }
+                        else { Task { await Updater.shared.check(userInitiated: true) } }
+                    }
+                    if let last = Updater.shared.lastCheck {
+                        Text("Last checked \(last.formatted(.relative(presentation: .named)))")
+                            .font(.caption).foregroundStyle(Palette.dim)
+                    }
+                }
+            }
             Section {
                 Button("Show the Welcome Tour") { introSeen = false }
-                LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
             }
         }
         .formStyle(.grouped)

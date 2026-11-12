@@ -63,6 +63,9 @@ struct MacCleanerApp: App {
         .commands {
             SidebarCommands()
             NavigationCommands()
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Task { await Updater.shared.check(userInitiated: true) } }
+            }
             CommandGroup(replacing: .help) {
                 Button("Welcome Tour") { UserDefaults.standard.set(false, forKey: "introSeen") }
                 Link("Mac Cleaner on GitHub", destination: URL(string: "https://github.com/WahdanZ/MacCleaner")!)
@@ -118,6 +121,12 @@ private struct MenuBarContent: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Rescan") { Task { await model.scan() } }
+        Divider()
+        if Updater.shared.updateAvailable, let r = Updater.shared.release {
+            Button("Update to \(r.version)…") { Updater.shared.show() }
+        } else {
+            Button("Check for Updates…") { Task { await Updater.shared.check(userInitiated: true) } }
+        }
         Divider()
         Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }

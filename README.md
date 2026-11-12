@@ -35,6 +35,14 @@ Mac Cleaner finds caches, leftovers, old downloads, duplicate files and develope
 2. Open it and drag **Mac Cleaner** into **Applications**.
 3. Open Mac Cleaner. The app isn't notarized by Apple yet, so the first time macOS says it can't check it. Click **Done** (not **Move to Trash**), then open **System Settings › Privacy & Security**, scroll down, click **Open Anyway** and confirm. On macOS 14 Sonoma you can also Control-click the app and choose **Open**.
 
+Or install it with [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask wahdanz/tap/mac-cleaner
+```
+
+The first launch needs step 3 too. After that, Mac Cleaner updates itself.
+
 Mac Cleaner needs **macOS 14 Sonoma or later**. It's free and open source.
 
 ---
@@ -147,7 +155,7 @@ Yes. Caches are copies apps keep to load faster, and apps rebuild them. An app m
 Mac Cleaner checks GitHub once a day and tells you when a new version is out, with what changed. Click **Install and Relaunch**: it downloads the new version, checks it against the release's checksum, and reopens. You can also choose **Mac Cleaner › Check for Updates…**, or turn the daily check off in *Settings › General*.
 
 **How do I remove Mac Cleaner?**
-Quit it and drag it from Applications to the Trash. If you installed the Terminal command, run `mac-cleaner uninstall-command` first. Your settings live in `~/Library/Preferences/io.github.wahdanz.maccleaner.plist` and `~/Library/Application Support/Mac Cleaner`.
+Quit it and drag it from Applications to the Trash (with Homebrew: `brew uninstall --cask mac-cleaner`). If you installed the Terminal command, run `mac-cleaner uninstall-command` first. Your settings live in `~/Library/Preferences/io.github.wahdanz.maccleaner.plist` and `~/Library/Application Support/Mac Cleaner`.
 
 ---
 

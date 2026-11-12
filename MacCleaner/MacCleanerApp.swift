@@ -105,6 +105,7 @@ private struct MenuBarContent: View {
 
     var body: some View {
         Text("Free: \(ByteText.string(Scanner.freeBytes()))")
+        Label(forecast, systemImage: "chart.line.downtrend.xyaxis")
         if auto.level != .ok {
             Text(auto.level == .critical ? "⚠︎ Disk almost full" : "⚠︎ Disk space low")
         }
@@ -119,6 +120,14 @@ private struct MenuBarContent: View {
         Button("Rescan") { Task { await model.scan() } }
         Divider()
         Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
+    }
+
+    /// Same straight-line forecast as the Insights card, in one short line.
+    private var forecast: String {
+        let samples = FreeSpaceLog.shared.samples
+        let limit = AutomationModel.thresholdBytes
+        return InsightMath.shortForecast(days: FreeSpaceLog.daysUntil(limit, samples: samples),
+                                         limit: limit, sampleCount: samples.count)
     }
 }
 

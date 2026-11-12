@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mac Cleaner: free up space on your Mac, without the worry</title>
+  <meta name="description" content="Free, open-source disk cleaner for macOS 14 and later. Finds caches, leftovers, duplicates and developer clutter, shows every item before anything is removed, and moves your own files to the Trash.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'self'; script-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <link rel="canonical" href="https://wahdanz.github.io/MacCleaner/">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Mac Cleaner">
+  <meta property="og:description" content="Free up space on your Mac, without the worry. Free and open source, for macOS 14 and later.">
+  <meta property="og:url" content="https://wahdanz.github.io/MacCleaner/">
+  <meta property="og:image" content="https://wahdanz.github.io/MacCleaner/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Mac Cleaner's Overview: storage breakdown, recommended cleanup and Insights charts">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Mac Cleaner",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 14 or later",
+    "softwareVersion": "{{VERSION}}",
+    "license": "https://opensource.org/licenses/MIT",
+    "url": "https://wahdanz.github.io/MacCleaner/",
+    "downloadUrl": "https://github.com/WahdanZ/MacCleaner/releases/download/v{{VERSION}}/MacCleaner-{{VERSION}}.dmg",
+    "codeRepository": "https://github.com/WahdanZ/MacCleaner",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="Mac Cleaner, back to top">
+        <img src="icon-256.png" alt="" width="28" height="28">
+        <span>Mac Cleaner</span>
+      </a>
+      <nav aria-label="On this page">
+        <a href="#features">Features</a>
+        <a href="#safety">Safety</a>
+        <a href="#developers">Developers</a>
+        <a href="#terminal">Terminal &amp; AI</a>
+        <a href="#faq">FAQ</a>
+        <a href="https://github.com/WahdanZ/MacCleaner">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Hero -->
+    <section class="hero" id="top">
+      <div class="wrap">
+        <p class="eyebrow">Free and open source · macOS 14 or later</p>
+        <h1>Free up space on your Mac,<br>without the worry.</h1>
+        <p class="lede">Mac Cleaner finds caches, leftovers, old downloads, duplicates and developer clutter, and shows you every item with its size. Nothing is removed until you have reviewed it, and your own files go to the Trash so you can put them back.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/WahdanZ/MacCleaner/releases/download/v{{VERSION}}/MacCleaner-{{VERSION}}.dmg">Download v{{VERSION}}</a>
+          <a class="btn" href="https://github.com/WahdanZ/MacCleaner">View on GitHub</a>
+        </div>
+        <p class="meta">{{DMG_SIZE}} · Requires macOS 14 Sonoma or later · Apple silicon and Intel</p>
+        <p class="notice">Not notarized by Apple yet, so macOS asks you to confirm the first time you open it. <a href="#install">Here's how</a>.</p>
+        <picture class="shot hero-shot">
+          <source srcset="screenshots/overview-dark.png" media="(prefers-color-scheme: dark)" type="image/png">
+          <img src="screenshots/overview-light.png" width="1124" height="981" fetchpriority="high"
+               alt="The Overview: a storage donut chart, recommended cleanup by category, quick tools, the Trash, recent cleanups and an Insights chart of space reclaimed per week.">
+        </picture>
+      </div>
+    </section>
+
+    <!-- Promises -->
+    <section class="promises" aria-label="What Mac Cleaner promises">
+      <ul class="wrap promise-grid">
+        <li><strong>You see everything first</strong><span>Every cleanup opens a review list with each item, its location, size and what will happen to it.</span></li>
+        <li><strong>Your files go to the Trash</strong><span>Only things that rebuild on their own, like caches and build folders, are deleted for good.</span></li>
+        <li><strong>No accounts, no tracking</strong><span>No sign-up, no analytics. Everything stays on your Mac.</span></li>
+        <li><strong>Open source</strong><span>MIT licensed. Read the code, build it yourself, or check the release checksum.</span></li>
+      </ul>
+    </section>
+
+    <!-- Features -->
+    <section id="features" class="features">
+      <div class="wrap">
+        <h2 class="section-title">Everything that fills your disk, in one place</h2>
+
+        <article class="row">
+          <div class="text">
+            <h3>Junk Files</h3>
+            <p>Caches, logs and temporary files from more than 350 places, on a map sized by how much space they take. Recommended items are picked for you; everything else waits for your say.</p>
+          </div>
+          <img class="shot" src="screenshots/junk-files.png" width="1205" height="791" loading="lazy"
+               alt="Junk Files: a map of caches, grouped by Xcode, Android, package managers, editors and app caches, with sizes.">
+        </article>
+
+        <article class="row flip">
+          <div class="text">
+            <h3>Review before anything is removed</h3>
+            <p>One sheet lists every item: its full path, size, whether it is deleted or moved to the Trash, and a safety label. Items marked <em>Review</em> or <em>In Use</em> need an extra tick, and Cancel is the default.</p>
+          </div>
+          <img class="shot" src="screenshots/review-sheet.png" width="1207" height="791" loading="lazy"
+               alt="The Review Cleanup sheet: a table of items with location, size, action and safety badges, an inspector for the selected item, and Cancel and Delete buttons.">
+        </article>
+
+        <article class="row">
+          <div class="text">
+            <h3>Insights</h3>
+            <p>See how much you reclaimed each week, how your free space is trending with a forecast of when it reaches your alert level, and which kinds of junk take the most room. The forecast also shows in the menu bar.</p>
+          </div>
+          <picture class="shot">
+            <source srcset="screenshots/insights-dark.png" media="(prefers-color-scheme: dark)" type="image/png">
+            <img src="screenshots/insights-light.png" width="536" height="290" loading="lazy"
+                 alt="The Insights card with tabs for Reclaimed, Free Space and Junk, showing a weekly bar chart of space deleted and moved to the Trash.">
+          </picture>
+        </article>
+
+        <article class="row flip">
+          <div class="text">
+            <h3>Applications</h3>
+            <p>Clear an app's cache, or uninstall it completely, with the data, helpers and launch items it leaves behind. Items that need your password are marked before you start.</p>
+          </div>
+          <img class="shot" src="screenshots/applications.png" width="1205" height="791" loading="lazy"
+               alt="Applications: a list of apps by size, and the selected app's data, cache and leftover items such as privileged helpers and launch daemons.">
+        </article>
+
+        <article class="row">
+          <div class="text">
+            <h3>Storage Map</h3>
+            <p>Explore every folder by size, open the biggest ones, and move what you no longer need to the Trash.</p>
+          </div>
+          <img class="shot" src="screenshots/storage-map.png" width="1205" height="791" loading="lazy"
+               alt="Storage Map: a treemap of the home folder by size with a list of its contents.">
+        </article>
+
+        <ul class="cards" aria-label="More tools">
+          <li><h3>Large &amp; Old Files</h3><p>Big files and files you haven't opened in months.</p></li>
+          <li><h3>Duplicates</h3><p>Identical files compared by content. One copy always stays.</p></li>
+          <li><h3>System Data</h3><p>Time Machine snapshots, device backups, Mail and Messages attachments.</p></li>
+          <li><h3>Startup &amp; Extensions</h3><p>What starts with your Mac, and plug-ins from other developers.</p></li>
+          <li><h3>Shredder</h3><p>Delete files permanently, without the Trash.</p></li>
+          <li><h3>Low-disk alert</h3><p>The menu bar turns orange, then red, before you run out.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Safety -->
+    <section id="safety" class="safety">
+      <div class="wrap">
+        <h2 class="section-title">Careful by design</h2>
+        <p class="section-lede">Disk cleaners have earned a bad name with fake scans and scary warnings. Mac Cleaner does the opposite: it shows real sizes, explains every item, and asks before it acts.</p>
+        <ul class="checks">
+          <li><strong>No alarms, no scare scans.</strong> Scanning only reads your disk, and the numbers are what's actually there.</li>
+          <li><strong>Your personal folders are left alone.</strong> Documents, Downloads, Desktop, Movies, Pictures, Music and iCloud Drive are never part of junk cleaning.</li>
+          <li><strong>Protect anything.</strong> Add folders or files in Settings › Protection, and nothing in the app, its command line or an AI assistant can touch them.</li>
+          <li><strong>Apple's files stay put.</strong> System folders and Apple's own apps are never removed.</li>
+          <li><strong>Checked twice.</strong> Every safety rule is checked again for each item at the moment it is removed, and a built-in self-test runs on every build.</li>
+          <li><strong>Honest results.</strong> It tells you what was actually deleted and what only moved to the Trash, which frees space only when you empty it.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Developers -->
+    <section id="developers" class="developers">
+      <div class="wrap">
+        <h2 class="section-title">Built for developers' Macs, too</h2>
+        <p class="section-lede">Build folders, simulators and toolchains add up fast. Developer Tools finds them and tells you what your projects still use.</p>
+        <div class="dev-grid">
+          <div>
+            <h3>Projects</h3>
+            <p>Build folders in your code projects, with how long since you touched each one: <code>node_modules</code>, <code>build</code>, <code>Pods</code>, <code>.gradle</code>, <code>target</code>, <code>.dart_tool</code>, Python caches, .NET <code>bin</code>/<code>obj</code> and more.</p>
+            <h3>SDKs and language versions</h3>
+            <p>Old iOS simulators, Android SDK parts, Docker data, and versions installed with nvm, fnm, Volta, pyenv, rbenv, rustup, SDKMAN and asdf. Versions your projects need are marked <em>In Use</em>.</p>
+            <h3>Homebrew</h3>
+            <p>Every formula and app you installed with <code>brew</code>, its size and what still needs it, removed through Homebrew so it stays in sync.</p>
+          </div>
+          <img class="shot" src="screenshots/developer-sdks.png" width="1205" height="791" loading="lazy"
+               alt="Developer Tools, SDKs: iOS simulator runtimes and Android system images and platforms, with In Use and Newest labels and sizes.">
+        </div>
+      </div>
+    </section>
+
+    <!-- Terminal and AI -->
+    <section id="terminal" class="terminal">
+      <div class="wrap two">
+        <div>
+          <h2 class="section-title">Terminal and AI assistants</h2>
+          <p>Install the <code>mac-cleaner</code> command from Settings › Integrations. Every cleaning command shows the list first and asks you to type <em>yes</em>.</p>
+<pre class="code" tabindex="0" aria-label="Example commands"><code>mac-cleaner status
+mac-cleaner scan
+mac-cleaner clean --recommended
+mac-cleaner projects --idle 6</code></pre>
+        </div>
+        <div>
+          <h3>Ask your AI assistant</h3>
+          <p>Connect Claude, Cursor, Codex, VS Code, Windsurf or Gemini with one click. Ask “what's taking up space?” or “clean my old Xcode simulators”.</p>
+          <p>Your assistant follows the same rules as the app: it shows you the list first and removes nothing until you say yes. Protected items are off limits.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Install -->
+    <section id="install" class="install">
+      <div class="wrap">
+        <h2 class="section-title">Download and install</h2>
+        <div class="install-grid">
+          <ol class="steps">
+            <li><a href="https://github.com/WahdanZ/MacCleaner/releases/download/v{{VERSION}}/MacCleaner-{{VERSION}}.dmg">Download Mac Cleaner v{{VERSION}}</a>, open the DMG and drag <strong>Mac Cleaner</strong> into <strong>Applications</strong>.</li>
+            <li>Open Mac Cleaner. Because the app isn't notarized by Apple yet, macOS says it can't check it. Click <strong>Done</strong>, not <strong>Move to Trash</strong>.</li>
+            <li>Open <strong>System Settings › Privacy &amp; Security</strong>, scroll down and click <strong>Open Anyway</strong>, then confirm with your password. You only do this once.</li>
+          </ol>
+          <aside class="note">
+            <h3>Good to know</h3>
+            <p>On macOS 14 Sonoma you can also Control-click the app and choose <strong>Open</strong>.</p>
+            <p>Only download Mac Cleaner from this page or its <a href="https://github.com/WahdanZ/MacCleaner/releases">GitHub releases</a>.</p>
+            <p>To check the download, compare it with the <a href="https://github.com/WahdanZ/MacCleaner/releases/download/v{{VERSION}}/MacCleaner-{{VERSION}}.dmg.sha256">SHA-256 checksum</a>:</p>
+<pre class="code small" tabindex="0" aria-label="Checksum command"><code>shasum -a 256 ~/Downloads/MacCleaner-{{VERSION}}.dmg</code></pre>
+            <p>Homebrew: not yet. Homebrew's main catalog requires notarized apps.</p>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- Permissions -->
+    <section id="permissions" class="permissions">
+      <div class="wrap">
+        <h2 class="section-title">Permissions, explained</h2>
+        <p class="section-lede">Mac Cleaner works without any of these. Each one makes a specific part more complete, and you can turn it off at any time.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Permissions table">
+          <table>
+            <thead>
+              <tr><th scope="col">Permission</th><th scope="col">Why</th><th scope="col">Without it</th><th scope="col">Turn it off</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Full Disk Access</th><td>To measure the Trash, Mail, Messages and other apps' data.</td><td>Those sizes come out low; everything else works.</td><td>System Settings › Privacy &amp; Security › Full Disk Access</td></tr>
+              <tr><th scope="row">Control Finder</th><td>To measure and empty the Trash. Asked once.</td><td>The Trash size isn't shown.</td><td>System Settings › Privacy &amp; Security › Automation</td></tr>
+              <tr><th scope="row">Your password</th><td>Only for items outside your home folder, like an app's system helper. macOS asks, not Mac Cleaner.</td><td>Those items are skipped.</td><td>Asked each time</td></tr>
+              <tr><th scope="row">Notifications</th><td>For the optional low-disk alert.</td><td>The menu bar icon still changes colour.</td><td>System Settings › Notifications</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section id="faq" class="faq">
+      <div class="wrap">
+        <h2 class="section-title">Questions</h2>
+        <details>
+          <summary>Do I need a disk cleaner at all?</summary>
+          <p>Often you don't. macOS manages a lot on its own. Mac Cleaner is useful when you are short on space, especially with developer tools, simulators and old downloads, and you want to see exactly where the space went before removing anything.</p>
+        </details>
+        <details>
+          <summary>Is it safe?</summary>
+          <p>You see every item before anything happens. Caches and build folders are deleted because apps rebuild them; everything else goes to the Trash. Your personal folders are never part of junk cleaning, and you can protect any folder or file.</p>
+        </details>
+        <details>
+          <summary>Can I undo a cleanup?</summary>
+          <p>Anything that went to the Trash can be put back from the Overview or from Finder until you empty the Trash. Caches and build folders are recreated by their apps and build tools when needed.</p>
+        </details>
+        <details>
+          <summary>Why does it ask for Full Disk Access?</summary>
+          <p>It's optional. Without it, macOS hides the Trash, Mail, Messages and other apps' data, so some sizes come out low. You can turn it on or off any time in System Settings › Privacy &amp; Security › Full Disk Access.</p>
+        </details>
+        <details>
+          <summary>Why does macOS warn me when I first open it?</summary>
+          <p>The app is signed but not yet notarized by Apple, which needs a paid developer account. Follow the <a href="#install">install steps</a> once and macOS remembers your choice.</p>
+        </details>
+        <details>
+          <summary>What data does it collect?</summary>
+          <p>None. There are no accounts and no analytics. Cleanup history and settings stay in your Library folder.</p>
+        </details>
+        <details>
+          <summary>What can AI assistants do with it?</summary>
+          <p>Scan and report sizes. To clean, they show you the list and wait for your confirmation, under the same rules and protections as the app.</p>
+        </details>
+        <details>
+          <summary>How do I remove Mac Cleaner?</summary>
+          <p>Quit it and drag it from Applications to the Trash. If you installed the Terminal command, run <code>mac-cleaner uninstall-command</code> first.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="final">
+      <div class="wrap">
+        <h2>Free up space, with nothing hidden.</h2>
+        <div class="cta center">
+          <a class="btn primary" href="https://github.com/WahdanZ/MacCleaner/releases/download/v{{VERSION}}/MacCleaner-{{VERSION}}.dmg">Download v{{VERSION}}</a>
+          <a class="btn" href="https://github.com/WahdanZ/MacCleaner/releases">All releases</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <p>Mac Cleaner is free software under the <a href="https://github.com/WahdanZ/MacCleaner/blob/main/LICENSE">MIT license</a>. © 2026 WahdanZ.</p>
+      <p><a href="https://github.com/WahdanZ/MacCleaner">Source code</a> · <a href="https://github.com/WahdanZ/MacCleaner/blob/main/DEVELOPMENT.md">Build from source</a> · <a href="https://github.com/WahdanZ/MacCleaner/issues">Report an issue</a></p>
+      <p class="fine">Official downloads come only from this page and <a href="https://github.com/WahdanZ/MacCleaner/releases">github.com/WahdanZ/MacCleaner/releases</a>. Mac Cleaner is always free; any site asking you to pay for it is not this project.</p>
+      <p class="fine">This page uses no cookies, scripts or analytics. It is hosted on GitHub Pages, which logs visitors' IP addresses. Not affiliated with Apple. Mac and macOS are trademarks of Apple Inc.</p>
+    </div>
+  </footer>
+</body>
+</html>

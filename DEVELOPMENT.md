@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 106 checks (the safety rules, plus the Insights forecast and history math) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 107 checks (the safety rules, plus the Insights forecast and history math) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -178,6 +178,18 @@ The server's `instructions` tell the assistant to show every item to the user an
 3. Checks the command line: `help`, `status --json`, `tools`, and that a delete command without `--yes` and without a keyboard changes nothing.
 4. Starts the MCP server and checks it lists at least 21 tools.
 5. Uploads the app as a zip on the run's page.
+
+---
+
+## Website
+
+The product page lives in [`website/`](website/) (one `index.html`, one `style.css`, icons and the share image) and is published to GitHub Pages at <https://wahdanz.github.io/MacCleaner/> by [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
+
+- **Build:** [`scripts/build-site.sh`](scripts/build-site.sh) copies `website/` and `docs/screenshots/` into `_site/` and fills `{{VERSION}}` and `{{DMG_SIZE}}` from the newest release tag, so the download button always points at the latest DMG without any JavaScript.
+- **When it publishes:** on pushes to `main` that touch `website/`, `docs/screenshots/` or the workflow, and whenever a release is published.
+- **Rules:** no scripts, trackers, web fonts or third-party requests (a Content-Security-Policy meta tag enforces it). Screenshots come from the app with personal names blurred.
+- **Preview locally:** `scripts/build-site.sh /tmp/site && python3 -m http.server -d /tmp/site 8765`.
+- **One-time setup:** *Settings › Pages › Build and deployment › Source: GitHub Actions*.
 
 ---
 

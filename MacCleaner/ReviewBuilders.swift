@@ -105,8 +105,10 @@ enum ReviewBuild {
         ReviewRequest(title: "Clear \(a.name) Cache",
                       explanation: "Caches are deleted permanently; \(a.name) rebuilds them. Quit the app first for the cleanest result.",
                       items: a.caches.map {
-                          ReviewItem(id: $0.id, name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size, action: .delete,
-                                     blocked: SafetyGuard.isAllowed($0.url) ? nil : (ProtectedPaths.reason($0.url) ?? "Outside the allowed cache folders"))
+                          let plan = AppEngine.cacheAction($0.url)   // the same decision clearCaches acts on
+                          return ReviewItem(id: $0.id, name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size, action: .delete,
+                                            note: plan.emptiesFolder ? "Sandboxed cache: emptied, the folder stays" : nil,
+                                            blocked: plan.blocked)
                       },
                       verb: "Clear", perform: perform)
     }

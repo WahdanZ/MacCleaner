@@ -26,7 +26,7 @@ final class Updater {
 
     /// Public half of the release-signing key (Curve25519/Ed25519, raw 32 bytes, base64).
     /// `swift scripts/release-key.swift init` creates the key pair in the maintainer's keychain and prints this.
-    nonisolated static let releasePublicKey = ""
+    nonisolated static let releasePublicKey = "tTRk3vGYV+bPwbzEZVu8FbMKhrOJ3troh2oqHmVwq3k="
     /// The Developer ID team that signs releases, once they are notarized. Set it then, so a copy signed
     /// by anyone else is refused even by an ad-hoc build.
     nonisolated static let pinnedTeamID: String? = nil

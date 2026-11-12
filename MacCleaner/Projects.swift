@@ -18,7 +18,7 @@ struct DevProject: Identifiable, Sendable {
     let url: URL
     let name: String
     let stack: String       // Flutter, Node, Android…
-    let lastTouched: Date?
+    var lastTouched: Date?
     var artifacts: [ProjectArtifact]
     var total: Int64 { artifacts.reduce(0) { $0 + $1.size } }
     var isProtected: Bool { ProtectedPaths.isInsideProtected(url) }
@@ -108,13 +108,12 @@ enum ProjectEngine {
     }
 
     /// Finds projects under the roots (depth ≤ 7). Nested projects (e.g. a Flutter app's android/ folder)
-    /// add their build output to the outermost project.
-    static func scan(roots: [URL], progress: @Sendable (String) -> Void) -> [DevProject] {
+    /// add their build output to the outermost project. Each folder is a `WalkPool` job.
+    static func scan(roots: [URL], progress: @escaping @Sendable (String) -> Void) -> [DevProject] {
         let fm = FileManager.default
-        var projects: [String: DevProject] = [:]
-        var order: [String] = []
+        let found = Found()
 
-        func walk(_ dir: URL, depth: Int, owner: String?) {
+        func walk(_ dir: URL, depth: Int, owner: String?, _ group: WalkPool.Group) {
             guard depth <= 7, !ProtectedPaths.isInsideProtected(dir) else { return }
             let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
             var nameSet = Set(names)
@@ -124,9 +123,8 @@ enum ProjectEngine {
             if !markersHere.isEmpty && owner == nil {
                 progress(dir.path)
                 let stack = markersHere.first { $0.1 == "Flutter" }?.1 ?? markersHere[0].1
-                projects[dir.path] = DevProject(id: dir.path, url: dir, name: dir.lastPathComponent, stack: stack,
-                                                lastTouched: lastTouched(dir), artifacts: [])
-                order.append(dir.path)
+                found.addProject(DevProject(id: dir.path, url: dir, name: dir.lastPathComponent, stack: stack,
+                                            lastTouched: nil, artifacts: []))
                 currentOwner = dir.path
             }
             for n in names {
@@ -138,21 +136,27 @@ enum ProjectEngine {
                     let buildMarkers: Set<String> = ["pubspec.yaml", "build.gradle", "build.gradle.kts", "settings.gradle",
                                                      "settings.gradle.kts", "CMakeLists.txt"]
                     let review = rule.review || (n == "build" && buildMarkers.isDisjoint(with: nameSet))
-                    projects[ownerPath]?.artifacts.append(
-                        ProjectArtifact(id: child.path, url: child, rel: rel, kind: rule.kind, regen: rule.regen,
-                                        review: review, size: 0))
+                    found.addArtifact(ProjectArtifact(id: child.path, url: child, rel: rel, kind: rule.kind, regen: rule.regen,
+                                                      review: review, size: 0), to: ownerPath)
                     continue
                 }
                 if n.hasPrefix(".") || skipDirs.contains(n) || n == "node_modules" { continue }
                 if ["app", "framework", "bundle", "xcarchive", "photoslibrary"].contains(child.pathExtension) { continue }
-                if isDir(child) { walk(child, depth: depth + 1, owner: currentOwner) }
+                if isDir(child) {
+                    let owner = currentOwner
+                    group.add { walk(child, depth: depth + 1, owner: owner, group) }
+                }
             }
         }
 
-        for r in roots where !ProtectedPaths.isInsideProtected(r) { walk(r, depth: 0, owner: nil) }
+        for r in roots where !ProtectedPaths.isInsideProtected(r) {
+            WalkPool.shared.run { group in walk(r, depth: 0, owner: nil, group) }
+        }
 
+        // Same order every time, whichever thread found what first.
+        var list = found.projects.filter { !$0.artifacts.isEmpty }.sorted { $0.id < $1.id }
+        for i in list.indices { list[i].artifacts.sort { $0.id < $1.id } }
         // Measure build output in parallel.
-        var list = order.compactMap { projects[$0] }.filter { !$0.artifacts.isEmpty }
         let flat = list.enumerated().flatMap { pi, p in p.artifacts.indices.map { (pi, $0) } }
         var sizes = [Int64](repeating: 0, count: flat.count)
         sizes.withUnsafeMutableBufferPointer { buf in
@@ -162,7 +166,26 @@ enum ProjectEngine {
         }
         for (i, pair) in flat.enumerated() { list[pair.0].artifacts[pair.1].size = sizes[i] }
         for i in list.indices { list[i].artifacts.removeAll { $0.size == 0 }; list[i].artifacts.sort { $0.size > $1.size } }
-        return list.filter { $0.total > 0 }.sorted { $0.total > $1.total }
+        list.removeAll { $0.total == 0 }
+
+        // "Last edited" walks each project's sources, so it runs in parallel and only for projects that are shown.
+        var dates = [Date?](repeating: nil, count: list.count)
+        dates.withUnsafeMutableBufferPointer { buf in
+            DispatchQueue.concurrentPerform(iterations: list.count) { i in buf[i] = lastTouched(list[i].url) }
+        }
+        for i in list.indices { list[i].lastTouched = dates[i] }
+        return list.sorted { ($0.total, $1.id) > ($1.total, $0.id) }
+    }
+
+    /// Projects and their build folders, shared by the walker threads.
+    private final class Found: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byPath: [String: DevProject] = [:]
+        var projects: [DevProject] { lock.lock(); defer { lock.unlock() }; return Array(byPath.values) }
+        func addProject(_ p: DevProject) { lock.lock(); byPath[p.id] = p; lock.unlock() }
+        func addArtifact(_ a: ProjectArtifact, to owner: String) {
+            lock.lock(); byPath[owner]?.artifacts.append(a); lock.unlock()
+        }
     }
 
     /// Newest change outside build output and .git (plus the git index), capped at 30k files.
@@ -205,6 +228,7 @@ enum ProjectEngine {
 
     /// Permanently deletes the artifacts (they are regenerable). Returns errors.
     static func clean(_ items: [(ProjectArtifact, DevProject)], progress: @Sendable (String) -> Void) -> (bytes: Int64, errors: [String]) {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, errors: [String] = []
         for (a, p) in items {
             if let why = reason(a, in: p) { errors.append("\(p.name)/\(a.rel): \(why)"); continue }

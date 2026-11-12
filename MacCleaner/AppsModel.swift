@@ -44,6 +44,62 @@ enum AppScanner {
     static let fm = FileManager.default
     static let lib = SafetyGuard.home.appendingPathComponent("Library")
 
+    /// Folder listings and the installer-receipt list shared by every app in one scan. Without it each app
+    /// re-lists the same ~/Library and /Library folders and starts its own `pkgutil --pkgs`.
+    final class Batch: @unchecked Sendable {
+        private let listings = Once<String, [String]>()
+        private let jobs = Once<String, LaunchJob>()
+        private let pkgFiles = Once<String, [URL]>()
+        private let pkgs = Once<Int, String?>()
+
+        struct LaunchJob { let label: String?; let program: String? }
+
+        func list(_ dir: URL) -> [String] {
+            listings.get(dir.path) { (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] }
+        }
+
+        /// Label and program of a launch agent or daemon plist, read once per scan.
+        func launchJob(_ u: URL) -> LaunchJob {
+            jobs.get(u.path) {
+                let plist = NSDictionary(contentsOf: u)
+                return LaunchJob(label: plist?["Label"] as? String,
+                                 program: (plist?["Program"] as? String) ?? ((plist?["ProgramArguments"] as? [String])?.first))
+            }
+        }
+
+        /// `AppScanner.installedItems(pkg:)`, once per package per scan.
+        func installedItems(_ pkg: String) -> [URL] { pkgFiles.get(pkg) { AppScanner.installedItems(pkg: pkg) } }
+
+        func receipts() -> String? { pkgs.get(0) { Shell.run("/usr/sbin/pkgutil", ["--pkgs"]).output } }
+    }
+
+    /// Computes each key's value once. Callers that ask while it is being computed wait for that result instead
+    /// of starting the same work (a `pkgutil` run, a folder listing) again. Different keys don't wait on each other.
+    final class Once<Key: Hashable, Value>: @unchecked Sendable {
+        private enum Slot { case loading, done(Value) }
+        private let cond = NSCondition()
+        private var slots: [Key: Slot] = [:]
+
+        func get(_ key: Key, _ make: () -> Value) -> Value {
+            cond.lock()
+            while true {
+                switch slots[key] {
+                case .done(let v)?: cond.unlock(); return v
+                case .loading?: cond.wait()
+                case nil:
+                    slots[key] = .loading
+                    cond.unlock()
+                    let v = make()
+                    cond.lock()
+                    slots[key] = .done(v)
+                    cond.broadcast()
+                    cond.unlock()
+                    return v
+                }
+            }
+        }
+    }
+
     static func appURLs() -> [URL] {
         var out: [URL] = []
         for dir in [URL(fileURLWithPath: "/Applications"), SafetyGuard.home.appendingPathComponent("Applications")] {
@@ -73,7 +129,7 @@ enum AppScanner {
         return v == "com.apple" ? nil : v
     }
 
-    static func info(for url: URL, allIDs: Set<String> = []) -> AppInfo {
+    static func info(for url: URL, allIDs: Set<String> = [], batch: Batch = Batch()) -> AppInfo {
         let b = Bundle(url: url)
         let id = b?.bundleIdentifier ?? ""
         let name = (b?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
@@ -88,7 +144,7 @@ enum AppScanner {
         let v = vendor(id)
         let vendorUnique = v.map { vv in !allIDs.contains { $0 != id && $0.hasPrefix(vv + ".") } } ?? false
         info.leftovers = leftovers(id: id, names: Array(Set([name, fileName])), appURL: url,
-                                   vendor: v, vendorUnique: vendorUnique)
+                                   vendor: v, vendorUnique: vendorUnique, batch: batch)
         info.caches = caches(id: id, names: Array(Set([name, fileName])))
         return info
     }
@@ -101,7 +157,7 @@ enum AppScanner {
     /// Everything the app left behind, matched by exact bundle id, "<id>.<helper>" prefix or exact app name:
     /// your ~/Library, crash reports, launch agents/daemons and helpers, /Library and installer receipts.
     static func leftovers(id: String, names: [String], appURL: URL,
-                          vendor: String? = nil, vendorUnique: Bool = false) -> [AppLeftover] {
+                          vendor: String? = nil, vendorUnique: Bool = false, batch: Batch = Batch()) -> [AppLeftover] {
         var out: [AppLeftover] = []
         var seen = Set<String>()
         let sysLib = URL(fileURLWithPath: "/Library")
@@ -120,7 +176,7 @@ enum AppScanner {
         func add(_ rel: String, _ label: String, include: Bool = true, note: String? = nil) {
             addURL(lib.appendingPathComponent(rel), label, include: include, note: note)
         }
-        func list(_ dir: URL) -> [String] { (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] }
+        func list(_ dir: URL) -> [String] { batch.list(dir) }
         /// "<id>", "<id>.anything" (helpers, ShipIt, extensions)
         func matchesID(_ name: String) -> Bool { name == id || name.hasPrefix(id + ".") }
         /// Same developer prefix but not this app's id (e.g. com.teamviewer.Helper for com.teamviewer.TeamViewer).
@@ -164,10 +220,9 @@ enum AppScanner {
         func launchJobs(in dir: URL, admin: Bool, system: Bool, label: String) {
             for f in list(dir) where f.hasSuffix(".plist") {
                 let u = dir.appendingPathComponent(f)
-                let plist = NSDictionary(contentsOf: u)
-                let jobLabel = plist?["Label"] as? String ?? String(f.dropLast(6))
-                let program = (plist?["Program"] as? String)
-                    ?? ((plist?["ProgramArguments"] as? [String])?.first) ?? ""
+                let job = batch.launchJob(u)
+                let jobLabel = job.label ?? String(f.dropLast(6))
+                let program = job.program ?? ""
                 let base = String(f.dropLast(6))
                 let exact = matchesID(base) || matchesID(jobLabel) || program.hasPrefix(appURL.path + "/")
                 let byVendor = !exact && (matchesVendor(base) || matchesVendor(jobLabel))
@@ -205,7 +260,7 @@ enum AppScanner {
         }
 
         // Installer receipts
-        if let pkgs = Shell.run("/usr/sbin/pkgutil", ["--pkgs"]).output {
+        if let pkgs = batch.receipts() {
             for p in pkgs.split(separator: "\n").map(String.init) where matchesID(p) || matchesVendor(p) {
                 let exact = matchesID(p)
                 var l = AppLeftover(id: "receipt:" + p, url: URL(fileURLWithPath: "/private/var/db/receipts/\(p).bom"),
@@ -215,7 +270,7 @@ enum AppScanner {
                 l.receipt = p
                 out.append(l)
                 // What the package installed outside the app (drivers, plug-ins, helpers…)
-                for item in installedItems(pkg: p) where item.path != appURL.path {
+                for item in batch.installedItems(p) where item.path != appURL.path {
                     addURL(item, "Installed by \(p)", include: exact || vendorUnique,
                            note: exact ? nil : vendorNote, admin: true)
                 }
@@ -346,24 +401,29 @@ final class AppsModel {
         guard phase != .scanning else { return }
         phase = .scanning
         message = nil
+        // Homebrew's cask list is independent of the app scan, so it runs alongside it.
+        let casks = Task.detached(priority: .userInitiated) { SDKEngine.brewPath == nil ? [:] : SDKEngine.caskApps() }
         let urls = await Task.detached { AppScanner.appURLs() }.value
         let allIDs = await Task.detached { Set(urls.map(AppScanner.bundleID)) }.value
         progressTotal = urls.count
         progressDone = 0
+        let batch = AppScanner.Batch()
         var found: [AppInfo] = []
         await withTaskGroup(of: AppInfo.self) { group in
             var queue = urls[...]
-            for _ in 0..<6 { if let u = queue.popFirst() { group.addTask { AppScanner.info(for: u, allIDs: allIDs) } } }
+            for _ in 0..<DirSize.width {
+                if let u = queue.popFirst() { group.addTask { AppScanner.info(for: u, allIDs: allIDs, batch: batch) } }
+            }
             while let info = await group.next() {
                 found.append(info)
                 progressDone += 1
-                if let u = queue.popFirst() { group.addTask { AppScanner.info(for: u, allIDs: allIDs) } }
+                if let u = queue.popFirst() { group.addTask { AppScanner.info(for: u, allIDs: allIDs, batch: batch) } }
             }
         }
         apps = found
         if selectedID == nil || selected == nil { selectedID = visible.first?.id }
         phase = .done
-        caskByApp = await Task.detached { SDKEngine.brewPath == nil ? [:] : SDKEngine.caskApps() }.value
+        caskByApp = await casks.value
     }
 
     /// Bumped whenever any app launches or quits, so running state redraws live.
@@ -628,6 +688,7 @@ enum AppEngine {
     /// and logs where it came from so it can be put back.
     @discardableResult
     static func trash(_ url: URL, size: Int64? = nil, source: String = "Mac Cleaner", restorable: Bool = true) -> String? {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         if let why = ProtectedPaths.reason(url) { return why }
         let bytes = size ?? Scanner.allocatedSize(url)
         var out: NSURL?
@@ -641,6 +702,7 @@ enum AppEngine {
 
     /// App + picked leftovers → Trash; items outside home through one macOS password prompt.
     static func uninstall(_ a: AppInfo, picked: [AppLeftover]) -> UninstallResult {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var r = UninstallResult()
         let uid = getuid()
         for l in picked where !l.needsAdmin {
@@ -687,6 +749,7 @@ enum AppEngine {
     /// Moves items outside your home folder to the Trash via one macOS password prompt
     /// (stopping any launch jobs first). Returns removed paths and errors.
     static func removeSystemItems(_ items: [AppLeftover]) -> (removed: [URL], errors: [String], cancelled: Bool) {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         guard !items.isEmpty else { return ([], [], false) }
         switch AdminStep.run(items, uid: getuid()) {
         case .ok(let staging):
@@ -729,6 +792,7 @@ enum AppEngine {
     /// Permanently deletes an app's disposable caches (cache allow-list only). Each item is checked
     /// again right before it is deleted, with the rule the review showed; blocked items are skipped and reported.
     static func clearCaches(_ items: [AppLeftover]) -> [String] {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var errs: [String] = []
         let fm = FileManager.default
         for c in items {
@@ -763,10 +827,11 @@ enum AppEngine {
     static func scanAll() -> [AppInfo] {
         let urls = AppScanner.appURLs()
         let ids = Set(urls.map(AppScanner.bundleID))
+        let batch = AppScanner.Batch()
         var out = [AppInfo?](repeating: nil, count: urls.count)
         out.withUnsafeMutableBufferPointer { buf in
             DispatchQueue.concurrentPerform(iterations: urls.count) { i in
-                buf[i] = AppScanner.info(for: urls[i], allIDs: ids)
+                buf[i] = AppScanner.info(for: urls[i], allIDs: ids, batch: batch)
             }
         }
         return out.compactMap { $0 }

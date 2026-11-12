@@ -331,7 +331,19 @@ enum Scanner {
         guard let v = try? url.resourceValues(forKeys: keys) else { return 0 }
         if v.isSymbolicLink == true { return 0 }
         if v.isDirectory != true { return Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0) }
+        let generation = SizeCache.generation
+        if let cached = SizeCache.get(url.path) { return cached }
+        let m = DirSize.measure(atPath: url.path)
+        if m.complete { SizeCache.put(url.path, m.bytes, generation: generation) }
+        return m.bytes
+    }
 
+    /// The previous folder walk (FileManager enumerator). Kept so the self-test can check DirSize against it.
+    static func allocatedSizeSlow(_ url: URL) -> Int64 {
+        let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isDirectoryKey, .isSymbolicLinkKey]
+        guard let v = try? url.resourceValues(forKeys: keys) else { return 0 }
+        if v.isSymbolicLink == true { return 0 }
+        if v.isDirectory != true { return Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0) }
         guard let e = fm.enumerator(at: url, includingPropertiesForKeys: Array(keys),
                                     options: [], errorHandler: { _, _ in true }) else { return 0 }
         var total: Int64 = 0
@@ -374,6 +386,7 @@ enum Cleaner {
 
     /// Deletes the given targets. Returns one message per failure.
     static func run(_ targets: [CleanTarget]) -> [String] {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         let fm = FileManager.default
         var errors: [String] = []
 

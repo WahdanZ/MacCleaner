@@ -70,6 +70,7 @@ enum ShredEngine {
     /// Checks the item again, refuses it untouched if any file inside is a hard link (overwriting it
     /// would erase the other copy too) or can't be written, then overwrites every file and deletes it.
     static func shred(_ url: URL) -> Result {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var r = Result()
         if let why = reason(url) { r.refused = why; return r }
         let list = files(in: url)

@@ -16,6 +16,9 @@ final class DiskNode: Identifiable, @unchecked Sendable {
     var modified: Date?
     var children: [DiskNode] = []
     weak var parent: DiskNode?
+    /// Files under 1 MB directly in this folder, shown as one block (set while scanning).
+    fileprivate var smallBytes: Int64 = 0
+    fileprivate var smallCount = 0
 
     init(url: URL, name: String, isDirectory: Bool, id: String? = nil) {
         self.url = url
@@ -92,103 +95,116 @@ enum DiskScanner {
     ]
     static let cloudTimeout: TimeInterval = 10
 
-    static let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .totalFileAllocatedSizeKey,
-                                         .fileAllocatedSizeKey, .contentModificationDateKey]
-
     static func scan(root: URL, counter: Counter) -> DiskNode {
-        build(root, name: root.path == "/" ? "Macintosh HD" : root.lastPathComponent, depth: 0, counter: counter)
+        let node = DiskNode(url: root, name: root.path == "/" ? "Macintosh HD" : root.lastPathComponent, isDirectory: true)
+        // Every folder is a WalkPool job, so all its threads share the work whatever shape the tree has.
+        WalkPool.shared.run { group in visit(node, group, counter) }
+        total(node)
+        return node
     }
 
-    private static func build(_ url: URL, name: String, depth: Int, counter: Counter) -> DiskNode {
-        let node = DiskNode(url: url, name: name, isDirectory: true)
-        if counter.cancelled { return node }
-        guard let kids = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys,
-                                                                       options: []) else {
-            node.unreadable = true
-            return node
+    private static func visit(_ node: DiskNode, _ group: WalkPool.Group, _ counter: Counter) {
+        let dirs = list(node, counter)
+        if cloudRoots.contains(node.url.path) {
+            // iCloud containers one at a time, each with a time limit.
+            for d in dirs { node.children.append(buildWithTimeout(d, counter: counter)) }
+            return
         }
-        var dirs: [URL] = []
-        var smallBytes: Int64 = 0
-        var smallCount = 0
+        node.children += dirs
+        for d in dirs { group.add { visit(d, group, counter) } }
+    }
+
+    /// Lists one folder into `node`: its own files (big ones as children, the rest counted for the
+    /// "N small files" block). Returns its sub-folders as new, empty nodes. One getattrlistbulk batch per folder.
+    private static func list(_ node: DiskNode, _ counter: Counter) -> [DiskNode] {
+        if counter.cancelled { return [] }
+        let url = node.url
+        var dirs: [DiskNode] = []
         var localFiles = 0
         var localBytes: Int64 = 0
-        let keySet = Set(keys)
+        let base = url.path.hasSuffix("/") ? url.path : url.path + "/"
 
-        for k in kids {
-            if skipPaths.contains(k.path) { continue }
-            guard let v = try? k.resourceValues(forKeys: keySet), v.isSymbolicLink != true else { continue }
-            if v.isDirectory == true {
-                dirs.append(k)
-            } else {
-                let sz = Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0)
-                node.size += sz
-                node.fileCount += 1
-                localFiles += 1
-                localBytes += sz
-                if sz >= minFile {
-                    let f = DiskNode(url: k, name: k.lastPathComponent, isDirectory: false)
-                    f.size = sz
-                    f.fileCount = 1
-                    f.modified = v.contentModificationDate
-                    f.parent = node
-                    node.children.append(f)
-                } else {
-                    smallBytes += sz
-                    smallCount += 1
-                }
+        // Names, URLs and nodes are made only for folders and big files; small files are just counted.
+        // URLs come from the raw path bytes (DirSize.fileURL): appendingPathComponent (macOS 26) and
+        // URL(fileURLWithPath:) (macOS 15) can both return a decomposed (NFD) path for non-ASCII names.
+        let readable = DirSize.forEachEntry(atPath: url.path) { k in
+            if k.isSymlink { return }
+            if k.isDirectory {
+                let name = k.nameString, path = base + name
+                if skipPaths.contains(path) { return }
+                let d = DiskNode(url: DirSize.fileURL(path, isDirectory: true), name: name, isDirectory: true)
+                d.parent = node
+                dirs.append(d)
+                return
             }
+            let sz = k.size
+            node.size += sz
+            node.fileCount += 1
+            localFiles += 1
+            localBytes += sz
+            if sz >= minFile {
+                let name = k.nameString
+                let f = DiskNode(url: DirSize.fileURL(base + name, isDirectory: false), name: name, isDirectory: false)
+                f.size = sz
+                f.fileCount = 1
+                f.modified = k.modifiedDate
+                f.parent = node
+                node.children.append(f)
+            } else {
+                node.smallBytes += sz
+                node.smallCount += 1
+            }
+        }
+        switch readable {
+        case .complete: break
+        case .unreadable:
+            node.unreadable = true
+            return []
+        case .partial:
+            node.unreadable = true      // keep what was read, but flag the folder as not fully read
         }
         counter.add(files: localFiles, bytes: localBytes, current: url.path)
+        return dirs
+    }
 
-        // Walk sub-folders; the top two levels in parallel. iCloud containers get a time limit.
-        var built = [DiskNode?](repeating: nil, count: dirs.count)
-        if cloudRoots.contains(url.path) {
-            for (i, d) in dirs.enumerated() {
-                built[i] = buildWithTimeout(d, depth: depth + 1, counter: counter)
-            }
-        } else if depth <= 1 && dirs.count > 1 {
-            built.withUnsafeMutableBufferPointer { buf in
-                DispatchQueue.concurrentPerform(iterations: dirs.count) { i in
-                    buf[i] = build(dirs[i], name: dirs[i].lastPathComponent, depth: depth + 1, counter: counter)
-                }
-            }
-        } else {
-            for (i, d) in dirs.enumerated() {
-                built[i] = build(d, name: d.lastPathComponent, depth: depth + 1, counter: counter)
-            }
+    /// After the walk: adds each folder's sub-folders into its size and file count, adds the
+    /// "N small files" block and sorts children by size.
+    private static func total(_ node: DiskNode) {
+        for c in node.children where c.isDirectory {
+            total(c)
+            node.size += c.size
+            node.fileCount += c.fileCount
         }
-        for case let child? in built {
-            child.parent = node
-            node.size += child.size
-            node.fileCount += child.fileCount
-            node.children.append(child)
-        }
-
-        if smallCount > 0 {
-            let agg = DiskNode(url: url, name: "\(smallCount) small file\(smallCount == 1 ? "" : "s")",
-                               isDirectory: false, id: url.path + "#small")
+        if node.smallCount > 0 {
+            let agg = DiskNode(url: node.url, name: "\(node.smallCount) small file\(node.smallCount == 1 ? "" : "s")",
+                               isDirectory: false, id: node.url.path + "#small")
             agg.isAggregate = true
-            agg.size = smallBytes
-            agg.fileCount = smallCount
+            agg.size = node.smallBytes
+            agg.fileCount = node.smallCount
             agg.parent = node
             node.children.append(agg)
         }
         node.children.sort { $0.size > $1.size }
-        return node
     }
 
-    private final class Box: @unchecked Sendable { var node: DiskNode? }
+    /// Builds a folder tree on the calling thread (used for iCloud containers, outside the pool).
+    private static func buildSerial(_ node: DiskNode, _ counter: Counter) {
+        let dirs = list(node, counter)
+        for d in dirs { buildSerial(d, counter) }
+        node.children += dirs
+    }
 
-    private static func buildWithTimeout(_ url: URL, depth: Int, counter: Counter) -> DiskNode {
-        let box = Box()
+    private static func buildWithTimeout(_ node: DiskNode, counter: Counter) -> DiskNode {
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
-            box.node = build(url, name: url.lastPathComponent, depth: depth, counter: counter)
+            buildSerial(node, counter)
             done.signal()
         }
-        if done.wait(timeout: .now() + cloudTimeout) == .success, let n = box.node { return n }
-        let n = DiskNode(url: url, name: url.lastPathComponent + " (iCloud not responding)", isDirectory: true)
+        if done.wait(timeout: .now() + cloudTimeout) == .success { return node }
+        // Left to finish on its own; the half-built node is dropped.
+        let n = DiskNode(url: node.url, name: node.name + " (iCloud not responding)", isDirectory: true)
         n.unreadable = true
+        n.parent = node.parent
         return n
     }
 }

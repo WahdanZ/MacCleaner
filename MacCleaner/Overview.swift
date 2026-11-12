@@ -28,6 +28,8 @@ final class OverviewModel {
     var lastResult: String?
 
     private let key = "overviewBreakdown"
+    /// Off only for `bench`, which measures without replacing the saved breakdown.
+    var savesResult = true
 
     init() {
         if let d = UserDefaults.standard.data(forKey: key), let b = try? JSONDecoder.iso.decode(Breakdown.self, from: d) {
@@ -41,7 +43,8 @@ final class OverviewModel {
     func measure() async {
         guard !measuring else { return }
         measuring = true
-        let total = Scanner.totalBytes(), free = Scanner.freeBytes()
+        // The free-space figure can take a moment while macOS works out purgeable space: ask off the main thread.
+        let (total, free) = await Task.detached(priority: .utility) { (Scanner.totalBytes(), Scanner.freeBytes()) }.value
         async let apps = Task.detached(priority: .utility) { () -> Int64 in
             let urls = AppScanner.appURLs()
             var sizes = [Int64](repeating: 0, count: urls.count)
@@ -71,7 +74,7 @@ final class OverviewModel {
         b.library = await lib
         b.other = max(0, (total - free) - b.apps - b.documents - b.library)
         breakdown = b
-        if let d = try? JSONEncoder.iso.encode(b) { UserDefaults.standard.set(d, forKey: key) }
+        if savesResult, let d = try? JSONEncoder.iso.encode(b) { UserDefaults.standard.set(d, forKey: key) }
         measuring = false
     }
 

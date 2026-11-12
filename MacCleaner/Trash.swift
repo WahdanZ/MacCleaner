@@ -110,6 +110,7 @@ enum TrashOps {
 
     /// Empties the Trash through Finder. Returns nil on success.
     static func empty() -> String? {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         let r = Shell.run("/usr/bin/osascript", ["-e", "tell application \"Finder\" to empty trash"])
         if r.status == 0 {
             TrashLog.shared.clear()
@@ -124,6 +125,7 @@ enum TrashOps {
 
     /// Moves an item back to where it came from. Returns nil on success.
     static func restore(_ item: TrashedItem) -> String? {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         guard item.restorable else { return "System files are restored by dragging them out of the Trash in Finder." }
         let fm = FileManager.default
         let from = URL(fileURLWithPath: item.trashed)

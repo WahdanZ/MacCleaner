@@ -226,7 +226,9 @@ mac-cleaner projects --idle 6</code></pre>
             <p>Only download Mac Cleaner from this page or its <a href="https://github.com/WahdanZ/MacCleaner/releases">GitHub releases</a>.</p>
             <p>To check the download, compare it with the <a href="https://github.com/WahdanZ/MacCleaner/releases/download/v{{VERSION}}/MacCleaner-{{VERSION}}.dmg.sha256">SHA-256 checksum</a>:</p>
 <pre class="code small" tabindex="0" aria-label="Checksum command"><code>shasum -a 256 ~/Downloads/MacCleaner-{{VERSION}}.dmg</code></pre>
-            <p>Homebrew: not yet. Homebrew's main catalog requires notarized apps.</p>
+            <p>With Homebrew:</p>
+<pre class="code small" tabindex="0" aria-label="Homebrew install command"><code>brew install --cask wahdanz/tap/mac-cleaner</code></pre>
+            <p>The first launch needs <strong>Open Anyway</strong> too, until the app is notarized.</p>
           </aside>
         </div>
       </div>

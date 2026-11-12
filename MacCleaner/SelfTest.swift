@@ -276,6 +276,37 @@ enum SelfTest {
         UserDefaults.standard.removePersistentDomain(forName: oldName)
         UserDefaults.standard.removePersistentDomain(forName: newName)
 
+        print("Insights")
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let day = { (n: Int) in cal.date(byAdding: .day, value: n, to: today)! }
+        let gb: Int64 = 1_000_000_000
+        typealias FS = FreeSpaceLog.Sample
+        var log = FreeSpaceLog.merged([], FS(day: today, free: 10 * gb, total: 100 * gb), now: Date())
+        log = FreeSpaceLog.merged(log, FS(day: today, free: 12 * gb, total: 100 * gb), now: Date())
+        check("one free-space reading per day, newest wins", log.count == 1 && log[0].free == 12 * gb)
+        log = FreeSpaceLog.merged([FS(day: day(-120), free: gb, total: 100 * gb)], FS(day: today, free: gb, total: 100 * gb), now: Date())
+        check("readings older than 90 days are dropped", log.count == 1 && log[0].day == today)
+        let shrinking = (0..<5).map { FS(day: day($0 - 4), free: (50 - Int64($0)) * gb, total: 100 * gb) }
+        let eta = FreeSpaceLog.daysUntil(20 * gb, samples: shrinking)
+        check("forecast: 1 GB a day from 46 GB reaches 20 GB in 26 days", eta.map { abs($0 - 26) < 0.01 } ?? false)
+        let growing = (0..<5).map { FS(day: day($0 - 4), free: (40 + Int64($0)) * gb, total: 100 * gb) }
+        check("no forecast while free space grows", FreeSpaceLog.daysUntil(20 * gb, samples: growing) == nil)
+        check("no forecast from two readings", FreeSpaceLog.daysUntil(20 * gb, samples: Array(shrinking.suffix(2))) == nil)
+        let below = shrinking.map { FS(day: $0.day, free: $0.free - 40 * gb, total: $0.total) }
+        check("forecast is 0 when already below the alert", FreeSpaceLog.daysUntil(20 * gb, samples: below) == 0)
+        let recs = [CleanupRecord(date: Date(), title: "a", bytes: 3 * gb, symbol: "x", outcome: .deleted),
+                    CleanupRecord(date: Date(), title: "b", bytes: gb, symbol: "x", outcome: .trashed),
+                    CleanupRecord(date: cal.date(byAdding: .weekOfYear, value: -3, to: Date())!, title: "c", bytes: 2 * gb, symbol: "x"),
+                    CleanupRecord(date: cal.date(byAdding: .weekOfYear, value: -20, to: Date())!, title: "d", bytes: 9 * gb, symbol: "x", outcome: .deleted)]
+        let weeks = InsightMath.weeks(recs, count: 8)
+        check("8 weeks, oldest first, empty weeks kept", weeks.count == 8 && weeks.first!.start < weeks.last!.start)
+        check("this week splits deleted and trashed", weeks.last!.deleted == 3 * gb && weeks.last!.trashed == gb)
+        check("older records count as deleted; weeks outside the range are left out",
+              weeks.reduce(0) { $0 + $1.deleted } == 5 * gb)
+        check("forecast wording", InsightMath.durationText(days: 26) == "about 4 weeks"
+              && InsightMath.durationText(days: 1) == "about 1 day" && InsightMath.durationText(days: 0.4) == "less than a day")
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

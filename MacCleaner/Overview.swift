@@ -176,7 +176,11 @@ struct OverviewView: View {
                         }
                         .fixedSize(horizontal: false, vertical: true)
                         HStack(alignment: .top, spacing: Space.l) {
-                            RecommendedCard().frame(maxWidth: .infinity).appearIn(2)
+                            VStack(spacing: Space.l) {
+                                RecommendedCard().appearIn(2)
+                                InsightsCard().appearIn(3)
+                            }
+                            .frame(maxWidth: .infinity)
                             VStack(spacing: Space.l) {
                                 QuickTools().appearIn(3)
                                 TrashCard().appearIn(4)
@@ -188,6 +192,7 @@ struct OverviewView: View {
                         StorageCard().appearIn(0)
                         ScanHero().appearIn(1)
                         RecommendedCard().appearIn(2)
+                        InsightsCard().appearIn(3)
                         QuickTools().appearIn(3)
                         TrashCard().appearIn(4)
                         RecentCleanups(showAll: $showHistory).appearIn(5)

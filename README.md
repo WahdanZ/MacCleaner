@@ -98,6 +98,8 @@ A short welcome tour explains everything on first launch.
 
 ## Never run out of space
 
+The **Insights** card on the Overview shows how much space you reclaimed each week (deleted vs moved to the Trash), how your free space has changed over the last weeks with a forecast of when it reaches your alert level, and which kinds of junk take the most space. Mac Cleaner notes your free space once a day to draw the trend; only the numbers are kept, on your Mac.
+
 In **Settings › Automation**:
 - **Low-disk alert:** the menu bar icon turns orange, then red, and you get a notification when free space drops below your limit (20 GB by default).
 - **Weekly safe clean** (off by default): clears recommended caches only. It never touches the Trash, your Downloads, your folders or anything protected.

@@ -52,6 +52,8 @@ One preliminary finding was only partly right: the Junk page's item list was ind
 - **Quick Tools grid**: colourful system-colour symbols on neutral tiles.
 - **Trash** and **Recent Cleanups**.
 
+- **Insights** (below Recommended Cleanup): one card with a segmented switch between three Swift Charts: space reclaimed per week (deleted vs Trash, from the cleanup history), the free-space trend with a straight-line forecast to the alert level (from one reading per day, stored as numbers only), and junk by category from the last scan. Every tab keeps the same height, and bars and lines grow once on appear (not under Reduce Motion).
+
 It uses two columns in wide windows and one in narrow ones. Cards are solid and readable (not glass), with continuous corners; tiles inside a card use the concentric inner radius (`Radius.inner`).
 
 **Review Cleanup** (`Review.swift`). One sheet replaces every multi-item confirm dialog, styled like a native Mac sheet:
@@ -107,7 +109,7 @@ The engines still re-check every guard at execution time (`Cleaner.run`, `AppEng
 
 ## Limitations and next steps
 
-- **No UI automation yet.** The checks are the 96-check self-test, the CLI and MCP checks in CI, and manual review in light/dark at 900×652 and 1280×840. A next step is an XCUITest target covering navigation and the Review sheet.
+- **No UI automation yet.** The checks are the 106-check self-test, the CLI and MCP checks in CI, and manual review in light/dark at 900×652 and 1280×840. A next step is an XCUITest target covering navigation and the Review sheet.
 - **Not tested on macOS 14 or 15 hardware.** CI builds with Xcode 16 on macOS 15, which proves the macOS 26 APIs are correctly guarded, but the app has only been run on macOS 26.
 - **Not native `Table` yet.** Large & Old Files, Duplicates and Applications still use custom rows, though they now share the system colours, buttons and accessibility patterns. Moving them to `Table` (with column sorting and type-to-select) is the next screen-level step.
 - **Single-item confirmations stay as alerts.** Removing one extension or startup item, and Empty Trash, keep a standard alert; they never truncate.

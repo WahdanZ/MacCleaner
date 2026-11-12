@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 116 checks (the safety rules, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 122 checks (the safety rules, the weekly clean's scope, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -72,7 +72,7 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `AppsModel.swift`, `AppsView.swift` | Applications: scan, leftovers, uninstall, `AdminGuard` / `AdminStep` |
 | `SystemData.swift`, `SystemItems.swift`, `Shredder.swift` | System Data, Startup & Extensions, Shredder |
 | `Trash*.swift`, `History.swift` | Trash size, empty, Put Back log; cleanup history |
-| `Automation.swift` | Low-disk alert, weekly safe clean, open at login |
+| `Automation.swift` | Low-disk alert, weekly safe clean (plain cache-folder deletes only, never `simctl` commands), open at login |
 | `Updates.swift` | In-app updates from GitHub Releases: daily check, Software Update window, download, checks, swap and relaunch |
 | `CLI.swift`, `MCPServer.swift`, `Integrations*.swift` | Command line, MCP server, AI app setup |
 | `Intro.swift` | Welcome tour |

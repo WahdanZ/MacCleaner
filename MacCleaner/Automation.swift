@@ -15,17 +15,31 @@ enum AutoKeys {
     static let lastNotified = "auto.lastNotified"
 }
 
-/// Picks what the automatic clean may delete: recommended caches only. Never the Trash, Downloads,
-/// anything protected, or anything outside the allowed cache folders.
+/// Picks what the automatic clean may delete: recommended caches only, and only plain file deletes
+/// with at least one path. Never commands (`simctl` deletes simulators and their app data), the Trash,
+/// Downloads, anything protected, or anything outside the allowed cache folders.
 enum AutoClean {
+    /// Categories the automatic clean may touch. A new category stays manual until it is added here.
+    static let categories: Set<CacheCategory> = [.xcode, .android, .packages, .editors, .devCache, .appCaches, .webCaches, .logs]
+
     static func select(_ targets: [CleanTarget]) -> [CleanTarget] {
         let downloads = SafetyGuard.home.appendingPathComponent("Downloads").path
         return targets.filter { t in
-            guard t.recommended, t.isCleanable, t.category != .trash else { return false }
-            return urls(t).allSatisfy { u in
+            guard t.recommended, t.isCleanable, categories.contains(t.category),
+                  let paths = filePaths(t), !paths.isEmpty else { return false }
+            return paths.allSatisfy { u in
                 !SafetyGuard.isInside(u.path, downloads) && !ProtectedPaths.isBlocked(u)
                     && SafetyGuard.isAllowed(u, allowContainer: { if case .removeContents = t.action { return true }; return false }())
             }
+        }
+    }
+
+    /// The paths a plain file delete removes; nil for commands and for unmeasured placeholders.
+    static func filePaths(_ t: CleanTarget) -> [URL]? {
+        switch t.action {
+        case .removeItem(let u), .removeContents(let u): return [u]
+        case .removeItems(let us): return us
+        case .webCachesIn, .deleteUnavailableSimulators, .deleteSimRuntime: return nil
         }
     }
 
@@ -204,7 +218,7 @@ struct AutomationSettings: View {
             Divider().opacity(0.5)
             Toggle("Weekly safe clean", isOn: $weekly)
                 .onChange(of: weekly) { _, on in if on { Notifier.requestPermission() } }
-            Text("Recommended caches only (the same ones pre-selected in Junk Files). Never the Trash, Downloads, your folders or anything protected. A notification shows what was freed.")
+            Text("Recommended cache folders only (the ones pre-selected in Junk Files). Never simulators, the Trash, Downloads, your folders or anything protected. A notification shows what was freed.")
                 .font(.system(size: 11)).foregroundStyle(Palette.faint).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(lastText).font(.system(size: 12)).foregroundStyle(Palette.dim)
@@ -218,7 +232,7 @@ struct AutomationSettings: View {
             Button("Clean") { Task { await auto.runClean(automatic: false) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Deletes the recommended caches (they rebuild): developer caches, app caches, logs and browser caches. The Trash, Downloads, your folders and protected items are not touched. For an item-by-item list, use Junk Files instead.")
+            Text("Deletes the recommended caches (they rebuild): developer caches, app caches, logs and browser caches. Simulators, the Trash, Downloads, your folders and protected items are not touched. For an item-by-item list, use Junk Files instead.")
         }
     }
 

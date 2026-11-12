@@ -153,7 +153,7 @@ struct IntroStep {
                     IntroFeature(symbol: "externaldrive.badge.exclamationmark", color: Color(hex: 0xF97316), title: "Low-disk alert",
                                  text: "The menu bar icon turns orange, then red, and you get a notification below your limit."),
                     IntroFeature(symbol: "calendar.badge.clock", color: Color(hex: 0x8B5CF6), title: "Weekly safe clean",
-                                 text: "Optional. Recommended caches only; never the Trash, Downloads or your folders."),
+                                 text: "Optional. Recommended caches only; never simulators, the Trash, Downloads or your folders."),
                     IntroFeature(symbol: "menubar.rectangle", color: Color(hex: 0x1A7CFF), title: "Menu bar",
                                  text: "Free space at a glance, a rescan, and the app one click away."),
                   ]),

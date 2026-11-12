@@ -361,6 +361,25 @@ enum SelfTest {
               && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
               && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
 
+        print("Automatic clean scope (no commands)")
+        // Hand-built targets only: the real weekly clean and simctl never run here.
+        func autoTarget(_ id: String, _ c: CacheCategory, _ a: CleanAction) -> CleanTarget {
+            CleanTarget(id: id, category: c, name: id, path: id, note: "", action: a, recommended: true, sizeBytes: 1, exists: true)
+        }
+        let sims = autoTarget("sims", .xcode, .deleteUnavailableSimulators)
+        let runtime = autoTarget("runtime", .xcode, .deleteSimRuntime(UUID().uuidString))
+        let noPaths = autoTarget("empty", .logs, .removeItems([]))
+        let placeholder = autoTarget("web", .webCaches, .webCachesIn(h("Library/Application Support/Example")))
+        let mixed = autoTarget("mixed", .logs, .removeItems([cacheItem, h("Documents/x")]))
+        let plain = autoTarget("plain", .devCache, .removeItems([cacheItem]))
+        check("never picks unavailable-simulator deletion", AutoClean.select([sims]).isEmpty)
+        check("never picks a simulator runtime deletion", AutoClean.select([runtime]).isEmpty)
+        check("never picks a target with no paths", AutoClean.select([noPaths]).isEmpty)
+        check("never picks an unmeasured web cache placeholder", AutoClean.select([placeholder]).isEmpty)
+        check("never picks a target with any path outside the cache folders", AutoClean.select([mixed]).isEmpty)
+        check("picks only the plain path-based cache from a mixed list",
+              AutoClean.select([sims, runtime, noPaths, placeholder, mixed, plain]).map(\.id) == ["plain"])
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

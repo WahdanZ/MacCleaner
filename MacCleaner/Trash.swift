@@ -17,53 +17,49 @@ struct TrashedItem: Codable, Identifiable, Sendable {
     var stillInTrash: Bool { FileManager.default.fileExists(atPath: trashed) }
 }
 
-/// Thread-safe, persisted log (~/Library/Application Support/Mac Cleaner/trash-log.json).
-/// Written from background threads by AppEngine.trash.
+/// Persisted log (~/Library/Application Support/Mac Cleaner/trash-log.json), shared by the window and the
+/// CLI/MCP process. Written from background threads by AppEngine.trash. Each change goes through
+/// `SharedFile`, so entries one process adds are never lost when the other one writes.
 final class TrashLog: @unchecked Sendable {
     static let shared = TrashLog()
-    private let lock = NSLock()
-    private var items: [TrashedItem] = []
-    private let file: URL = {
-        let dir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("trash-log.json")
-    }()
+    private let file: URL
 
-    private init() {
-        if let d = try? Data(contentsOf: file), let r = try? JSONDecoder.iso.decode([TrashedItem].self, from: d) { items = r }
+    init(file: URL? = nil) {
+        self.file = file ?? {
+            let dir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir.appendingPathComponent("trash-log.json")
+        }()
     }
 
     func record(original: String, trashed: String, size: Int64, source: String, restorable: Bool) {
-        lock.lock(); defer { lock.unlock() }
-        items.insert(TrashedItem(original: original, trashed: trashed, size: size, date: Date(),
-                                 source: source, restorable: restorable), at: 0)
-        if items.count > 2000 { items.removeLast(items.count - 2000) }
-        save()
+        SharedFile.update(file) { (items: inout [TrashedItem]) in
+            items.insert(TrashedItem(original: original, trashed: trashed, size: size, date: Date(),
+                                     source: source, restorable: restorable), at: 0)
+            if items.count > 2000 { items.removeLast(items.count - 2000) }
+            return true
+        }
     }
 
     /// Entries whose file is still in the Trash (drops the rest: emptied or put back elsewhere).
     func present() -> [TrashedItem] {
-        lock.lock(); defer { lock.unlock() }
-        let before = items.count
-        items.removeAll { !$0.stillInTrash }
-        if items.count != before { save() }
-        return items
+        SharedFile.update(file) { (items: inout [TrashedItem]) in
+            let before = items.count
+            items.removeAll { !$0.stillInTrash }
+            return items.count != before
+        }
     }
 
     func remove(_ id: UUID) {
-        lock.lock(); defer { lock.unlock() }
-        items.removeAll { $0.id == id }
-        save()
+        SharedFile.update(file) { (items: inout [TrashedItem]) in
+            let before = items.count
+            items.removeAll { $0.id == id }
+            return items.count != before
+        }
     }
 
     func clear() {
-        lock.lock(); defer { lock.unlock() }
-        items = []
-        save()
-    }
-
-    private func save() {
-        if let d = try? JSONEncoder.iso.encode(items) { try? d.write(to: file, options: .atomic) }
+        SharedFile.update(file) { (items: inout [TrashedItem]) in items = []; return true }
     }
 }
 

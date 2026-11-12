@@ -790,6 +790,23 @@ enum SelfTest {
         check("weekly clean: crash reports are kept, other logs go",
               { if case .removeItems(let us)? = logs?.action { return us == [appLog] }; return false }())
 
+        print("Audit P2 fixes (shared logs)")
+        // P2-3: the window and the CLI/MCP process each keep a log object; neither may erase the other's entries.
+        let sharedLog = sandbox.appendingPathComponent("trash-log-test.json")
+        let inTrashA = sandbox.appendingPathComponent("in-trash-a"), inTrashB = sandbox.appendingPathComponent("in-trash-b")
+        fm.createFile(atPath: inTrashA.path, contents: Data("a".utf8))
+        fm.createFile(atPath: inTrashB.path, contents: Data("b".utf8))
+        let windowLog = TrashLog(file: sharedLog), mcpLog = TrashLog(file: sharedLog)   // both opened before either writes
+        mcpLog.record(original: "/x/a", trashed: inTrashA.path, size: 1, source: "MCP", restorable: true)
+        windowLog.record(original: "/x/b", trashed: inTrashB.path, size: 1, source: "Window", restorable: true)
+        check("Put Back log keeps entries from both the window and the MCP/CLI process",
+              Set(windowLog.present().map(\.source)) == ["MCP", "Window"])
+        let sharedHistory = sandbox.appendingPathComponent("history-test.json")
+        HistoryStore.insert(CleanupRecord(date: Date(), title: "mcp", bytes: 1, symbol: "x"), into: sharedHistory)
+        HistoryStore.insert(CleanupRecord(date: Date(), title: "window", bytes: 1, symbol: "x"), into: sharedHistory)
+        check("history keeps records from both processes",
+              Set((SharedFile.read(sharedHistory) as [CleanupRecord]).map(\.title)) == ["mcp", "window"])
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

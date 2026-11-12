@@ -47,12 +47,10 @@ final class HistoryStore {
         return dir.appendingPathComponent("history.json")
     }
 
-    private init() {
-        if let d = try? Data(contentsOf: file),
-           let r = try? JSONDecoder.iso.decode([CleanupRecord].self, from: d) {
-            records = r
-        }
-    }
+    private init() { records = SharedFile.read(file) }
+
+    /// Picks up records the CLI or MCP server added since.
+    func reload() { records = SharedFile.read(file) }
 
     /// Bytes removed permanently.
     var totalDeleted: Int64 { records.filter { $0.outcome == .deleted }.reduce(0) { $0 + $1.bytes } }
@@ -65,30 +63,30 @@ final class HistoryStore {
 
     func add(_ title: String, bytes: Int64, symbol: String, outcome: CleanupRecord.Outcome, measuredFreeChange: Int64? = nil) {
         guard bytes > 0 else { return }
-        records.insert(CleanupRecord(date: Date(), title: title, bytes: bytes, symbol: symbol,
-                                     outcome: outcome, measuredFreeChange: measuredFreeChange), at: 0)
-        if records.count > 300 { records.removeLast(records.count - 300) }
-        save()
+        records = Self.insert(CleanupRecord(date: Date(), title: title, bytes: bytes, symbol: symbol,
+                                            outcome: outcome, measuredFreeChange: measuredFreeChange), into: file)
     }
 
     /// For the MCP server process (no window): append to the same history file.
     nonisolated static func add(title: String, bytes: Int64, symbol: String, outcome: CleanupRecord.Outcome,
                                 measuredFreeChange: Int64? = nil) {
         guard bytes > 0 else { return }
-        let file = fileURL
-        var list = (try? JSONDecoder.iso.decode([CleanupRecord].self, from: Data(contentsOf: file))) ?? []
-        list.insert(CleanupRecord(date: Date(), title: title, bytes: bytes, symbol: symbol,
-                                  outcome: outcome, measuredFreeChange: measuredFreeChange), at: 0)
-        if let d = try? JSONEncoder.iso.encode(Array(list.prefix(300))) { try? d.write(to: file, options: .atomic) }
+        insert(CleanupRecord(date: Date(), title: title, bytes: bytes, symbol: symbol,
+                             outcome: outcome, measuredFreeChange: measuredFreeChange), into: fileURL)
+    }
+
+    /// Adds a record to the file under its lock (see `SharedFile`) and returns the whole list.
+    @discardableResult
+    nonisolated static func insert(_ r: CleanupRecord, into file: URL) -> [CleanupRecord] {
+        SharedFile.update(file) { (list: inout [CleanupRecord]) in
+            list.insert(r, at: 0)
+            if list.count > 300 { list.removeLast(list.count - 300) }
+            return true
+        }
     }
 
     func clear() {
-        records = []
-        save()
-    }
-
-    private func save() {
-        if let d = try? JSONEncoder.iso.encode(records) { try? d.write(to: file, options: .atomic) }
+        records = SharedFile.update(file) { (list: inout [CleanupRecord]) in list = []; return true }
     }
 }
 

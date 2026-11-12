@@ -23,6 +23,7 @@ on:
 
 permissions:
   contents: write
+  actions: write      # to start the website deploy after publishing
 
 jobs:
   release:
@@ -146,6 +147,13 @@ jobs:
           gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" \
             --title "Mac Cleaner $VERSION" --notes-file notes.md --generate-notes \
             $([[ "$VERSION" == *-* ]] && echo --prerelease)
+
+      # A release made with GITHUB_TOKEN doesn't trigger other workflows, so start the website deploy here.
+      - name: Update the website
+        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main
 
       - name: Remove signing keychain
         if: always() && env.KEYCHAIN != ''

@@ -93,6 +93,7 @@ final class AutomationModel {
 
     func tick() {
         check()
+        Updater.shared.checkIfDue()
         if Self.weeklyOn, !running, (lastRun.map { Date().timeIntervalSince($0) > 7 * 86_400 } ?? true) {
             Task { await runClean(automatic: true) }
         }

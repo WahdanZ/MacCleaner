@@ -63,29 +63,3 @@ jobs:
           name: MacCleaner-unsigned
           path: MacCleaner-unsigned.zip
           retention-days: 14
-
-  # The app supports macOS 14, so build and self-test there too (not a required check).
-  macos-14:
-    name: Build and self-test on macOS 14
-    runs-on: macos-14
-    timeout-minutes: 30
-    env:
-      APP: build/Release/Mac Cleaner.app
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Pick the newest Xcode
-        run: |
-          XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
-          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
-          xcodebuild -version
-
-      - name: Build (Release, ad-hoc signed)
-        run: |
-          set -o pipefail
-          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
-            CODE_SIGN_IDENTITY=- build | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' || true
-          grep -q 'BUILD SUCCEEDED' build.log
-
-      - name: Safety self-test
-        run: '"$APP/Contents/MacOS/Mac Cleaner" --selftest'

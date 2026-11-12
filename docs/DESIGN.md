@@ -102,6 +102,8 @@ The engines still re-check every guard at execution time (`Cleaner.run`, `AppEng
 - **Unbounded text broke the window.** A long footer text with `.fixedSize(horizontal: false, vertical: true)` beside a `Spacer` made the page taller than the window and blanked the sidebar list (seen on Shredder). Footers and message bars now use `lineLimit` instead.
 - **`preferredColorScheme` emptied the sidebar.** Changing appearance at runtime rebuilt the window and left the sidebar list empty. Appearance is now applied through `NSApp.appearance`, the AppKit way.
 - **Inside a `NavigationSplitView` detail, `.inspector` and `HSplitView` misbehaved** (blank sidebar, overlapping banner). The Junk Files list uses a proportional-width column instead.
+- **SDK filter chips were cut off at the default window size** once Languages and Homebrew were added. The chips now use `ViewThatFits`: with sizes when they fit, without sizes (still in the tooltip and VoiceOver value) when they don't, and only then scrolling.
+- **The Storage Map colour key broke words in half** ("Folde r") in narrow windows. Each key item is now fixed-size; the hint text is dropped first, then the items wrap onto a second line (`FlowRow`).
 
 ## Limitations and next steps
 

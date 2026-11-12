@@ -8,15 +8,24 @@ Mac Cleaner finds caches, leftovers, old downloads, duplicate files and develope
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/tour-welcome-dark.png">
-    <img src="docs/screenshots/tour-welcome-light.png" alt="Mac Cleaner welcome tour" width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
+    <img src="docs/screenshots/overview-light.png" alt="Mac Cleaner Overview: storage breakdown, recommended cleanup, quick tools and Trash" width="820">
   </picture>
 </p>
 
+### Screenshots
+
 | | |
 |---|---|
-| ![Find space: Junk Files, Projects, SDKs](docs/screenshots/tour-find-space-dark.png) | ![Your files: Large & Old Files, Duplicates, Storage Map](docs/screenshots/tour-your-files-light.png) |
-| ![Apps and System Data](docs/screenshots/tour-apps-system-dark.png) | ![Terminal command and AI assistants](docs/screenshots/tour-terminal-ai-dark.png) |
+| ![Junk Files: caches and temporary files on a map sized by disk space](docs/screenshots/junk-files.png)<br>**Junk Files:** a map of caches, logs and temporary files, sized by disk space | ![Review Cleanup sheet listing every item with its location, size, action and safety](docs/screenshots/review-sheet.png)<br>**Review Cleanup:** every item, its full location, size, what happens to it, and how safe it is |
+| ![Developer Tools: build folders in code projects](docs/screenshots/developer-projects.png)<br>**Projects:** build folders in your code projects, and how long since you touched each one | ![Developer Tools: SDKs, simulators and Android parts](docs/screenshots/developer-sdks.png)<br>**SDKs:** simulators, Android parts, language versions and Docker, marked **In Use** when a project needs them |
+| ![Developer Tools: Homebrew formulae with size and dependents](docs/screenshots/developer-homebrew.png)<br>**Homebrew:** what you installed with `brew`, its size, and what still needs it | ![Large & Old Files](docs/screenshots/large-files.png)<br>**Large & Old Files:** big files and files you haven't opened in months |
+| ![Duplicates found by content](docs/screenshots/duplicates.png)<br>**Duplicates:** identical files compared by content; one copy always stays | ![Storage Map of the home folder](docs/screenshots/storage-map.png)<br>**Storage Map:** every folder by size, to see where your space goes |
+| ![Applications with cache and uninstall leftovers](docs/screenshots/applications.png)<br>**Applications:** clear an app's cache, or uninstall it with everything it left behind | ![System Data: snapshots, backups, Mail and Messages](docs/screenshots/system-data.png)<br>**System Data:** Time Machine snapshots, device backups, Mail and Messages attachments |
+| ![Startup & Extensions](docs/screenshots/startup.png)<br>**Startup & Extensions:** what starts with your Mac | ![Settings: connect AI assistants](docs/screenshots/settings-integrations.png)<br>**Integrations:** connect Claude, Cursor, Codex, VS Code, Windsurf or Gemini |
+| ![Shredder](docs/screenshots/shredder.png)<br>**Shredder:** delete files permanently, without the Trash | ![Welcome tour page about the Terminal command and AI assistants](docs/screenshots/tour-terminal-ai-dark.png)<br>**Welcome tour:** the Terminal command and AI assistants |
+
+<sub>Screenshots are from a real Mac. File, folder and project names are blurred for privacy.</sub>
 
 ---
 

@@ -9,17 +9,13 @@ struct DevSDKView: View {
         @Bindable var m = m
         VStack(spacing: 14) {
             HStack(spacing: 12) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: Space.s) {
-                        ForEach([nil] + SDKItem.Group.allCases.map(Optional.some), id: \.self) { g in
-                            GroupChip(group: g, bytes: m.total(g), selected: m.filter == g) {
-                                withAnimation(.snappy) { m.filter = g }
-                            }
-                            .accessibilityAddTraits(m.filter == g ? .isSelected : [])
-                        }
-                    }
+                // Sizes show when every chip fits; in narrower windows the chips drop their sizes
+                // (still in the tooltip and VoiceOver), and only then scroll.
+                ViewThatFits(in: .horizontal) {
+                    chips(showSizes: true)
+                    chips(showSizes: false)
+                    ScrollView(.horizontal) { chips(showSizes: false) }.scrollIndicators(.never)
                 }
-                .scrollIndicators(.never)
                 Spacer(minLength: Space.s)
                 if m.phase == .done {
                     Button("Select unused") { m.selectUnused() }.buttonStyle(.bordered)
@@ -130,10 +126,25 @@ struct DevSDKView: View {
     }
 }
 
+extension DevSDKView {
+    func chips(showSizes: Bool) -> some View {
+        HStack(spacing: Space.s) {
+            ForEach([nil] + SDKItem.Group.allCases.map(Optional.some), id: \.self) { g in
+                GroupChip(group: g, bytes: m.total(g), selected: m.filter == g, showSize: showSizes) {
+                    withAnimation(.snappy) { m.filter = g }
+                }
+                .accessibilityAddTraits(m.filter == g ? .isSelected : [])
+            }
+        }
+        .fixedSize()
+    }
+}
+
 private struct GroupChip: View {
     let group: SDKItem.Group?
     let bytes: Int64
     let selected: Bool
+    var showSize = true
     let action: () -> Void
 
     var body: some View {
@@ -141,7 +152,9 @@ private struct GroupChip: View {
             HStack(spacing: 8) {
                 Image(systemName: symbol).font(.system(size: 13, weight: .semibold))
                 Text(group?.rawValue ?? "All").font(.system(size: 13, weight: .semibold))
-                RollingBytes(bytes: bytes, size: 12, weight: .medium).foregroundStyle(selected ? Color.white.opacity(0.85) : Palette.dim)
+                if showSize {
+                    RollingBytes(bytes: bytes, size: 12, weight: .medium).foregroundStyle(selected ? Color.white.opacity(0.85) : Palette.dim)
+                }
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
             .foregroundStyle(selected ? Color.white : Palette.fg)
@@ -149,6 +162,8 @@ private struct GroupChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .help(ByteText.string(bytes))
+        .accessibilityValue(ByteText.string(bytes))
     }
 
     private var symbol: String {

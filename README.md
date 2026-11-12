@@ -9,7 +9,7 @@ Mac Cleaner finds caches, leftovers, old downloads, duplicate files and develope
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
-    <img src="docs/screenshots/overview-light.png" alt="Mac Cleaner Overview: storage breakdown, recommended cleanup, quick tools and Trash" width="820">
+    <img src="docs/screenshots/overview-light.png" alt="Mac Cleaner Overview: storage breakdown, recommended cleanup, Insights charts, quick tools and Trash" width="820">
   </picture>
 </p>
 
@@ -25,7 +25,7 @@ Mac Cleaner finds caches, leftovers, old downloads, duplicate files and develope
 | ![Startup & Extensions](docs/screenshots/startup.png)<br>**Startup & Extensions:** what starts with your Mac | ![Settings: connect AI assistants](docs/screenshots/settings-integrations.png)<br>**Integrations:** connect Claude, Cursor, Codex, VS Code, Windsurf or Gemini |
 | ![Shredder](docs/screenshots/shredder.png)<br>**Shredder:** delete files permanently, without the Trash | ![Welcome tour page about the Terminal command and AI assistants](docs/screenshots/tour-terminal-ai-dark.png)<br>**Welcome tour:** the Terminal command and AI assistants |
 
-<sub>Screenshots are from a real Mac. File, folder and project names are blurred for privacy.</sub>
+<sub>Screenshots are from a real Mac. File, folder and project names are blurred for privacy. The Overview is shown as a full page: two captures of the same window, scrolled to the top and to the bottom, joined where they overlap.</sub>
 
 ---
 

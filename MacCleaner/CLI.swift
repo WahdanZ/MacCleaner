@@ -108,6 +108,7 @@ enum CLI {
 
         switch name {
         case "mcp": MCPServer.run(); return 0
+        case "bench": return MainActor.assumeIsolated { Bench.run(Array(args.dropFirst())) }
         case "install":
             switch CLIInstaller.install() {
             case .success(let u):

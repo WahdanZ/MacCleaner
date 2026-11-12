@@ -184,6 +184,14 @@ extension SDKEngine {
     static func homebrew() -> (items: [SDKItem], status: String?) {
         guard let brew = brewPath else { return ([], "Homebrew isn't installed.") }
         let prefix = URL(fileURLWithPath: brew).deletingLastPathComponent().deletingLastPathComponent()
+        // `brew cleanup --dry-run` only reads, and does not need the package list, so it runs alongside `brew info`.
+        let cleanup = Box<String?>(nil)
+        let cleanupDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let out = runBrew(["cleanup", "--dry-run"], timeout: 90).output
+            cleanup.mutate { $0 = out }
+            cleanupDone.signal()
+        }
         guard let idx = brewIndex() else { return ([], "Couldn't read the Homebrew package list.") }
         var items: [SDKItem] = []
 
@@ -230,7 +238,8 @@ extension SDKEngine {
         }
 
         // Old versions and downloads that `brew cleanup` would remove.
-        if let out = runBrew(["cleanup", "--dry-run"], timeout: 90).output,
+        cleanupDone.wait()
+        if let out = cleanup.value,
            let line = out.split(separator: "\n").last(where: { $0.contains("would free approximately") }) {
             let size = parseBinarySize(String(line))
             if size > 0 {

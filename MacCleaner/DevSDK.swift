@@ -71,15 +71,23 @@ enum SDKEngine {
 
     static func scan(roots: [URL] = ProjectEngine.defaultRoots) -> SDKScan {
         var out = SDKScan()
-        out.usage = androidUsage(roots: roots)
-        out.items += xcode()
-        out.items += android(out.usage)
-        out.items += languages(out.usage)
-        let b = homebrew()
-        out.items += b.items
+        var xc: [SDKItem] = [], andr: [SDKItem] = [], langs: [SDKItem] = []
+        var b: (items: [SDKItem], status: String?) = ([], nil)
+        var d: (items: [SDKItem], status: String?) = ([], nil)
+        // The four sections are independent (mostly waiting on xcrun, brew and docker), so they run side by side.
+        DispatchQueue.concurrentPerform(iterations: 4) { i in
+            switch i {
+            case 0:
+                out.usage = androidUsage(roots: roots)
+                andr = android(out.usage)
+                langs = languages(out.usage)
+            case 1: xc = xcode()
+            case 2: b = homebrew()
+            default: d = docker()
+            }
+        }
+        out.items = xc + andr + langs + b.items + d.items
         out.brewStatus = b.status
-        let d = docker()
-        out.items += d.items
         out.dockerStatus = d.status
         return out
     }

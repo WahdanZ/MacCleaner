@@ -27,62 +27,109 @@ enum DupEngine {
 
     /// Size → first/last 64 KB hash → full SHA-256. Skips hidden files, package internals,
     /// symlinks, hard-link twins and iCloud files that are not downloaded (reading would download them).
+    /// Thread-safe progress that reaches `report` at most ~8 times a second (each report is a main-actor hop).
+    private final class Meter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var p = Progress()
+        private var last = Date.distantPast
+        private let report: (Progress) -> Void
+        init(_ report: @escaping (Progress) -> Void) { self.report = report }
+
+        func update(force: Bool = false, current: String? = nil, _ change: (inout Progress) -> Void) {
+            lock.lock()
+            change(&p)
+            var snap: Progress?
+            let now = Date()
+            if force || now.timeIntervalSince(last) > 0.12 {
+                last = now
+                if let current { p.current = current }
+                snap = p
+            }
+            lock.unlock()
+            if let snap { report(snap) }
+        }
+    }
+
     static func run(roots: [URL], minSize: Int64, cancel: Cancel,
                     report: @Sendable (Progress) -> Void) -> [DupGroup] {
-        let fm = FileManager.default
-        var p = Progress()
+        withoutActuallyEscaping(report) { report in run(roots: roots, minSize: minSize, cancel: cancel, meter: Meter(report)) }
+    }
+
+    private static func run(roots: [URL], minSize: Int64, cancel: Cancel, meter: Meter) -> [DupGroup] {
+        // 1. Group by size. Each root is listed on its own thread; merged in root order.
+        var perRoot = [[Int64: [URL]]](repeating: [:], count: roots.count)
+        perRoot.withUnsafeMutableBufferPointer { buf in
+            DispatchQueue.concurrentPerform(iterations: roots.count) { i in
+                buf[i] = list(roots[i], minSize: minSize, cancel: cancel, meter: meter)
+            }
+        }
+        if cancel.isSet { return [] }
         var bySize: [Int64: [URL]] = [:]
+        for part in perRoot { for (s, fs) in part { bySize[s, default: []] += fs } }
+
+        let sizeGroups = bySize.filter { $0.value.count > 1 }.sorted { $0.key > $1.key }
+        meter.update(force: true) { $0.candidates = sizeGroups.reduce(0) { $0 + $1.value.count } }
+
+        // 2. Hash. Same-size groups are independent, so they run in parallel.
+        var found = [[DupGroup]](repeating: [], count: sizeGroups.count)
+        found.withUnsafeMutableBufferPointer { buf in
+            DispatchQueue.concurrentPerform(iterations: sizeGroups.count) { i in
+                if cancel.isSet { return }
+                buf[i] = hashGroup(size: sizeGroups[i].key, files: sizeGroups[i].value, cancel: cancel, meter: meter)
+            }
+        }
+        if cancel.isSet { return [] }
+        meter.update(force: true) { _ in }
+        return found.flatMap { $0 }.sorted { $0.wasted > $1.wasted }
+    }
+
+    private static func list(_ root: URL, minSize: Int64, cancel: Cancel, meter: Meter) -> [Int64: [URL]] {
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]
         let keySet = Set(keys)
-
-        for root in roots {
-            guard let e = fm.enumerator(at: root, includingPropertiesForKeys: keys,
-                                        options: [.skipsHiddenFiles, .skipsPackageDescendants],
-                                        errorHandler: { _, _ in true }) else { continue }
-            for case let f as URL in e {
-                if cancel.isSet { return [] }
-                guard let v = try? f.resourceValues(forKeys: keySet), v.isRegularFile == true,
-                      v.isSymbolicLink != true, let s = v.fileSize, Int64(s) >= minSize else { continue }
-                bySize[Int64(s), default: []].append(f)
-                p.files += 1
-                if p.files % 400 == 0 { p.current = f.path; report(p) }
-            }
+        var bySize: [Int64: [URL]] = [:]
+        guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
+                                                     options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                                                     errorHandler: { _, _ in true }) else { return [:] }
+        var pending = 0
+        for case let f as URL in e {
+            if cancel.isSet { return [:] }
+            guard let v = try? f.resourceValues(forKeys: keySet), v.isRegularFile == true,
+                  v.isSymbolicLink != true, let s = v.fileSize, Int64(s) >= minSize else { continue }
+            bySize[Int64(s), default: []].append(f)
+            pending += 1
+            if pending == 200 { let n = pending; pending = 0; meter.update(current: f.path) { $0.files += n } }
         }
+        let n = pending
+        meter.update { $0.files += n }
+        return bySize
+    }
 
-        let sizeGroups = bySize.filter { $0.value.count > 1 }
-        p.candidates = sizeGroups.values.reduce(0) { $0 + $1.count }
-        report(p)
-
+    private static func hashGroup(size: Int64, files: [URL], cancel: Cancel, meter: Meter) -> [DupGroup] {
+        let unique = uniqueLocalFiles(files)
+        guard unique.count > 1 else { meter.update { $0.hashed += files.count }; return [] }
         var out: [DupGroup] = []
-        for (size, files) in sizeGroups.sorted(by: { $0.key > $1.key }) {
+        var byPartial: [String: [URL]] = [:]
+        for f in unique {
             if cancel.isSet { return [] }
-            let unique = uniqueLocalFiles(files)
-            guard unique.count > 1 else { p.hashed += files.count; continue }
-            var byPartial: [String: [URL]] = [:]
-            for f in unique {
-                if let h = partialHash(f, size: size) { byPartial[h, default: []].append(f) }
-                p.hashed += 1
-                if p.hashed % 20 == 0 { p.current = f.path; report(p) }
+            if let h = partialHash(f, size: size) { byPartial[h, default: []].append(f) }
+            meter.update(current: f.path) { $0.hashed += 1 }
+        }
+        for (ph, same) in byPartial where same.count > 1 {
+            if size <= 128 * 1024 {
+                out.append(DupGroup(id: "\(size)-\(ph)", size: size, files: same.sorted { $0.path < $1.path }))
+                continue
             }
-            for (ph, same) in byPartial where same.count > 1 {
-                if size <= 128 * 1024 {
-                    out.append(DupGroup(id: "\(size)-\(ph)", size: size, files: same.sorted { $0.path < $1.path }))
-                    continue
-                }
-                var byFull: [String: [URL]] = [:]
-                for f in same {
-                    if cancel.isSet { return [] }
-                    p.current = f.path
-                    report(p)
-                    if let h = fullHash(f, cancel: cancel) { byFull[h, default: []].append(f) }
-                }
-                for (h, dup) in byFull where dup.count > 1 {
-                    out.append(DupGroup(id: "\(size)-\(h)", size: size, files: dup.sorted { $0.path < $1.path }))
-                }
+            var byFull: [String: [URL]] = [:]
+            for f in same {
+                if cancel.isSet { return [] }
+                meter.update(current: f.path) { _ in }
+                if let h = fullHash(f, cancel: cancel) { byFull[h, default: []].append(f) }
+            }
+            for (h, dup) in byFull where dup.count > 1 {
+                out.append(DupGroup(id: "\(size)-\(h)", size: size, files: dup.sorted { $0.path < $1.path }))
             }
         }
-        report(p)
-        return out.sorted { $0.wasted > $1.wasted }
+        return out
     }
 
     /// Drops hard-link twins and iCloud placeholders.
@@ -123,7 +170,10 @@ enum DupEngine {
     }
 
     private static func hex<D: Sequence>(_ d: D) -> String where D.Element == UInt8 {
-        d.map { String(format: "%02x", $0) }.joined()
+        let digits = Array("0123456789abcdef".utf8)
+        var out: [UInt8] = []
+        for b in d { out.append(digits[Int(b >> 4)]); out.append(digits[Int(b & 0x0f)]) }
+        return String(decoding: out, as: UTF8.self)
     }
 }
 

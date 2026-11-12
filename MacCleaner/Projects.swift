@@ -18,7 +18,7 @@ struct DevProject: Identifiable, Sendable {
     let url: URL
     let name: String
     let stack: String       // Flutter, Node, Android…
-    let lastTouched: Date?
+    var lastTouched: Date?
     var artifacts: [ProjectArtifact]
     var total: Int64 { artifacts.reduce(0) { $0 + $1.size } }
     var isProtected: Bool { ProtectedPaths.isInsideProtected(url) }
@@ -125,7 +125,7 @@ enum ProjectEngine {
                 progress(dir.path)
                 let stack = markersHere.first { $0.1 == "Flutter" }?.1 ?? markersHere[0].1
                 projects[dir.path] = DevProject(id: dir.path, url: dir, name: dir.lastPathComponent, stack: stack,
-                                                lastTouched: lastTouched(dir), artifacts: [])
+                                                lastTouched: nil, artifacts: [])
                 order.append(dir.path)
                 currentOwner = dir.path
             }
@@ -162,7 +162,15 @@ enum ProjectEngine {
         }
         for (i, pair) in flat.enumerated() { list[pair.0].artifacts[pair.1].size = sizes[i] }
         for i in list.indices { list[i].artifacts.removeAll { $0.size == 0 }; list[i].artifacts.sort { $0.size > $1.size } }
-        return list.filter { $0.total > 0 }.sorted { $0.total > $1.total }
+        list.removeAll { $0.total == 0 }
+
+        // "Last edited" walks each project's sources, so it runs in parallel and only for projects that are shown.
+        var dates = [Date?](repeating: nil, count: list.count)
+        dates.withUnsafeMutableBufferPointer { buf in
+            DispatchQueue.concurrentPerform(iterations: list.count) { i in buf[i] = lastTouched(list[i].url) }
+        }
+        for i in list.indices { list[i].lastTouched = dates[i] }
+        return list.sorted { $0.total > $1.total }
     }
 
     /// Newest change outside build output and .git (plus the git index), capped at 30k files.

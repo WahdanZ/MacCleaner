@@ -22,36 +22,72 @@ enum LargeFileScanner {
 
     /// Files in your home folder (skipping ~/Library, hidden files and app bundles) that are at least
     /// `minLarge` big, or at least `minOld` big and untouched since `oldBefore`.
+    ///
+    /// Same rules as a FileManager enumerator over the home folder with `.skipsHiddenFiles` and
+    /// `.skipsPackageDescendants` (minus ~/Library), but each folder is one getattrlistbulk batch and a
+    /// `WalkPool` job, so big folders are read by several threads at once.
     static func scan(minLarge: Int64, minOld: Int64, oldBefore: Date, cancel: Cancel,
-                     progress: @Sendable (Int) -> Void) -> [BigFile] {
-        let home = SafetyGuard.home
-        let library = home.appendingPathComponent("Library").path
-        let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
-                                      .contentModificationDateKey, .contentAccessDateKey, .isSymbolicLinkKey]
-        let keySet = Set(keys)
-        guard let e = FileManager.default.enumerator(at: home, includingPropertiesForKeys: keys,
-                                                     options: [.skipsHiddenFiles, .skipsPackageDescendants],
-                                                     errorHandler: { _, _ in true }) else { return [] }
-        var out: [BigFile] = []
-        var seen = 0
+                     progress: @escaping @Sendable (Int) -> Void) -> [BigFile] {
+        let home = SafetyGuard.home.path
+        let library = home + "/Library"
         let floor = min(minLarge, minOld)
-        for case let u as URL in e {
-            if cancel.isSet { return [] }
-            if u.path == library { e.skipDescendants(); continue }
-            seen += 1
-            if seen % 2000 == 0 { progress(seen) }
-            guard let v = try? u.resourceValues(forKeys: keySet), v.isRegularFile == true,
-                  v.isSymbolicLink != true else { continue }
-            let size = Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0)
-            guard size >= floor else { continue }
-            let f = BigFile(id: u.path, url: u, size: size, modified: v.contentModificationDate,
-                            lastOpened: v.contentAccessDate)
-            let isLarge = size >= minLarge
-            let isOld = size >= minOld && (f.lastTouched ?? .distantPast) < oldBefore
-            if isLarge || isOld { out.append(f) }
+        let found = Found(progress)
+
+        func visit(_ dir: String, _ group: WalkPool.Group) {
+            if cancel.isSet { return }
+            guard let kids = DirSize.entries(atPath: dir) else { return }
+            var out: [BigFile] = []
+            var seen = 0
+            for k in kids where !k.isHidden {
+                let path = dir + "/" + k.name
+                seen += 1
+                if k.isDirectory {
+                    if path != library && !isPackage(path) { group.add { visit(path, group) } }
+                    continue
+                }
+                guard k.isRegularFile, k.size >= floor else { continue }
+                let f = BigFile(id: path, url: URL(fileURLWithPath: path), size: k.size,
+                                modified: k.modified, lastOpened: k.accessed)
+                let isLarge = k.size >= minLarge
+                let isOld = k.size >= minOld && (f.lastTouched ?? .distantPast) < oldBefore
+                if isLarge || isOld { out.append(f) }
+            }
+            found.add(out, seen: seen)
         }
-        progress(seen)
-        return out.sorted { $0.size > $1.size }
+
+        WalkPool.shared.run { group in visit(home, group) }
+        if cancel.isSet { return [] }
+        progress(found.seen)
+        return found.files.sorted { ($0.size, $1.id) > ($1.size, $0.id) }
+    }
+
+    /// Apps, photo libraries and other bundles: listed as one item, never opened (like `.skipsPackageDescendants`).
+    private static func isPackage(_ path: String) -> Bool {
+        (try? URL(fileURLWithPath: path, isDirectory: true).resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
+    }
+
+    /// Results and the files-seen count, shared by the walker threads. Progress at most ~8 times a second.
+    private final class Found: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [BigFile] = []
+        private var n = 0
+        private var last = Date.distantPast
+        private let progress: @Sendable (Int) -> Void
+        init(_ progress: @escaping @Sendable (Int) -> Void) { self.progress = progress }
+
+        var seen: Int { lock.lock(); defer { lock.unlock() }; return n }
+        var files: [BigFile] { lock.lock(); defer { lock.unlock() }; return list }
+
+        func add(_ files: [BigFile], seen k: Int) {
+            lock.lock()
+            list += files
+            n += k
+            var report: Int?
+            let now = Date()
+            if now.timeIntervalSince(last) > 0.12 { last = now; report = n }
+            lock.unlock()
+            if let report { progress(report) }
+        }
     }
 }
 

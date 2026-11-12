@@ -60,6 +60,17 @@ final class CleanerModel {
         totalBytes = Scanner.totalBytes()
     }
 
+    /// Same as `refreshDisk()`, but asks the volume off the main thread (the free-space figure can take a moment
+    /// while macOS works out purgeable space).
+    private func refreshDiskInBackground() async {
+        let (free, total, fda) = await Task.detached(priority: .userInitiated) {
+            (Scanner.freeBytes(), Scanner.totalBytes(), Scanner.hasFullDiskAccess())
+        }.value
+        freeBytes = free
+        totalBytes = total
+        fullDiskAccess = fda
+    }
+
     func scan() async {
         guard !isBusy else { return }
         phase = .scanning
@@ -67,8 +78,7 @@ final class CleanerModel {
         runningBytes = 0
         log = []
         append(.info, nil, "Deep scan started", nil)
-        refreshDisk()
-        fullDiskAccess = Scanner.hasFullDiskAccess()
+        await refreshDiskInBackground()
 
         let keep = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0.selected) })
         let plan = await Task.detached(priority: .userInitiated) { Scanner.plan() }.value
@@ -79,7 +89,7 @@ final class CleanerModel {
         var measured: [CleanTarget] = []
         await withTaskGroup(of: CleanTarget.self) { group in
             var queue = plan[...]
-            for _ in 0..<6 {
+            for _ in 0..<DirSize.width {
                 if let t = queue.popFirst() { group.addTask { Scanner.measure(t) } }
             }
             while let m = await group.next() {
@@ -98,7 +108,7 @@ final class CleanerModel {
             t.selected = keep[t.id] ?? t.recommended
             return t
         }
-        refreshDisk()
+        await refreshDiskInBackground()
         append(.info, nil, "Done · \(targets.count) items · \(ByteText.string(reclaimableBytes)) sweepable", nil)
         phase = .results
     }

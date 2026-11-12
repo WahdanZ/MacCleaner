@@ -312,6 +312,61 @@ enum SelfTest {
         check("forecast wording", InsightMath.durationText(days: 26) == "about 4 weeks"
               && InsightMath.durationText(days: 1) == "about 1 day" && InsightMath.durationText(days: 0.4) == "less than a day")
 
+        print("Fast scanning (DirSize, Storage Map, duplicates)")
+        let fx = sandbox.appendingPathComponent("sizes")
+        try? fm.createDirectory(at: fx.appendingPathComponent("a/b/c"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: fx.appendingPathComponent("Thing.app/Contents"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: fx.appendingPathComponent("many"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: fx.appendingPathComponent("empty"), withIntermediateDirectories: true)
+        fm.createFile(atPath: fx.appendingPathComponent("a/b/c/deep.bin").path, contents: Data(count: 300_000))
+        fm.createFile(atPath: fx.appendingPathComponent("a/.hidden").path, contents: Data(count: 5_000))
+        fm.createFile(atPath: fx.appendingPathComponent("Thing.app/Contents/inside").path, contents: Data(count: 70_000))
+        fm.createFile(atPath: fx.appendingPathComponent("big.bin").path, contents: Data(count: 1_500_000))
+        fm.createFile(atPath: fx.appendingPathComponent("a/._deep.bin").path, contents: Data(count: 8_192))  // AppleDouble: FileManager skips it
+        try? fm.createDirectory(at: fx.appendingPathComponent("._folder"), withIntermediateDirectories: true)
+        fm.createFile(atPath: fx.appendingPathComponent("._folder/inside").path, contents: Data(count: 20_000))  // but not this
+        for i in 0..<5000 {   // more entries than one getattrlistbulk batch
+            fm.createFile(atPath: fx.appendingPathComponent("many/f\(i)").path, contents: Data(count: 10))
+        }
+        let nfc = "F\u{00FC}hrung \u{00E9}t\u{00E9}"   // precomposed ü and é, as most apps save them
+        let nfcFile = open(fx.path + "/a/" + nfc, O_CREAT | O_WRONLY | O_TRUNC, 0o644)   // raw bytes, no conversion
+        if nfcFile >= 0 { _ = [UInt8](repeating: 1, count: 1_200_000).withUnsafeBytes { write(nfcFile, $0.baseAddress, $0.count) }; close(nfcFile) }
+        // Open it once by its decomposed spelling: the kernel's name cache then holds that form, which is what
+        // getattrlistbulk reports. The scan must still give the stored spelling.
+        let nfdFile = open(fx.path + "/a/" + nfc.decomposedStringWithCanonicalMapping, O_RDONLY)
+        if nfdFile >= 0 { close(nfdFile) }
+        try? fm.createSymbolicLink(at: fx.appendingPathComponent("link-to-dir"), withDestinationURL: h("Library"))
+        try? fm.createSymbolicLink(at: fx.appendingPathComponent("link-to-file"), withDestinationURL: fx.appendingPathComponent("big.bin"))
+        let fast = Scanner.allocatedSize(fx), slow = Scanner.allocatedSizeSlow(fx)
+        check("DirSize matches the FileManager walk byte for byte", fast == slow && fast >= 3_075_000)
+        check("DirSize does not follow a symlink to ~/Library", fast < 3_075_000 + 5_000 * 4096 + 1_000_000)
+        check("DirSize of a missing folder is 0", Scanner.allocatedSize(fx.appendingPathComponent("nope")) == 0)
+        check("DirSize of a file is its own size", Scanner.allocatedSize(fx.appendingPathComponent("big.bin"))
+              == Scanner.allocatedSizeSlow(fx.appendingPathComponent("big.bin")))
+        let map = DiskScanner.scan(root: fx, counter: DiskScanner.Counter { _ in })
+        check("Storage Map counts every file once and skips symlinks", map.fileCount == 5006)
+        let listed = map.children.first { $0.name == "a" }?.children.first { $0.size >= 1_000_000 }
+        let reference = (try? fm.contentsOfDirectory(at: fx.appendingPathComponent("a"), includingPropertiesForKeys: nil))?
+            .first { $0.lastPathComponent == nfc }   // what the FileManager walk reported for the same file
+        check("Storage Map keeps a non-ASCII name exactly as stored",
+              listed.map { Array($0.name.utf8) == Array(nfc.utf8)
+                  && Array($0.url.path.utf8) == Array((reference?.path ?? "").utf8) } ?? false)
+        check("Storage Map lists a 1.5 MB file with its date",
+              map.children.contains { $0.name == "big.bin" && !$0.isDirectory && $0.modified != nil && $0.size >= 1_500_000 })
+        check("Storage Map total matches its children",
+              map.size == map.children.reduce(0) { $0 + $1.size } && map.size <= slow)
+
+        let dx = sandbox.appendingPathComponent("dups")
+        try? fm.createDirectory(at: dx.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        let same = Data((0..<400_000).map { UInt8($0 % 251) })
+        var other = same; other[200_000] ^= 0xff     // same size, same first/last 64 KB, different middle
+        for p in ["one", "two", "sub/three"] { fm.createFile(atPath: dx.appendingPathComponent(p).path, contents: same) }
+        fm.createFile(atPath: dx.appendingPathComponent("other").path, contents: other)
+        try? fm.linkItem(at: dx.appendingPathComponent("one"), to: dx.appendingPathComponent("hardlink"))
+        let groups = DupEngine.run(roots: [dx], minSize: 1, cancel: DupEngine.Cancel()) { _ in }
+        check("duplicates: one group of three, hard link and look-alike left out",
+              groups.count == 1 && groups[0].files.count == 3 && !groups[0].files.contains { $0.lastPathComponent == "other" })
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

@@ -80,10 +80,11 @@ struct MacCleanerApp: App {
         }
 
         MenuBarExtra {
-            MenuBarContent().environment(model).environment(automation)
+            MenuBarPopover().environment(model).environment(automation)
         } label: {
-            Image(nsImage: automation.menuBarImage)
+            MenuBarLabel().environment(automation)
         }
+        .menuBarExtraStyle(.window)
     }
 }
 
@@ -98,45 +99,6 @@ struct NavigationCommands: Commands {
                     .keyboardShortcut(KeyEquivalent(Character(String((i + 1) % 10))), modifiers: .command)
             }
         }
-    }
-}
-
-private struct MenuBarContent: View {
-    @Environment(CleanerModel.self) private var model
-    @Environment(AutomationModel.self) private var auto
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Text("Free: \(ByteText.string(Scanner.freeBytes()))")
-        Label(forecast, systemImage: "chart.line.downtrend.xyaxis")
-        if auto.level != .ok {
-            Text(auto.level == .critical ? "⚠︎ Disk almost full" : "⚠︎ Disk space low")
-        }
-        if model.hasScanned {
-            Text("Can free: \(ByteText.string(model.reclaimableBytes))")
-        }
-        Divider()
-        Button("Open Mac Cleaner") {
-            openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        Button("Rescan") { Task { await model.scan() } }
-        Divider()
-        if Updater.shared.updateAvailable, let r = Updater.shared.release {
-            Button("Update to \(r.version)…") { Updater.shared.show() }
-        } else {
-            Button("Check for Updates…") { Task { await Updater.shared.check(userInitiated: true) } }
-        }
-        Divider()
-        Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
-    }
-
-    /// Same straight-line forecast as the Insights card, in one short line.
-    private var forecast: String {
-        let samples = FreeSpaceLog.shared.samples
-        let limit = AutomationModel.thresholdBytes
-        return InsightMath.shortForecast(days: FreeSpaceLog.daysUntil(limit, samples: samples),
-                                         limit: limit, sampleCount: samples.count)
     }
 }
 

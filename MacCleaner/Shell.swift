@@ -343,7 +343,7 @@ struct SettingsView: View {
             Form { Section { ProtectedList() } header: { Text("Protected folders and files") } }
                 .formStyle(.grouped)
                 .tabItem { Label("Protection", systemImage: "lock.shield") }
-            Form { Section { AutomationSettings() } header: { Text("Low disk and weekly clean") } }
+            Form { Section { AutomationSettings() } header: { Text("Low disk and scheduled clean") } }
                 .formStyle(.grouped)
                 .tabItem { Label("Automation", systemImage: "clock.arrow.2.circlepath") }
             PermissionsSettings().tabItem { Label("Permissions", systemImage: "hand.raised") }
@@ -362,6 +362,7 @@ private struct GeneralSettings: View {
     @AppStorage("appearance") private var appearance = "system"
     @AppStorage("introSeen") private var introSeen = true
     @AppStorage(Updater.autoKey) private var autoUpdate = true
+    @AppStorage(AutoKeys.menuBarText) private var menuBarText = MenuBarText.none
     @Environment(AutomationModel.self) private var auto
     @State private var confirmClear = false
 
@@ -377,6 +378,9 @@ private struct GeneralSettings: View {
                     get: { auto.loginEnabled }, set: { auto.setLogin($0) }))
                 if auto.loginNeedsApproval {
                     Text("Approve it in System Settings › General › Login Items.").font(.caption).foregroundStyle(Palette.warn)
+                }
+                Picker("Next to the menu bar icon", selection: $menuBarText) {
+                    ForEach(MenuBarText.allCases) { Text($0.title).tag($0) }
                 }
             }
             Section("History") {

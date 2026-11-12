@@ -239,7 +239,7 @@ enum SelfTest {
         check("Mail mailboxes are view only", SystemDataEngine.reason(SysItem(id: "m", section: .mail, name: "", detail: "", size: 1,
                                                                              reveal: nil, action: .none)) != nil)
 
-        print("Automation (weekly safe clean)")
+        print("Automation (safe clean picks)")
         func target(_ id: String, _ c: CacheCategory, _ u: URL, rec: Bool = true) -> CleanTarget {
             CleanTarget(id: id, category: c, name: id, path: u.path, note: "", action: .removeItem(u),
                         recommended: rec, sizeBytes: 100, exists: true)
@@ -257,6 +257,30 @@ enum SelfTest {
         ProtectedPaths.set(savedProtected + [autoCache.path])
         check("skips protected caches", AutoClean.select([target("ok", .appCaches, autoCache)], running: []).isEmpty)
         ProtectedPaths.set(savedProtected)
+
+        print("Automation (schedule)")
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        func at(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {   // November 2026: the 16th is a Monday
+            utc.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute))!
+        }
+        let weekly = AutoSchedule(frequency: .weekly, weekday: 2, hour: 10, minute: 0)   // Mondays 10:00
+        let daily = AutoSchedule(frequency: .daily, weekday: 2, hour: 10, minute: 0)
+        check("weekly: latest slot is the previous Monday 10:00", weekly.lastSlot(atOrBefore: at(18, 9), calendar: utc) == at(16, 10))
+        check("weekly: a slot exactly now counts", weekly.lastSlot(atOrBefore: at(16, 10), calendar: utc) == at(16, 10))
+        check("weekly: next slot is the coming Monday", weekly.nextSlot(after: at(18, 9), calendar: utc) == at(23, 10))
+        check("daily: next slot later today", daily.nextSlot(after: at(18, 9), calendar: utc) == at(18, 10))
+        check("turning it on never runs straight away",
+              !weekly.isDue(now: at(18, 9), lastRun: nil, armedAt: at(18, 9), calendar: utc))
+        check("runs once the slot passes after turning on",
+              weekly.isDue(now: at(23, 10, 1), lastRun: nil, armedAt: at(18, 9), calendar: utc))
+        check("asleep at the slot: catches up on wake days later",
+              weekly.isDue(now: at(25, 8), lastRun: at(16, 10, 2), armedAt: at(1, 0), calendar: utc))
+        check("never twice for one slot",
+              !weekly.isDue(now: at(23, 18), lastRun: at(23, 10, 2), armedAt: at(1, 0), calendar: utc))
+        check("changing the schedule after the slot waits for the next one",
+              !daily.isDue(now: at(18, 11), lastRun: at(10, 10), armedAt: at(18, 10, 30), calendar: utc))
+        check("daily: due again the next day", daily.isDue(now: at(19, 10, 5), lastRun: at(18, 10, 1), armedAt: at(1, 0), calendar: utc))
 
         print("Settings migration (old app ID)")
         let oldName = "maccleaner.selftest.old", newName = "maccleaner.selftest.new"

@@ -84,8 +84,10 @@ enum SelfTest {
             ProtectedPaths.set(ProtectedPaths.all + ["/Library/LaunchDaemons/com.example.keep.plist"])
             return !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.keep.plist"))
         }())
-        let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true])) as? [String: Any]
-        check("MCP move_to_trash refuses protected even with confirm",
+        let keepPreview = (try? MCPServer.call("move_to_trash", ["paths": [keep.path]])) as? [String: Any]
+        let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true,
+                                                         "preview_token": keepPreview?["preview_token"] ?? ""])) as? [String: Any]
+        check("MCP move_to_trash refuses protected even with an approved confirm",
               (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
         check("Shredder refuses protected (same rule)", TrashGuard.reason(keep) != nil)
         check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
@@ -360,6 +362,45 @@ enum SelfTest {
               swap.status == 0 && fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/new").path)
               && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
               && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
+
+        // Only throwaway sandbox files are named here, and every confirm below is expected to be refused,
+        // so nothing is moved or deleted. The successful path is checked on the token store itself.
+        print("MCP approvals (confirm needs the preview's token)")
+        let fileA = sandbox.appendingPathComponent("approve-a.txt"), fileB = sandbox.appendingPathComponent("approve-b.txt")
+        fm.createFile(atPath: fileA.path, contents: Data("a".utf8))
+        fm.createFile(atPath: fileB.path, contents: Data("b".utf8))
+        func refused(_ tool: String, _ args: [String: Any]) -> Bool {
+            do { _ = try MCPServer.call(tool, args); return false } catch { return "\(error)".contains("Nothing was changed") }
+        }
+        let bothThere = { fm.fileExists(atPath: fileA.path) && fm.fileExists(atPath: fileB.path) }
+        check("confirm without a preview_token is refused, file untouched",
+              refused("move_to_trash", ["paths": [fileA.path], "confirm": true]) && bothThere())
+        check("confirm with a made-up preview_token is refused",
+              refused("move_to_trash", ["paths": [fileA.path], "confirm": true, "preview_token": "not-a-token"]) && bothThere())
+        let previewA = (try? MCPServer.call("move_to_trash", ["paths": [fileA.path]])) as? [String: Any]
+        let tokenA = previewA?["preview_token"] as? String ?? ""
+        check("a preview returns a token and changes nothing", previewA?["preview"] as? Bool == true && !tokenA.isEmpty && bothThere())
+        check("a token from a preview of A can't confirm B",
+              refused("move_to_trash", ["paths": [fileB.path], "confirm": true, "preview_token": tokenA]) && bothThere())
+        check("a token is spent by a refused attempt (preview again)",
+              refused("move_to_trash", ["paths": [fileA.path], "confirm": true, "preview_token": tokenA]) && bothThere())
+        let previewA2 = (try? MCPServer.call("move_to_trash", ["paths": [fileA.path]])) as? [String: Any]
+        check("a token from one tool can't confirm another tool",
+              refused("clean_caches", ["recommended": true, "confirm": true, "preview_token": previewA2?["preview_token"] ?? ""]) && bothThere())
+        check("empty_trash and uninstall_app refuse confirm without a token",
+              refused("empty_trash", ["confirm": true]) && refused("uninstall_app", ["app": "Mac Cleaner", "confirm": true]))
+        let sel: [String: Any] = ["ids": ["b", "a", "a"], "include_shared": false]
+        let once = MCPApprovals.issue(tool: "selftest_tool", args: sel, items: [fileA])
+        let first = try? MCPApprovals.redeem(once, tool: "selftest_tool", args: ["ids": ["a", "b"], "confirm": true, "preview_token": once])
+        check("a token returns exactly the previewed items (same selection, any order)", (first as? [URL]) == [fileA])
+        check("a token works only once",
+              (try? MCPApprovals.redeem(once, tool: "selftest_tool", args: ["ids": ["a", "b"]])) == nil)
+        let other = MCPApprovals.issue(tool: "selftest_tool", args: ["ids": ["a"]], items: [fileA])
+        check("a token can't confirm a different selection",
+              (try? MCPApprovals.redeem(other, tool: "selftest_tool", args: ["ids": ["b"]])) == nil)
+        let stale = MCPApprovals.issue(tool: "selftest_tool", args: [:], items: [fileA], ttl: -1)
+        check("an expired token is refused", (try? MCPApprovals.redeem(stale, tool: "selftest_tool", args: [:])) == nil)
+        check("approval checks moved nothing", bothThere())
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

@@ -126,10 +126,11 @@ enum CLI {
             guard args.count >= 2 else { err("Usage: mac-cleaner tool NAME ['{\"json\":\"args\"}']"); return 64 }
             let raw = args.count > 2 ? args[2] : "{}"
             guard let a = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { err("Arguments must be a JSON object."); return 64 }
-            if (a["confirm"] as? Bool) == true && !yes {
-                err("For safety, `tool` with confirm: true also needs --yes."); return 64
-            }
-            return call(args[1], a, json: json)
+            guard (a["confirm"] as? Bool) == true else { return call(args[1], a, json: json) }
+            guard yes else { err("For safety, `tool` with confirm: true also needs --yes."); return 64 }
+            // Same as the commands: preview in this process, then confirm with that preview's token.
+            var sel = a; sel.removeValue(forKey: "confirm"); sel.removeValue(forKey: "preview_token")
+            do { return try previewThenConfirm(args[1], sel, json: json, yes: true) } catch { err("\(error)"); return 1 }
         default: break
         }
 
@@ -151,23 +152,30 @@ enum CLI {
                 }
             }
             guard cmd.destructive else { return output(try MCPServer.call(cmd.tool, a), json: json) }
-
-            // Destructive: preview → explicit yes → confirm.
-            let preview = try MCPServer.call(cmd.tool, a)
-            _ = output(preview, json: json, hideNext: true)
-            guard (preview as? [String: Any])?["preview"] as? Bool == true else { return 0 }
-            if yes {
-                if !json { print("\n\(bold("Going ahead")) (--yes)…") }
-            } else {
-                guard isatty(0) != 0 else { err("\nNothing was changed. Re-run with --yes to go ahead."); return 2 }
-                print("\n\(bold("Go ahead?")) Type yes to continue: ", terminator: "")
-                guard readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "yes" else { print("Cancelled. Nothing was changed."); return 1 }
-            }
-            a["confirm"] = true
-            return output(try MCPServer.call(cmd.tool, a), json: json)
+            return try previewThenConfirm(cmd.tool, a, json: json, yes: yes)
         } catch {
             err("\(error)"); return 1
         }
+    }
+
+    /// Destructive: preview → explicit yes (or --yes) → confirm with that preview's one-time token,
+    /// so only the items shown are acted on.
+    private static func previewThenConfirm(_ tool: String, _ a: [String: Any], json: Bool, yes: Bool) throws -> Int32 {
+        let preview = try MCPServer.call(tool, a)
+        _ = output(preview, json: json, hideNext: true)
+        guard let p = preview as? [String: Any], p["preview"] as? Bool == true else { return 0 }
+        guard let token = p["preview_token"] as? String else { err("No preview token. Nothing was changed."); return 1 }
+        if yes {
+            if !json { print("\n\(bold("Going ahead")) (--yes)…") }
+        } else {
+            guard isatty(0) != 0 else { err("\nNothing was changed. Re-run with --yes to go ahead."); return 2 }
+            print("\n\(bold("Go ahead?")) Type yes to continue: ", terminator: "")
+            guard readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "yes" else { print("Cancelled. Nothing was changed."); return 1 }
+        }
+        var go = a
+        go["confirm"] = true
+        go["preview_token"] = token
+        return output(try MCPServer.call(tool, go), json: json)
     }
 
     private static func call(_ tool: String, _ a: [String: Any], json: Bool) -> Int32 {
@@ -211,7 +219,7 @@ enum CLI {
         let pad = String(repeating: "  ", count: indent)
         if let d = v as? [String: Any] {
             let scalars = d.filter { !($0.value is [Any]) && !($0.value is [String: Any]) && !($0.value is NSNull) }
-            for k in scalars.keys.sorted() where k != "next" && k != "preview" {
+            for k in scalars.keys.sorted() where !["next", "preview", "preview_token", "expires_in_seconds"].contains(k) {
                 print("\(pad)\(dim(k.replacingOccurrences(of: "_", with: " "))): \(text(scalars[k]!))")
             }
             for k in d.keys.sorted() {

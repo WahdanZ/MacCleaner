@@ -86,7 +86,7 @@ Design decisions and the UI audit are in [docs/DESIGN.md](docs/DESIGN.md). The f
 
 These are the project's core promise. Keep them true in the app, the CLI and the MCP server.
 
-1. **Review first.** Nothing is removed until the user has seen every item. In the app this is the Review sheet; in the CLI you type `yes` (or pass `--yes`); over MCP a tool returns a preview until it is called again with `confirm: true`.
+1. **Review first.** Nothing is removed until the user has seen every item. In the app this is the Review sheet; in the CLI you type `yes` (or pass `--yes`); over MCP a tool returns a preview and a one-time `preview_token`, and acts only when called again with the same arguments, `confirm: true` and that token. The token is bound to the exact items the preview resolved (ids, app bundle id and path, file paths), works once and expires after 10 minutes. The confirm runs those stored items and never looks anything up again, so a partial app name or a rescan can't change what gets removed.
 2. **Recoverable by default.** Only regenerable data (caches, build output, SDK downloads) is deleted permanently. The user's own files go to the Trash and are logged so Put Back can restore them.
 3. **Guards decide, every time.** The engines re-check the guards right before acting, even if the UI already did:
    - **`SafetyGuard`:** permanent deletion only inside known cache roots. Symlinks are resolved first, and root folders themselves are never removed.
@@ -110,7 +110,7 @@ A checklist that keeps a new feature consistent with the rest:
 2. **Guards:** before deleting or moving anything, call the right guard (`SafetyGuard.isAllowed`, `TrashGuard.reason`, `AdminGuard.isAllowed`) inside the engine, not only in the UI.
 3. **Review:** add a builder to `ReviewBuild` that lists every item with its path, size, action (`trash` / `delete` / `command` / `adminTrash`), risk and blocked reason, and open it with `review.present(…)`.
 4. **History:** call `HistoryStore.shared.add(…, outcome: .deleted | .trashed, measuredFreeChange:)`.
-5. **MCP and CLI:** add a read-only tool and a destructive tool with the preview → `confirm: true` pattern, then a CLI command that maps to them.
+5. **MCP and CLI:** add a read-only tool and a destructive tool with the preview → `confirm: true` pattern: the preview resolves the items and returns `preview(…)` (which issues the `preview_token`); the confirm branch takes the items from `approved(…)` and nothing else. Then add a CLI command that maps to them.
 6. **Self-test:** add checks for every refusal path (protected, outside allowed folders, symlinks).
 7. **UI:** use the tokens in `Theme.swift` (`Palette`, `Space`, `Radius`, `.panel()`), native controls, and the `Motion` roles so Reduce Motion is respected. Give custom controls an accessibility label and value.
 
@@ -143,6 +143,7 @@ Install the launcher with `"/Applications/Mac Cleaner.app/Contents/MacOS/Mac Cle
 | `mcp` | Run the MCP server |
 
 - **Flags:** `--json` prints machine-readable output; `--yes` skips the question.
+- **`tool NAME '{…, "confirm": true}' --yes`** runs the tool's preview first and then confirms with that preview's token, in one process, like the commands above. MCP tokens live in the server process, so a token can't be passed from one run to another.
 - **Exit codes:** `0` done, `1` error or cancelled, `2` nothing changed because no one could confirm (no keyboard and no `--yes`), `64` usage error.
 
 ---
@@ -162,11 +163,11 @@ Manual configuration for any MCP client:
 }
 ```
 
-| Read-only | Changes something (preview, then `confirm: true`) |
+| Read-only | Changes something (preview, then `confirm: true` + `preview_token`) |
 |---|---|
 | `disk_status`, `scan_caches`, `disk_usage`, `find_duplicates`, `list_apps`, `app_details`, `scan_projects`, `list_sdks`, `system_data`, `trash_status`, `list_protected` | `clean_caches`, `clear_app_cache`, `uninstall_app`, `clean_projects`, `remove_sdks`, `remove_system_data`, `empty_trash`, `restore_from_trash`, `move_to_trash`, `protect_paths` (adds only) |
 
-The server's `instructions` tell the assistant to show every item to the user and never to pass `confirm: true` on its own. *Settings › Integrations* writes this configuration for Claude Code, Claude Desktop, Cursor, Codex, VS Code, Windsurf and Gemini. It backs up each file first, and can also install a skill with the same rules.
+The server's `instructions` tell the assistant to show every item to the user and never to pass `confirm: true` on its own. The server also enforces it: a confirm without the `preview_token` of a preview of the same arguments is refused, and the token is single-use, expires after 10 minutes and runs only the items that preview showed. `empty_trash` is refused if the Trash grew since its preview. *Settings › Integrations* writes this configuration for Claude Code, Claude Desktop, Cursor, Codex, VS Code, Windsurf and Gemini. It backs up each file first, and can also install a skill with the same rules.
 
 ---
 

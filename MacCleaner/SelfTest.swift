@@ -361,6 +361,45 @@ enum SelfTest {
               && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
               && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
 
+        print("Letter case and symlinked folders (all guards)")
+        // The startup disk ignores letter case, so these name the real folders.
+        let homePath = home.path
+        let spelled = { (rel: String) in URL(fileURLWithPath: homePath + "/" + rel) }
+        check("refuses ~/documents and ~/DOCUMENTS", !TrashGuard.canTrash(spelled("documents"))
+              && !TrashGuard.canTrash(spelled("DOCUMENTS")))
+        check("refuses ~/library", !TrashGuard.canTrash(spelled("library")))
+        check("refuses ~/library/keychains/…", !TrashGuard.canTrash(spelled("library/keychains/login.keychain-db")))
+        check("refuses ~/.SSH/…", !TrashGuard.canTrash(spelled(".SSH/id_ed25519")))
+        check("refuses ~/LIBRARY/Mail/…", !TrashGuard.canTrash(spelled("LIBRARY/Mail/V10")))
+        // Small folders only: the preview measures each existing item.
+        let mcpCase = (try? MCPServer.call("move_to_trash", ["paths": ["~/library/keychains", "~/LIBRARY/Preferences"]])) as? [String: Any]
+        check("MCP move_to_trash preview refuses ~/library/keychains and ~/LIBRARY/Preferences",
+              (mcpCase?["items"] as? [[String: Any]])?.allSatisfy { $0["allowed"] as? Bool == false } == true)
+        // A folder in the sandbox that is really a symlink to ~/Library.
+        let libLink = sandbox.appendingPathComponent("lib")
+        try? fm.createSymbolicLink(at: libLink, withDestinationURL: h("Library"))
+        check("refuses Keychains through a symlinked parent", !TrashGuard.canTrash(libLink.appendingPathComponent("Keychains/x")))
+        check("refuses Mail through a symlinked parent", !TrashGuard.canTrash(libLink.appendingPathComponent("Mail/V10")))
+        check("refuses ~/Library/Caches through a symlinked parent", !TrashGuard.canTrash(libLink.appendingPathComponent("Caches")))
+        check("refuses '..' after a symlinked folder (that is your home)",
+              !TrashGuard.canTrash(URL(fileURLWithPath: libLink.path + "/..")))
+        check("the symlink itself may still be trashed (only the link moves)", TrashGuard.canTrash(libLink))
+        check("a file in your home is still allowed", TrashGuard.canTrash(sandbox.appendingPathComponent("loose.txt")))
+        let mcpLink = (try? MCPServer.call("move_to_trash", ["paths": [libLink.path + "/Keychains"]])) as? [String: Any]
+        check("MCP move_to_trash preview refuses a path through a symlinked parent",
+              (mcpLink?["items"] as? [[String: Any]])?.first?["allowed"] as? Bool == false)
+        ProtectedPaths.set(savedProtected + [keep.path])
+        check("protected folder is refused in other letter case",
+              !TrashGuard.canTrash(URL(fileURLWithPath: keep.deletingLastPathComponent().path + "/KEEP/inner/file.txt")))
+        let keepLink = sandbox.appendingPathComponent("keep-link")
+        try? fm.createSymbolicLink(at: keepLink, withDestinationURL: keep)
+        check("protected folder is refused through a symlinked parent", !TrashGuard.canTrash(keepLink.appendingPathComponent("inner/file.txt")))
+        ProtectedPaths.set(savedProtected)
+        check("password step refuses Apple items in other letter case",
+              !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/COM.APPLE.x.plist")))
+        check("password step refuses a folder in other letter case",
+              !AdminGuard.isAllowed(URL(fileURLWithPath: "/library/launchdaemons/com.example.helper.plist")))
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

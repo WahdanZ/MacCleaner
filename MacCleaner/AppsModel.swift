@@ -483,8 +483,11 @@ enum AdminGuard {
         let p = url.standardizedFileURL.path
         let parent = url.standardizedFileURL.deletingLastPathComponent().path
         guard roots.contains(parent), !roots.contains(p) else { return false }
+        // The parent must really be that folder on disk (same spelling, no symlink on the way).
+        guard PathPolicy.resolve(parent) == parent else { return false }
         if parent == "/Applications" { return url.pathExtension == "app" }
-        return !url.lastPathComponent.hasPrefix("com.apple.")
+        // The disk ignores letter case, so "COM.APPLE.x" is an Apple item too.
+        return !PathPolicy.fold(url.lastPathComponent).hasPrefix("com.apple.")
     }
 }
 

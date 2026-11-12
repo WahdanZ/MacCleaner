@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 116 checks (the safety rules, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 133 checks (the safety rules, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -65,7 +65,7 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `Overview.swift` | Dashboard: storage donut, scan, recommendations, quick tools |
 | `Insights.swift` | Insights card (reclaimed per week, free-space trend and forecast, junk by category) and `FreeSpaceLog`, one free-space reading per day in `free-space.json` |
 | `Review.swift`, `ReviewBuilders.swift` | The Review Cleanup sheet and the item list each feature passes to it |
-| `SafetyGuard.swift` | `SafetyGuard`, `TrashGuard`, `ProtectedPaths` |
+| `SafetyGuard.swift` | `SafetyGuard`, `TrashGuard`, `PathPolicy`, `ProtectedPaths` |
 | `Scanner.swift`, `CleanTarget.swift`, `CleanerModel.swift`, `ContentView.swift`, `Treemap.swift` | Junk Files: cache locations, measuring, cleaning, the space map |
 | `Projects*.swift`, `DevSDK*.swift`, `DevTools+.swift` | Developer Tools: project build files; Xcode, Android, language versions, Homebrew and Docker |
 | `LargeFiles.swift`, `Duplicates*.swift`, `DiskMap*.swift` | Large & Old Files, Duplicates, Storage Map |
@@ -90,9 +90,9 @@ These are the project's core promise. Keep them true in the app, the CLI and the
 2. **Recoverable by default.** Only regenerable data (caches, build output, SDK downloads) is deleted permanently. The user's own files go to the Trash and are logged so Put Back can restore them.
 3. **Guards decide, every time.** The engines re-check the guards right before acting, even if the UI already did:
    - **`SafetyGuard`:** permanent deletion only inside known cache roots. Symlinks are resolved first, and root folders themselves are never removed.
-   - **`TrashGuard`:** never the home folder, Library, Documents or similar structural folders, and never Keychains, Mail, the Messages database or `.ssh`.
-   - **`AdminGuard`:** the password step only touches direct children of a fixed list of system folders. Never `com.apple.*`.
-   - **`ProtectedPaths`:** folders and files the user protected. Every guard refuses them and anything inside them. AI tools may add protection but never remove it.
+   - **`TrashGuard`:** never the home folder, Library, Documents or similar structural folders, and never Keychains, Mail, the Messages database or `.ssh`. Each path is checked as written and as the disk resolves it (`PathPolicy.canonical`: symlinks and `..` in parent folders followed), and refusals ignore letter case, because the startup disk treats `~/documents` as `~/Documents`.
+   - **`AdminGuard`:** the password step only touches direct children of a fixed list of system folders, and only when that folder is not reached through a symlink. Never `com.apple.*`, in any letter case.
+   - **`ProtectedPaths`:** folders and files the user protected. Every guard refuses them and anything inside them, in any letter case and through symlinked folders. AI tools may add protection but never remove it.
 4. **Honest history.** Each cleanup is recorded as `deleted` or `trashed`, with the measured free-space change when there is one. Never report space as freed when it only went to the Trash.
 5. **Self-test.** Every guard has self-test checks. `build.sh` and CI refuse a build that fails one.
 
@@ -111,7 +111,7 @@ A checklist that keeps a new feature consistent with the rest:
 3. **Review:** add a builder to `ReviewBuild` that lists every item with its path, size, action (`trash` / `delete` / `command` / `adminTrash`), risk and blocked reason, and open it with `review.present(…)`.
 4. **History:** call `HistoryStore.shared.add(…, outcome: .deleted | .trashed, measuredFreeChange:)`.
 5. **MCP and CLI:** add a read-only tool and a destructive tool with the preview → `confirm: true` pattern, then a CLI command that maps to them.
-6. **Self-test:** add checks for every refusal path (protected, outside allowed folders, symlinks).
+6. **Self-test:** add checks for every refusal path (protected, outside allowed folders, symlinks, other letter case).
 7. **UI:** use the tokens in `Theme.swift` (`Palette`, `Space`, `Radius`, `.panel()`), native controls, and the `Motion` roles so Reduce Motion is respected. Give custom controls an accessibility label and value.
 
 ---

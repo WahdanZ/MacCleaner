@@ -116,6 +116,10 @@ private struct AppRow: View {
                                 .background(Palette.fg.opacity(0.1), in: Capsule())
                                 .foregroundStyle(Palette.faint)
                         }
+                        if apps.caskToken(app) != nil {
+                            Tag(text: "HOMEBREW", color: Color(nsColor: .systemOrange))
+                                .help("Installed with Homebrew (brew install --cask)")
+                        }
                     }
                     Text(lastUsedText(app.lastUsed)).font(.system(size: 10.5)).foregroundStyle(Palette.faint)
                 }
@@ -167,6 +171,26 @@ private struct AppDetail: View {
                             .font(.system(size: 11.5)).foregroundStyle(running ? Palette.warn : Palette.dim)
                     }
                     Spacer()
+                }
+
+                if let token = apps.caskToken(a) {
+                    HStack(spacing: Space.s) {
+                        Image(systemName: "mug").foregroundStyle(Color(nsColor: .systemOrange))
+                        Text("Installed with Homebrew (\(token)). Uninstalling with Homebrew keeps brew's list correct.")
+                            .font(.callout).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Uninstall with Homebrew…") {
+                            review.present(ReviewRequest(
+                                title: "Uninstall \(a.name) with Homebrew",
+                                explanation: "Runs brew uninstall --cask \(token). Homebrew deletes the app; it doesn't go to the Trash. Leftovers in your Library stay; use Uninstall afterwards to remove them too.",
+                                items: [ReviewItem(id: a.url.path, name: "\(a.name).app", location: a.url.path, size: a.appSize,
+                                                   action: .command, risk: .review, note: "brew uninstall --cask \(token)",
+                                                   blocked: ProtectedPaths.reason(a.url))],
+                                verb: "Uninstall", perform: { Task { await apps.uninstallWithBrew(a) } }))
+                        }
+                        .disabled(apps.phase == .working || a.isSelf)
+                    }
+                    .padding(Space.m)
+                    .background(Color(nsColor: .systemOrange).opacity(0.1), in: RoundedRectangle(cornerRadius: Radius.medium, style: .continuous))
                 }
 
                 HStack(spacing: 10) {

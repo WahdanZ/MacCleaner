@@ -90,6 +90,31 @@ enum Scanner {
         dir(.packages, "brew", "Homebrew downloads", "Library/Caches/Homebrew", "Old bottles and downloads.")
         dir(.packages, "pods", "CocoaPods cache", "Library/Caches/CocoaPods", "Re-downloaded by pod install.")
         dir(.packages, "pip", "pip cache", "Library/Caches/pip", "Re-downloaded by pip install.")
+        dir(.packages, "cargo.registry", "Cargo registry (Rust)", ".cargo/registry",
+            "Downloaded crates. Re-downloaded by the next cargo build.", contents: true)
+        dir(.packages, "cargo.git", "Cargo git checkouts (Rust)", ".cargo/git",
+            "Git dependencies. Re-cloned by the next cargo build.", contents: true)
+        dir(.packages, "go.modcache", "Go module cache", "go/pkg/mod",
+            "Downloaded Go modules. Re-downloaded by go build (same as go clean -modcache).", contents: true)
+        dir(.packages, "maven", "Maven repository (Java)", ".m2/repository",
+            "Downloaded dependencies and anything you installed locally with mvn install. Re-downloaded on the next build; offline builds need network once.",
+            contents: true, recommended: false)
+        dir(.packages, "ivy", "Ivy / sbt cache (Scala)", ".ivy2/cache", "Re-downloaded by the next sbt build.",
+            contents: true, recommended: false)
+        dir(.packages, "gem.specs", "RubyGems index cache", ".gem/specs", "Gem index. Re-downloaded by gem install.", contents: true)
+        dir(.packages, "bundler", "Bundler cache (Ruby)", ".bundle/cache", "Re-downloaded by bundle install.", contents: true)
+        dir(.packages, "nuget", "NuGet packages (.NET)", ".nuget/packages",
+            "Downloaded packages. Restored by dotnet restore.", contents: true, recommended: false)
+        dir(.packages, "nuget.http", "NuGet HTTP cache", ".local/share/NuGet", "Download cache. Rebuilt by dotnet restore.", contents: true)
+        dir(.packages, "hex", "Hex packages (Elixir)", ".hex/packages", "Re-downloaded by mix deps.get.", contents: true)
+        dir(.packages, "cabal", "Cabal packages (Haskell)", ".cabal/packages", "Re-downloaded by cabal build.", contents: true)
+        dir(.packages, "composer", "Composer cache (PHP)", ".composer/cache", "Re-downloaded by composer install.", contents: true)
+        dir(.packages, "cocoapods.repos", "CocoaPods spec repos", ".cocoapods/repos",
+            "Pod specs index. Re-cloned by pod install (takes a while).", contents: true, recommended: false)
+        for conda in ["miniconda3/pkgs", "anaconda3/pkgs", "miniforge3/pkgs", "opt/miniconda3/pkgs", "opt/anaconda3/pkgs", ".conda/pkgs"] {
+            dir(.packages, "conda.\(conda)", "Conda package cache", conda,
+                "Downloaded packages (same as conda clean). Environments keep working.", contents: true, recommended: false)
+        }
 
         // IDEs & editors
         for (folder, label) in SafetyGuard.editorApps {
@@ -330,6 +355,23 @@ enum Scanner {
 }
 
 enum Cleaner {
+    /// Adds owner write permission to a folder tree (used only on paths a guard already allowed).
+    static func makeOwnerWritable(_ url: URL) {
+        let fm = FileManager.default
+        func fix(_ u: URL) {
+            if let a = try? fm.attributesOfItem(atPath: u.path), let p = a[.posixPermissions] as? NSNumber {
+                try? fm.setAttributes([.posixPermissions: p.intValue | 0o700], ofItemAtPath: u.path)
+            }
+        }
+        fix(url)
+        if let e = fm.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: []) {
+            for case let u as URL in e {
+                let v = try? u.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                if v?.isDirectory == true && v?.isSymbolicLink != true { fix(u) }
+            }
+        }
+    }
+
     /// Deletes the given targets. Returns one message per failure.
     static func run(_ targets: [CleanTarget]) -> [String] {
         let fm = FileManager.default
@@ -341,7 +383,12 @@ enum Cleaner {
                 return
             }
             do { try fm.removeItem(at: url) }
-            catch { errors.append("\(label): \(error.localizedDescription)") }
+            catch {
+                // Some caches are read-only on purpose (Go modules). The path is already allowed, so make it
+                // writable for the owner and try once more.
+                makeOwnerWritable(url)
+                do { try fm.removeItem(at: url) } catch { errors.append("\(label): \(error.localizedDescription)") }
+            }
         }
 
         for t in targets {
@@ -374,10 +421,12 @@ enum Cleaner {
 
 enum Shell {
     /// Runs a tool and returns its exit status and combined output. With a timeout, the tool is stopped after that many seconds.
-    static func run(_ path: String, _ args: [String], timeout: TimeInterval? = nil) -> (status: Int32, output: String?) {
+    static func run(_ path: String, _ args: [String], timeout: TimeInterval? = nil,
+                    env: [String: String] = [:]) -> (status: Int32, output: String?) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
+        if !env.isEmpty { p.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new } }
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe

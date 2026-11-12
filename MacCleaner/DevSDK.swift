@@ -3,12 +3,15 @@ import Observation
 
 /// One removable SDK component: a simulator runtime, a DeviceSupport folder, an Android system image, a Docker group…
 struct SDKItem: Identifiable, Sendable, Hashable {
-    enum Group: String, CaseIterable, Sendable { case xcode = "Xcode", android = "Android", docker = "Docker" }
+    enum Group: String, CaseIterable, Sendable {
+        case xcode = "Xcode", android = "Android", languages = "Languages", homebrew = "Homebrew", docker = "Docker"
+    }
     enum Action: Sendable, Hashable {
         case simRuntime(String)     // xcrun simctl runtime delete <uuid>
         case delete([URL])          // permanent; regenerable (re-download / re-copy)
         case trash(URL)             // not regenerable (Xcode archives)
         case docker(String)         // images | containers | volumes | build
+        case brew([String])         // brew uninstall <name> | brew uninstall --cask <token> | brew cleanup
     }
 
     let id: String
@@ -30,6 +33,7 @@ struct SDKItem: Identifiable, Sendable, Hashable {
         switch action {
         case .delete(let us): return us.contains { ProtectedPaths.isBlocked($0) }
         case .trash(let u): return ProtectedPaths.isBlocked(u)
+        case .brew: return reveal.map { ProtectedPaths.isBlocked($0) } ?? false
         default: return false
         }
     }
@@ -47,12 +51,16 @@ struct AndroidUsage: Sendable {
     var flutterCompileSdk: String?
     var flutterNdk: String?
     var timedOut = false
+    /// Language versions projects ask for (.nvmrc, .python-version, .ruby-version, rust-toolchain, .tool-versions,
+    /// .sdkmanrc): tool ("node", "python", "ruby", "rust", "java") → version → project count.
+    var runtimes: [String: [String: Int]] = [:]
 }
 
 struct SDKScan: Sendable {
     var items: [SDKItem] = []
     var usage = AndroidUsage()
     var dockerStatus: String?           // nil = running; otherwise why there's nothing to show
+    var brewStatus: String?             // nil = Homebrew found; otherwise why there's nothing to show
 }
 
 /// Synchronous, shared by the window and the MCP server. Call off the main thread.
@@ -66,6 +74,10 @@ enum SDKEngine {
         out.usage = androidUsage(roots: roots)
         out.items += xcode()
         out.items += android(out.usage)
+        out.items += languages(out.usage)
+        let b = homebrew()
+        out.items += b.items
+        out.brewStatus = b.status
         let d = docker()
         out.items += d.items
         out.dockerStatus = d.status
@@ -240,10 +252,22 @@ enum SDKEngine {
             ]
             for root in roots where !ProtectedPaths.isInsideProtected(root) {
                 guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
-                                            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+                                            options: [.skipsPackageDescendants]) else { continue }
                 for case let u as URL in e {
                     let name = u.lastPathComponent
                     if e.level > 7 || skip.contains(name) { e.skipDescendants(); continue }
+                    if name.hasPrefix(".") && (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                        e.skipDescendants(); continue
+                    }
+                    if versionFiles.contains(name) {
+                        if let text = try? String(contentsOf: u, encoding: .utf8) {
+                            let found = runtimeVersions(file: name, text: text)
+                            box.mutate { use in
+                                for (tool, v) in found { use.runtimes[tool, default: [:]][v, default: 0] += 1 }
+                            }
+                        }
+                        continue
+                    }
                     guard name == "build.gradle" || name == "build.gradle.kts" else { continue }
                     guard let text = try? String(contentsOf: u, encoding: .utf8) else { continue }
                     box.mutate { use in
@@ -347,6 +371,11 @@ enum SDKEngine {
             return nil
         case .trash(let u): return TrashGuard.reason(u)
         case .docker(let k): return dockerPrune[k] == nil ? "Unknown Docker group" : (dockerPath == nil ? "Docker isn't installed" : nil)
+        case .brew(let args):
+            if brewPath == nil { return "Homebrew isn't installed" }
+            if !brewArgsValid(args) { return "Not an allowed Homebrew command" }
+            if let r = item.reveal, let why = ProtectedPaths.reason(r) { return why }
+            return nil
         }
     }
 
@@ -380,6 +409,15 @@ enum SDKEngine {
             case .docker(let k):
                 let r = Shell.run(dockerPath!, dockerPrune[k]!, timeout: 600)
                 if r.status != 0 { ok = false; errors.append("\(item.name): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "docker failed")") }
+            case .brew(let args):
+                // brew refuses to remove a formula other formulae still need (we never pass --ignore-dependencies).
+                let r = runBrew(args, timeout: 600)
+                if r.status != 0 {
+                    ok = false
+                    let msg = r.output?.split(separator: "\n").first { $0.contains("Error") }.map(String.init)
+                        ?? r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "brew failed"
+                    errors.append("\(item.name): \(msg)")
+                }
             }
             if ok {
                 bytes += item.size

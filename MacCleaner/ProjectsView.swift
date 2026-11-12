@@ -202,6 +202,13 @@ private struct ProjectRow: View {
         case "iOS", "Swift": return "swift"
         case "Rust": return "gearshape.2"
         case "Python": return "chevron.left.forwardslash.chevron.right"
+        case ".NET": return "number"
+        case "Go": return "hare"
+        case "Java/Maven", "Scala": return "cup.and.saucer"
+        case "Ruby": return "diamond"
+        case "PHP", "Elixir", "Elm", "Haskell", "Zig": return "curlybraces"
+        case "Terraform": return "cloud"
+        case "C/C++": return "cpu"
         default: return "hammer"
         }
     }
@@ -214,6 +221,13 @@ private struct ProjectRow: View {
         case "iOS", "Swift": return Color(hex: 0xF97316)
         case "Rust": return Color(hex: 0xB45309)
         case "Python": return Color(hex: 0x8B5CF6)
+        case ".NET": return Color(nsColor: .systemPurple)
+        case "Go": return Color(nsColor: .systemCyan)
+        case "Java/Maven", "Scala": return Color(nsColor: .systemRed)
+        case "Ruby": return Color(nsColor: .systemRed)
+        case "PHP", "Elixir", "Elm", "Haskell", "Zig": return Color(nsColor: .systemIndigo)
+        case "Terraform": return Color(nsColor: .systemPurple)
+        case "C/C++": return Color(nsColor: .systemGray)
         default: return Color(hex: 0x8A94A6)
         }
     }

@@ -130,7 +130,7 @@ enum ReviewBuild {
                       items: m.chosen.map { i in
                           let action: ReviewItem.Action = {
                               switch i.action {
-                              case .simRuntime, .docker: return .command
+                              case .simRuntime, .docker, .brew: return .command
                               case .delete: return .delete
                               case .trash: return .trash
                               }

@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 82 checks against the safety rules using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 96 checks against the safety rules using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -66,7 +66,7 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `Review.swift`, `ReviewBuilders.swift` | The Review Cleanup sheet and the item list each feature passes to it |
 | `SafetyGuard.swift` | `SafetyGuard`, `TrashGuard`, `ProtectedPaths` |
 | `Scanner.swift`, `CleanTarget.swift`, `CleanerModel.swift`, `ContentView.swift`, `Treemap.swift` | Junk Files: cache locations, measuring, cleaning, the space map |
-| `Projects*.swift`, `DevSDK*.swift` | Developer Tools: project build files; Xcode, Android and Docker |
+| `Projects*.swift`, `DevSDK*.swift`, `DevTools+.swift` | Developer Tools: project build files; Xcode, Android, language versions, Homebrew and Docker |
 | `LargeFiles.swift`, `Duplicates*.swift`, `DiskMap*.swift` | Large & Old Files, Duplicates, Storage Map |
 | `AppsModel.swift`, `AppsView.swift` | Applications: scan, leftovers, uninstall, `AdminGuard` / `AdminStep` |
 | `SystemData.swift`, `SystemItems.swift`, `Shredder.swift` | System Data, Startup & Extensions, Shredder |
@@ -95,6 +95,10 @@ These are the project's core promise. Keep them true in the app, the CLI and the
 5. **Self-test.** Every guard has self-test checks. `build.sh` and CI refuse a build that fails one.
 
 ---
+
+## Homebrew
+
+Homebrew items run `brew` itself, never a plain delete, so Homebrew's records stay correct. Only three command shapes are allowed (`SDKEngine.brewArgsValid`): `brew uninstall <name>`, `brew uninstall --cask <token>` and `brew cleanup`. Auto-update and install cleanup are turned off for these runs. Mac Cleaner never passes `--ignore-dependencies`, so brew still refuses to remove a formula another formula needs.
 
 ## Adding a cleanup feature
 
@@ -127,7 +131,7 @@ Install the launcher with `"/Applications/Mac Cleaner.app/Contents/MacOS/Mac Cle
 | `uninstall NAME [--shared]` | Uninstall an app with its leftovers (to Trash) |
 | `projects [PATH…] [--idle MONTHS]` | Build files in code projects |
 | `clean-projects (--all \| ID…) [--idle MONTHS]` | Delete project build files |
-| `sdks [--group Xcode\|Android\|Docker]` | Simulator runtimes, Android SDK parts, Docker data |
+| `sdks [--group Xcode\|Android\|Languages\|Homebrew\|Docker]` | Simulators, Android SDK parts, language versions, Homebrew formulae and apps, Docker data |
 | `remove-sdks ID…` | Remove SDK items |
 | `system-data` / `remove-system-data ID…` | Snapshots, backups, Mail and Messages attachments |
 | `trash` / `empty-trash` / `put-back (--all \| ID…)` | Trash status, empty, restore |

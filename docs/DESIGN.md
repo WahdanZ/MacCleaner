@@ -105,7 +105,7 @@ The engines still re-check every guard at execution time (`Cleaner.run`, `AppEng
 
 ## Limitations and next steps
 
-- **No UI automation yet.** The checks are the 82-check self-test, the CLI and MCP checks in CI, and manual review in light/dark at 900×652 and 1280×840. A next step is an XCUITest target covering navigation and the Review sheet.
+- **No UI automation yet.** The checks are the 96-check self-test, the CLI and MCP checks in CI, and manual review in light/dark at 900×652 and 1280×840. A next step is an XCUITest target covering navigation and the Review sheet.
 - **Not tested on macOS 14 or 15 hardware.** CI builds with Xcode 16 on macOS 15, which proves the macOS 26 APIs are correctly guarded, but the app has only been run on macOS 26.
 - **Not native `Table` yet.** Large & Old Files, Duplicates and Applications still use custom rows, though they now share the system colours, buttons and accessibility patterns. Moving them to `Table` (with column sorting and type-to-select) is the next screen-level step.
 - **Single-item confirmations stay as alerts.** Removing one extension or startup item, and Empty Trash, keep a standard alert; they never truncate.

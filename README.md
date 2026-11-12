@@ -45,15 +45,16 @@ A short welcome tour explains everything on first launch.
 ## What it can clean
 
 **Clean Up**
-- **Junk Files:** caches, logs and temporary files from more than 340 places. They're shown on a map sized by how much space they take.
+- **Junk Files:** caches, logs and temporary files from more than 350 places, shown on a map sized by how much space they take. That includes package caches for npm, Yarn, pnpm, Bun, pip, CocoaPods, Homebrew, Cargo (Rust), Go modules, Maven and sbt (Java/Scala), RubyGems and Bundler, NuGet (.NET), Conda, Hex (Elixir), Cabal (Haskell) and Composer (PHP).
 - **Developer Tools:**
-  - `node_modules`, `build`, `Pods` and other build folders in your code projects, with how long since you last touched each one.
-  - Old simulators, Android SDK parts and Docker data. Anything your projects still use is clearly marked.
+  - **Projects:** build folders in your code projects, with how long since you last touched each one: `node_modules`, `build`, `Pods`, `.gradle`, `target`, `.dart_tool`, Python caches and virtual environments, .NET `bin`/`obj`, Elixir `_build`/`deps`, `.terraform`, Haskell, Zig, Elm, Carthage and more.
+  - **SDKs:** old iOS simulators, Android SDK parts, Docker data, and old language versions installed with nvm, fnm, Volta, pyenv, rbenv, rustup, SDKMAN and asdf. Versions your projects still use (from `.nvmrc`, `.python-version` and similar files) are marked **In Use**.
+  - **Homebrew:** every formula and app you installed with `brew`, with its size and what still needs it, uninstalled through Homebrew so brew stays in sync, plus `brew cleanup` for old versions.
 - **Large & Old Files:** big files and files you haven't opened in months.
 - **Duplicates:** identical files, compared by their content. One copy always stays.
 
 **Manage**
-- **Applications:** clear an app's cache, or uninstall it completely, including the data, helpers and drivers it leaves behind.
+- **Applications:** clear an app's cache, or uninstall it completely, including the data, helpers and drivers it leaves behind. Apps installed with Homebrew are marked, and can be uninstalled with Homebrew.
 - **Storage Map:** explore every folder by size to see exactly where your space goes.
 - **System Data:** Time Machine snapshots, iPhone and iPad backups, and Mail and Messages attachments.
 

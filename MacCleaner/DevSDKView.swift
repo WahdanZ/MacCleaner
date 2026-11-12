@@ -62,6 +62,10 @@ struct DevSDKView: View {
                                 if m.filter != .docker, m.filter != .xcode, let note = usageNote {
                                     Text(note).font(.system(size: 11)).foregroundStyle(Palette.faint).padding(.horizontal, 12).padding(.top, 6)
                                 }
+                                if m.filter == nil || m.filter == .homebrew, let s = m.scan.brewStatus {
+                                    Label(s, systemImage: "mug").font(.system(size: 12)).foregroundStyle(Palette.dim)
+                                        .padding(.horizontal, 12).padding(.top, 10)
+                                }
                                 if m.filter == nil || m.filter == .docker, let s = m.scan.dockerStatus {
                                     Label(s, systemImage: "shippingbox").font(.system(size: 12)).foregroundStyle(Palette.dim)
                                         .padding(.horizontal, 12).padding(.top, 10)
@@ -152,6 +156,8 @@ private struct GroupChip: View {
         case .xcode: return "hammer"
         case .android: return "iphone.gen3"
         case .docker: return "shippingbox"
+        case .languages: return "chevron.left.forwardslash.chevron.right"
+        case .homebrew: return "mug"
         case nil: return "square.stack.3d.up"
         }
     }
@@ -230,7 +236,11 @@ private struct SDKRow: View {
         case "NDK": return "cpu"
         case "Build tools": return "wrench.and.screwdriver"
         case "Emulators": return "iphone.gen3"
-        default: return "shippingbox"
+        case "Homebrew formulae": return "terminal"
+        case "Homebrew apps (casks)": return "app.badge"
+        case "Homebrew cleanup": return "clock.arrow.circlepath"
+        case "Java JDKs": return "cup.and.saucer"
+        default: return item.group == .languages ? "chevron.left.forwardslash.chevron.right" : "shippingbox"
         }
     }
 
@@ -239,6 +249,8 @@ private struct SDKRow: View {
         case .xcode: return Color(hex: 0x3A8DFF)
         case .android: return Color(hex: 0x7DC42F)
         case .docker: return Color(hex: 0x1D9BF0)
+        case .languages: return Color(nsColor: .systemPurple)
+        case .homebrew: return Color(nsColor: .systemOrange)
         }
     }
 }

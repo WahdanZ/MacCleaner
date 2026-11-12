@@ -34,6 +34,15 @@ enum SafetyGuard {
             ".pub-cache/hosted", ".pub-cache/git",
             ".dartServer",
             ".npm/_cacache", "Library/pnpm/store", ".bun/install/cache",
+            // Other package managers (download caches; re-fetched on the next build)
+            ".cargo/registry", ".cargo/git", "go/pkg/mod", ".m2/repository", ".ivy2/cache", ".gem/specs",
+            ".bundle/cache", ".nuget/packages", ".local/share/NuGet", ".hex/packages", ".cabal/packages",
+            ".composer/cache", ".cocoapods/repos",
+            "miniconda3/pkgs", "anaconda3/pkgs", "miniforge3/pkgs", "opt/miniconda3/pkgs", "opt/anaconda3/pkgs", ".conda/pkgs",
+            // Language versions installed by version managers (one folder per version)
+            ".nvm/versions/node", "Library/Application Support/fnm/node-versions", ".volta/tools/image/node",
+            ".pyenv/versions", ".rbenv/versions", ".rustup/toolchains", ".sdkman/candidates", ".asdf/installs",
+            "Library/Java/JavaVirtualMachines",
             ".cache",
             ".Trash",
         ]
@@ -49,6 +58,9 @@ enum SafetyGuard {
         "Library/Caches", "Library/Logs", ".cache", ".Trash", ".android/avd",
         "Library/Android/sdk/system-images",
         "Library/Android/sdk/platforms", "Library/Android/sdk/ndk", "Library/Android/sdk/build-tools",
+        ".nvm/versions/node", "Library/Application Support/fnm/node-versions", ".volta/tools/image/node",
+        ".pyenv/versions", ".rbenv/versions", ".rustup/toolchains", ".sdkman/candidates", ".asdf/installs",
+        "Library/Java/JavaVirtualMachines",
     ].map { home.appendingPathComponent($0).path }
 
     /// Never swept (permanent delete). Personal files go through the Trash instead (see TrashGuard).

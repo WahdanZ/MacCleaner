@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// `Mac Cleaner --selftest`: checks every safety rule. Creates only throwaway files under
@@ -84,10 +85,12 @@ enum SelfTest {
             ProtectedPaths.set(ProtectedPaths.all + ["/Library/LaunchDaemons/com.example.keep.plist"])
             return !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.keep.plist"))
         }())
-        let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true])) as? [String: Any]
-        check("MCP move_to_trash refuses protected even with confirm",
+        let keepPreview = (try? MCPServer.call("move_to_trash", ["paths": [keep.path]])) as? [String: Any]
+        let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true,
+                                                         "preview_id": keepPreview?["preview_id"] as? String ?? ""])) as? [String: Any]
+        check("MCP move_to_trash refuses protected even with an approved confirm",
               (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
-        check("Shredder refuses protected (same rule)", TrashGuard.reason(keep) != nil)
+        check("Shredder refuses protected (same rule)", ShredEngine.reason(keep) != nil)
         check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
 
         print("Trash and Put Back")
@@ -325,13 +328,15 @@ enum SelfTest {
             {"tag_name":"v1.3.0","draft":false,"prerelease":\(prerelease),"body":"## What's new\\n- faster",
              "html_url":"https://github.com/WahdanZ/MacCleaner/releases/tag/v1.3.0",
              "assets":[{"name":"MacCleaner-1.3.0.dmg","size":5700000,"browser_download_url":"\(base)MacCleaner-1.3.0.dmg"},
-                       {"name":"MacCleaner-1.3.0.dmg.sha256","size":90,"browser_download_url":"\(base)MacCleaner-1.3.0.dmg.sha256"}]}
+                       {"name":"MacCleaner-1.3.0.dmg.sha256","size":90,"browser_download_url":"\(base)MacCleaner-1.3.0.dmg.sha256"},
+                       {"name":"MacCleaner-1.3.0.dmg.sig","size":90,"browser_download_url":"\(base)MacCleaner-1.3.0.dmg.sig"}]}
             """.utf8)
         }
         let rel = Updater.parseRelease(releaseJSON())
         check("reads the release: version, DMG, checksum and size",
               rel?.version == "1.3.0" && rel?.dmg.lastPathComponent == "MacCleaner-1.3.0.dmg"
-              && rel?.checksum?.lastPathComponent == "MacCleaner-1.3.0.dmg.sha256" && rel?.size == 5_700_000)
+              && rel?.checksum?.lastPathComponent == "MacCleaner-1.3.0.dmg.sha256" && rel?.size == 5_700_000
+              && rel?.signature?.lastPathComponent == "MacCleaner-1.3.0.dmg.sig")
         check("ignores downloads that aren't on github.com", Updater.parseRelease(releaseJSON(dmgHost: "example.com")) == nil)
         check("ignores drafts and pre-releases", Updater.parseRelease(releaseJSON(prerelease: true)) == nil)
         let hash = String(repeating: "ab", count: 32)
@@ -360,6 +365,107 @@ enum SelfTest {
               swap.status == 0 && fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/new").path)
               && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
               && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
+
+        print("Audit fixes: paths with other letter case or through links (Trash)")
+        check("Trash refuses ~/documents, ~/library and ~/DOCUMENTS",
+              !TrashGuard.canTrash(h("documents")) && !TrashGuard.canTrash(h("library")) && !TrashGuard.canTrash(h("DOCUMENTS")))
+        check("Trash refuses ~/library/keychains/x and ~/.SSH/x",
+              !TrashGuard.canTrash(h("library/keychains/x")) && !TrashGuard.canTrash(h(".SSH/id_x")))
+        let keysLink = sandbox.appendingPathComponent("keys-link")
+        try? fm.createSymbolicLink(at: keysLink, withDestinationURL: h("Library/Keychains"))
+        check("Trash refuses a file reached through a linked folder", !TrashGuard.canTrash(keysLink.appendingPathComponent("x")))
+        check("Trash still allows the link itself (only the link moves)", TrashGuard.canTrash(keysLink))
+        ProtectedPaths.set([sandbox.appendingPathComponent("keep").path])
+        check("protected folder matched in any letter case",
+              !TrashGuard.canTrash(sandbox.appendingPathComponent("KEEP/inner/file.txt")))
+        ProtectedPaths.set(savedProtected)
+
+        print("Audit fixes: weekly clean scope")
+        func cmdTarget(_ action: CleanAction) -> CleanTarget {
+            CleanTarget(id: "cmd", category: .xcode, name: "cmd", path: "", note: "", action: action,
+                        recommended: true, sizeBytes: 100, exists: true)
+        }
+        check("weekly clean never runs simulator commands",
+              AutoClean.select([cmdTarget(.deleteUnavailableSimulators), cmdTarget(.deleteSimRuntime("x"))]).isEmpty)
+        check("weekly clean refuses a target with no paths", AutoClean.select([cmdTarget(.removeItems([]))]).isEmpty)
+
+        print("Audit fixes: AI assistant approvals (MCP)")
+        let mA = sandbox.appendingPathComponent("mcp-a.txt"), mB = sandbox.appendingPathComponent("mcp-b.txt")
+        fm.createFile(atPath: mA.path, contents: Data("a".utf8))
+        fm.createFile(atPath: mB.path, contents: Data("b".utf8))
+        let bothThere = { fm.fileExists(atPath: mA.path) && fm.fileExists(atPath: mB.path) }
+        check("confirm without a preview_id is refused, nothing moved",
+              (try? MCPServer.call("move_to_trash", ["paths": [mA.path], "confirm": true])) == nil && bothThere())
+        let pv = (try? MCPServer.call("move_to_trash", ["paths": [mA.path]])) as? [String: Any]
+        let pid = pv?["preview_id"] as? String ?? ""
+        check("a preview returns a preview_id", !pid.isEmpty)
+        check("confirming a different list than the preview is refused",
+              (try? MCPServer.call("move_to_trash", ["paths": [mA.path, mB.path], "confirm": true, "preview_id": pid])) == nil && bothThere())
+        check("a preview_id works once",
+              (try? MCPServer.call("move_to_trash", ["paths": [mA.path], "confirm": true, "preview_id": pid])) == nil && bothThere())
+        let okID = MCPServer.issuePreview("clean_caches", "plan")
+        check("matching tool and plan is approved", (try? MCPServer.approve("clean_caches", "plan", ["preview_id": okID])) != nil)
+        let otherTool = MCPServer.issuePreview("clean_caches", "plan")
+        check("a preview_id from another tool is refused",
+              (try? MCPServer.approve("empty_trash", "plan", ["preview_id": otherTool])) == nil)
+        let old = MCPServer.issuePreview("clean_caches", "plan", now: Date().addingTimeInterval(-MCPServer.previewLifetime - 1))
+        check("an expired preview_id is refused", (try? MCPServer.approve("clean_caches", "plan", ["preview_id": old])) == nil)
+
+        print("Audit fixes: Shredder")
+        func shredDir(_ name: String, file: String = "f.txt", text: String = "secret") -> (URL, URL) {
+            let d = sandbox.appendingPathComponent(name), f = d.appendingPathComponent(file)
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            fm.createFile(atPath: f.path, contents: Data(text.utf8))
+            return (d, f)
+        }
+        let (dA, fA) = shredDir("shred-links", text: "keep")
+        let other = sandbox.appendingPathComponent("shred-other-link.txt")
+        try? fm.linkItem(at: fA, to: other)
+        let rA = ShredEngine.shred(dA)
+        check("refuses a folder holding a hard link; the other copy is untouched",
+              rA.refused != nil && fm.fileExists(atPath: dA.path)
+              && (try? String(contentsOf: other, encoding: .utf8)) == "keep")
+        let (dB, fB) = shredDir("shred-protected")
+        ProtectedPaths.set([fB.path])
+        check("re-checks protection right before shredding", ShredEngine.shred(dB).refused != nil && fm.fileExists(atPath: fB.path))
+        ProtectedPaths.set(savedProtected)
+        let (dC, fC) = shredDir("shred-locked")
+        try? fm.setAttributes([.immutable: true], ofItemAtPath: fC.path)
+        check("refuses a locked file instead of calling it shredded", ShredEngine.shred(dC).refused != nil && fm.fileExists(atPath: fC.path))
+        try? fm.setAttributes([.immutable: false], ofItemAtPath: fC.path)
+        let (dD, _) = shredDir("shred-normal")
+        let rD = ShredEngine.shred(dD)
+        check("overwrites and deletes a normal folder", rD.removed && rD.overwritten == 1 && rD.notOverwritten.isEmpty
+              && !fm.fileExists(atPath: dD.path))
+        check("refuses items outside the home folder",
+              ShredEngine.reason(URL(fileURLWithPath: "/private/tmp/x")) != nil
+              && ShredEngine.reason(URL(fileURLWithPath: "/Applications/Example.app")) != nil)
+
+        print("Audit fixes: update signatures")
+        let signer = Curve25519.Signing.PrivateKey()
+        let pub = signer.publicKey.rawRepresentation.base64EncodedString()
+        let blob = Data("disk image bytes".utf8)
+        let goodSig = Data(((try? signer.signature(for: blob)) ?? Data()).base64EncodedString().utf8)
+        let strangerSig = Data(((try? Curve25519.Signing.PrivateKey().signature(for: blob)) ?? Data()).base64EncodedString().utf8)
+        check("a signature by the release key is accepted", Updater.verifySignature(of: blob, signature: goodSig, publicKey: pub))
+        check("a changed download, another key or junk is refused",
+              !Updater.verifySignature(of: blob + Data([0]), signature: goodSig, publicKey: pub)
+              && !Updater.verifySignature(of: blob, signature: strangerSig, publicKey: pub)
+              && !Updater.verifySignature(of: blob, signature: Data("junk".utf8), publicKey: pub)
+              && !Updater.verifySignature(of: blob, signature: goodSig, publicKey: ""))
+        let fakeDMG = sandbox.appendingPathComponent("fake.dmg")
+        fm.createFile(atPath: fakeDMG.path, contents: blob)
+        let sums = Data(((try? Updater.sha256(of: fakeDMG)) ?? "").utf8)
+        check("install refuses a download with the right checksum but no valid signature",
+              (try? Updater.prepare(dmg: fakeDMG, checksumFile: sums, signatureFile: strangerSig, version: "9.9",
+                                    work: sandbox, publicKey: pub)) == nil)
+        if let r = rel {
+            let unsigned = Updater.Release(version: r.version, notes: "", page: r.page, dmg: r.dmg, checksum: r.checksum,
+                                           signature: nil, size: r.size)
+            check("an unsigned release isn't offered; a signed one is",
+                  !Updater.offerable(unsigned, current: "1.0", publicKey: pub) && Updater.offerable(r, current: "1.0", publicKey: pub)
+                  && !Updater.offerable(r, current: "1.0", publicKey: ""))
+        } else { check("an unsigned release isn't offered; a signed one is", false) }
 
         print("Apps › Clear Cache (review = execution)")
         // Three throwaway caches: one outside the allow-list (blocked), one allowed, and one allowed when the

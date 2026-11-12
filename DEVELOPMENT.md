@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 125 checks (the safety rules, the Insights forecast and history math, the updater's version, release, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 127 checks (the safety rules, the Insights forecast and history math, the updater's version, release, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -86,12 +86,13 @@ Every scan engine is synchronous and runs off the main thread: the `@MainActor` 
 
 - **`WalkPool`** (in `DirSize.swift`) is a fixed set of threads shared by every folder walk. Each folder is one job, so a single huge folder (a build cache with 250k files, say) is read by all the threads instead of one. Jobs must not start another walk and wait for it.
 - **Folder sizes** go through `Scanner.allocatedSize`, which uses `DirSize`: one `getattrlistbulk` call returns a batch of entries with their allocated size. It reports the same bytes as the old `FileManager` enumerator (`Scanner.allocatedSizeSlow`, kept for the self-test): hidden files and package contents count, AppleDouble `._` files do not (FileManager never lists them), symlinks are never followed. Build child URLs with `URL(fileURLWithPath: parentPath + "/" + name)`: `appendingPathComponent` on a URL derived from the home folder URL can return a decomposed (NFD) path for non-ASCII names, which would no longer match the guards' paths byte for byte.
-- **Storage Map** and **Large & Old Files** list folders with `DirSize.entries` on the same pool. Large & Old Files keeps the enumerator's rules: no hidden files, no package contents, not ~/Library.
-- **Junk Files** and **Applications** measure up to `DirSize.width` locations or apps at once. One Applications scan shares an `AppScanner.Batch`, so `pkgutil --pkgs` runs once and each Library folder is listed once.
+- **Storage Map**, **Large & Old Files** and **Projects** walk folders on the same pool. Storage Map and Large & Old Files read entries with `DirSize.forEachEntry` and make a name, URL or date only for folders and the files they keep, not for every file they count. Large & Old Files keeps the enumerator's rules: no hidden files, no package contents, not ~/Library. Results are sorted with a path tie-break, so the order doesn't depend on which thread finished first.
+- **Junk Files** and **Applications** measure up to `DirSize.width` locations or apps at once. One Applications scan shares an `AppScanner.Batch`, so `pkgutil --pkgs` runs once, each Library folder is listed once and each launch agent plist is read once.
 - **Duplicates** lists each root on its own thread and hashes same-size groups in parallel (size → first/last 64 KB → full SHA-256). **Projects** finds each project's last edit in parallel, only for projects with build output. **Developer SDKs** runs its Xcode, Android, Homebrew and Docker sections side by side.
+- **`SizeCache`** keeps folder sizes for a minute, so scans run one after another (Overview, then Applications or Junk Files) don't walk the same folders twice. Every engine function that deletes, moves to the Trash or restores clears it before and after (`SizeCache.clear(); defer { SizeCache.clear() }`); add that line to any new one. Changes made outside the app show up once an entry is a minute old.
 - **Progress** reaches the main actor at most about 8 times a second.
 
-To measure, build Release and run `"build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --cli bench --runs 3` (or name scans: `junk storage duplicates large projects sdks apps system overview`). `--dump DIR` writes each scan's ids and sizes so two builds can be diffed; `bench sizer` compares `DirSize` with the old walk on your home and Library folders. It only reads.
+To measure, build Release and run `"build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --cli bench --runs 3` (or name scans: `junk storage duplicates large projects sdks apps system overview`). `--dump DIR` writes each scan's ids and sizes so two builds can be diffed; `bench sizer` compares `DirSize` with the old walk on your home and Library folders. Bench turns `SizeCache` off unless you pass `--cache`. It only reads.
 
 Design decisions and the UI audit are in [docs/DESIGN.md](docs/DESIGN.md). The feature history is in [ROADMAP.md](ROADMAP.md).
 

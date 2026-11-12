@@ -60,6 +60,31 @@ enum AppScanner {
             return l
         }
 
+        private var jobs: [String: (label: String?, program: String?)] = [:]
+        private var pkgFiles: [String: [URL]] = [:]
+
+        /// Label and program of a launch agent or daemon plist, read once per scan.
+        func launchJob(_ u: URL) -> (label: String?, program: String?) {
+            lock.lock()
+            if let j = jobs[u.path] { lock.unlock(); return j }
+            lock.unlock()
+            let plist = NSDictionary(contentsOf: u)
+            let j = (plist?["Label"] as? String,
+                     (plist?["Program"] as? String) ?? ((plist?["ProgramArguments"] as? [String])?.first))
+            lock.lock(); jobs[u.path] = j; lock.unlock()
+            return j
+        }
+
+        /// `AppScanner.installedItems(pkg:)`, once per package per scan.
+        func installedItems(_ pkg: String) -> [URL] {
+            lock.lock()
+            if let l = pkgFiles[pkg] { lock.unlock(); return l }
+            lock.unlock()
+            let l = AppScanner.installedItems(pkg: pkg)
+            lock.lock(); pkgFiles[pkg] = l; lock.unlock()
+            return l
+        }
+
         func receipts() -> String? {
             lock.lock()
             if let p = pkgs { lock.unlock(); return p }
@@ -190,10 +215,9 @@ enum AppScanner {
         func launchJobs(in dir: URL, admin: Bool, system: Bool, label: String) {
             for f in list(dir) where f.hasSuffix(".plist") {
                 let u = dir.appendingPathComponent(f)
-                let plist = NSDictionary(contentsOf: u)
-                let jobLabel = plist?["Label"] as? String ?? String(f.dropLast(6))
-                let program = (plist?["Program"] as? String)
-                    ?? ((plist?["ProgramArguments"] as? [String])?.first) ?? ""
+                let job = batch.launchJob(u)
+                let jobLabel = job.label ?? String(f.dropLast(6))
+                let program = job.program ?? ""
                 let base = String(f.dropLast(6))
                 let exact = matchesID(base) || matchesID(jobLabel) || program.hasPrefix(appURL.path + "/")
                 let byVendor = !exact && (matchesVendor(base) || matchesVendor(jobLabel))
@@ -241,7 +265,7 @@ enum AppScanner {
                 l.receipt = p
                 out.append(l)
                 // What the package installed outside the app (drivers, plug-ins, helpers…)
-                for item in installedItems(pkg: p) where item.path != appURL.path {
+                for item in batch.installedItems(p) where item.path != appURL.path {
                     addURL(item, "Installed by \(p)", include: exact || vendorUnique,
                            note: exact ? nil : vendorNote, admin: true)
                 }
@@ -611,6 +635,7 @@ enum AppEngine {
     /// and logs where it came from so it can be put back.
     @discardableResult
     static func trash(_ url: URL, size: Int64? = nil, source: String = "Mac Cleaner", restorable: Bool = true) -> String? {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         if let why = ProtectedPaths.reason(url) { return why }
         let bytes = size ?? Scanner.allocatedSize(url)
         var out: NSURL?
@@ -624,6 +649,7 @@ enum AppEngine {
 
     /// App + picked leftovers → Trash; items outside home through one macOS password prompt.
     static func uninstall(_ a: AppInfo, picked: [AppLeftover]) -> UninstallResult {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var r = UninstallResult()
         let uid = getuid()
         for l in picked where !l.needsAdmin {
@@ -670,6 +696,7 @@ enum AppEngine {
     /// Moves items outside your home folder to the Trash via one macOS password prompt
     /// (stopping any launch jobs first). Returns removed paths and errors.
     static func removeSystemItems(_ items: [AppLeftover]) -> (removed: [URL], errors: [String], cancelled: Bool) {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         guard !items.isEmpty else { return ([], [], false) }
         switch AdminStep.run(items, uid: getuid()) {
         case .ok(let staging):
@@ -692,6 +719,7 @@ enum AppEngine {
 
     /// Permanently deletes an app's disposable caches (cache allow-list only).
     static func clearCaches(_ items: [AppLeftover]) -> [String] {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var errs: [String] = []
         let fm = FileManager.default
         for c in items {

@@ -39,6 +39,7 @@ enum AutoClean {
 
     /// Full scan + clean, off the main thread. Returns bytes freed and the errors.
     static func run() -> (bytes: Int64, count: Int, errors: [String]) {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         let plan = Scanner.plan()
         let box = Box([CleanTarget?](repeating: nil, count: plan.count))
         DispatchQueue.concurrentPerform(iterations: plan.count) { i in

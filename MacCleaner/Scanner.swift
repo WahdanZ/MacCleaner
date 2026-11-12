@@ -331,7 +331,10 @@ enum Scanner {
         guard let v = try? url.resourceValues(forKeys: keys) else { return 0 }
         if v.isSymbolicLink == true { return 0 }
         if v.isDirectory != true { return Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0) }
-        return DirSize.allocated(atPath: url.path)
+        if let cached = SizeCache.get(url.path) { return cached }
+        let bytes = DirSize.allocated(atPath: url.path)
+        SizeCache.put(url.path, bytes)
+        return bytes
     }
 
     /// The previous folder walk (FileManager enumerator). Kept so the self-test can check DirSize against it.
@@ -382,6 +385,7 @@ enum Cleaner {
 
     /// Deletes the given targets. Returns one message per failure.
     static func run(_ targets: [CleanTarget]) -> [String] {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         let fm = FileManager.default
         var errors: [String] = []
 

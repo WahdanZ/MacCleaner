@@ -389,6 +389,7 @@ enum SDKEngine {
 
     /// `bytes` = everything removed; `trashed` = the part that went to the Trash (archives).
     static func remove(_ items: [SDKItem], progress: (String) -> Void = { _ in }) -> (bytes: Int64, trashed: Int64, errors: [String]) {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, trashed: Int64 = 0
         var errors: [String] = []
         for item in items {

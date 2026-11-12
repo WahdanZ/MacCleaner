@@ -35,19 +35,21 @@ enum LargeFileScanner {
 
         func visit(_ dir: String, _ group: WalkPool.Group) {
             if cancel.isSet { return }
-            guard let kids = DirSize.entries(atPath: dir) else { return }
             var out: [BigFile] = []
             var seen = 0
-            for k in kids where !k.isHidden {
-                let path = dir + "/" + k.name
+            // Only folders and files over the size floor get a name string, URL or dates.
+            DirSize.forEachEntry(atPath: dir) { k in
+                if k.isHidden { return }
                 seen += 1
                 if k.isDirectory {
+                    let path = dir + "/" + k.nameString
                     if path != library && !isPackage(path) { group.add { visit(path, group) } }
-                    continue
+                    return
                 }
-                guard k.isRegularFile, k.size >= floor else { continue }
+                guard k.isRegularFile, k.size >= floor else { return }
+                let path = dir + "/" + k.nameString
                 let f = BigFile(id: path, url: URL(fileURLWithPath: path), size: k.size,
-                                modified: k.modified, lastOpened: k.accessed)
+                                modified: k.modifiedDate, lastOpened: k.accessedDate)
                 let isLarge = k.size >= minLarge
                 let isOld = k.size >= minOld && (f.lastTouched ?? .distantPast) < oldBefore
                 if isLarge || isOld { out.append(f) }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// `"Mac Cleaner" --cli bench [scan…] [--runs N] [--dump DIR]`: times every scan through the same models the
+/// `"Mac Cleaner" --cli bench [scan…] [--runs N] [--dump DIR] [--cache]`: times every scan through the same models the
 /// window uses, on a live main run loop, and reports the longest main-thread stall during each one (the time the
 /// window could not redraw). Reads only; deletes nothing. `--dump` writes one "id<TAB>bytes" file per scan so two
 /// builds can be compared line by line.
@@ -25,6 +25,8 @@ enum Bench {
         if let i = args.firstIndex(of: "--dump"), i + 1 < args.count {
             dump = URL(fileURLWithPath: (args[i + 1] as NSString).expandingTildeInPath); args.removeSubrange(i...i + 1)
         }
+        // Real walks unless --cache: then later scans may reuse sizes from earlier ones, as in the app.
+        if let i = args.firstIndex(of: "--cache") { args.remove(at: i) } else { SizeCache.enabled = false }
         let names = args.isEmpty ? all : args
         if names == ["sizer"] { return sizer() }
         if let bad = names.first(where: { !all.contains($0) }) {
@@ -53,6 +55,7 @@ enum Bench {
     /// `bench sizer`: the fast folder sizer against the old FileManager walk on every folder in the home folder
     /// and in ~/Library. Prints only counts and totals, never paths.
     private static func sizer() -> Int32 {
+        SizeCache.enabled = false
         let home = SafetyGuard.home
         let fm = FileManager.default
         let kids = { (u: URL) in (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil)) ?? [] }

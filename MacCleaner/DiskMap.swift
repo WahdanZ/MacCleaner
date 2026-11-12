@@ -119,43 +119,45 @@ enum DiskScanner {
     private static func list(_ node: DiskNode, _ counter: Counter) -> [DiskNode] {
         if counter.cancelled { return [] }
         let url = node.url
-        guard let kids = DirSize.entries(atPath: url.path) else {
-            node.unreadable = true
-            return []
-        }
         var dirs: [DiskNode] = []
         var localFiles = 0
         var localBytes: Int64 = 0
         let base = url.path.hasSuffix("/") ? url.path : url.path + "/"
 
-        for k in kids {
-            if k.isSymlink { continue }
-            // Built from the path string: URL.appendingPathComponent on a URL derived from the home folder URL
-            // can return a decomposed (NFD) path for non-ASCII names, which would not match the guards' paths.
-            let child = URL(fileURLWithPath: base + k.name, isDirectory: k.isDirectory)
-            if skipPaths.contains(child.path) { continue }
+        // Names, URLs and nodes are made only for folders and big files; small files are just counted.
+        // URLs are built from the path string: URL.appendingPathComponent on a URL derived from the home folder
+        // URL can return a decomposed (NFD) path for non-ASCII names, which would not match the guards' paths.
+        let readable = DirSize.forEachEntry(atPath: url.path) { k in
+            if k.isSymlink { return }
             if k.isDirectory {
-                let d = DiskNode(url: child, name: k.name, isDirectory: true)
+                let name = k.nameString, path = base + name
+                if skipPaths.contains(path) { return }
+                let d = DiskNode(url: URL(fileURLWithPath: path, isDirectory: true), name: name, isDirectory: true)
                 d.parent = node
                 dirs.append(d)
-            } else {
-                let sz = k.size
-                node.size += sz
-                node.fileCount += 1
-                localFiles += 1
-                localBytes += sz
-                if sz >= minFile {
-                    let f = DiskNode(url: child, name: k.name, isDirectory: false)
-                    f.size = sz
-                    f.fileCount = 1
-                    f.modified = k.modified
-                    f.parent = node
-                    node.children.append(f)
-                } else {
-                    node.smallBytes += sz
-                    node.smallCount += 1
-                }
+                return
             }
+            let sz = k.size
+            node.size += sz
+            node.fileCount += 1
+            localFiles += 1
+            localBytes += sz
+            if sz >= minFile {
+                let name = k.nameString
+                let f = DiskNode(url: URL(fileURLWithPath: base + name, isDirectory: false), name: name, isDirectory: false)
+                f.size = sz
+                f.fileCount = 1
+                f.modified = k.modifiedDate
+                f.parent = node
+                node.children.append(f)
+            } else {
+                node.smallBytes += sz
+                node.smallCount += 1
+            }
+        }
+        guard readable else {
+            node.unreadable = true
+            return []
         }
         counter.add(files: localFiles, bytes: localBytes, current: url.path)
         return dirs

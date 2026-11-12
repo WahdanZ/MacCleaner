@@ -355,6 +355,18 @@ enum SelfTest {
         check("Storage Map total matches its children",
               map.size == map.children.reduce(0) { $0 + $1.size } && map.size <= slow)
 
+        // Size cache: a repeat within a minute is served from memory; any deletion by the app clears it.
+        let cx = fx.appendingPathComponent("a/b")
+        let before = Scanner.allocatedSize(cx)
+        fm.createFile(atPath: cx.appendingPathComponent("added.bin").path, contents: Data(count: 400_000))
+        check("size cache: a repeat measurement within a minute is reused", Scanner.allocatedSize(cx) == before)
+        let gone = cacheItem.appendingPathComponent("size-cache-check")
+        try? fm.createDirectory(at: gone, withIntermediateDirectories: true)
+        let goneTarget = CleanTarget(id: "sc", category: .devCache, name: "size cache", path: gone.path, note: "",
+                                     action: .removeItem(gone), sizeBytes: 1, exists: true)
+        check("size cache: cleared when the app deletes something",
+              Cleaner.run([goneTarget]).isEmpty && Scanner.allocatedSize(cx) >= before + 400_000)
+
         let dx = sandbox.appendingPathComponent("dups")
         try? fm.createDirectory(at: dx.appendingPathComponent("sub"), withIntermediateDirectories: true)
         let same = Data((0..<400_000).map { UInt8($0 % 251) })

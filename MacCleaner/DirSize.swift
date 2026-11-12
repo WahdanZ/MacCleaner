@@ -55,45 +55,37 @@ enum DirSize {
         return (total, dirs)
     }
 
-    /// One directory entry, for the Storage Map and Large & Old Files.
-    struct Entry {
-        let name: String
-        let type: fsobj_type_t
-        let size: Int64
-        let modified: Date?
-        let accessed: Date?
-        let flags: UInt32
-        var isDirectory: Bool { type == fsobj_type_t(VDIR.rawValue) }
-        var isSymlink: Bool { type == fsobj_type_t(VLNK.rawValue) }
-        var isRegularFile: Bool { type == fsobj_type_t(VREG.rawValue) }
-        /// What FileManager's `.skipsHiddenFiles` skips: a leading dot or the hidden flag.
-        var isHidden: Bool { name.hasPrefix(".") || flags & UInt32(UF_HIDDEN) != 0 }
-    }
-
-    /// The entries of a folder with type, allocated size, dates and flags, or nil if it cannot be read.
-    static func entries(atPath path: String) -> [Entry]? {
-        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { return nil }
-        defer { close(fd) }
-        var out: [Entry] = []
-        let ok = forEach(fd, details: true) { r in
-            out.append(Entry(name: String(cString: r.name), type: r.type, size: r.size,
-                             modified: r.modified.map(date), accessed: r.accessed.map(date), flags: r.flags))
-        }
-        return ok ? out : nil
-    }
-
-    private static func date(_ t: timespec) -> Date {
+    fileprivate static func date(_ t: timespec) -> Date {
         Date(timeIntervalSince1970: TimeInterval(t.tv_sec) + TimeInterval(t.tv_nsec) / 1e9)
     }
 
-    private struct Raw {
+    /// One entry as read, valid only inside the callback. Turn the name or dates into objects only when needed:
+    /// a big walk sees millions of entries and most of them are only counted.
+    struct Raw {
         var name: UnsafePointer<CChar>
         var type: fsobj_type_t
         var size: Int64 = 0
         var modified: timespec?
         var accessed: timespec?
         var flags: UInt32 = 0
+
+        var isDirectory: Bool { type == fsobj_type_t(VDIR.rawValue) }
+        var isSymlink: Bool { type == fsobj_type_t(VLNK.rawValue) }
+        var isRegularFile: Bool { type == fsobj_type_t(VREG.rawValue) }
+        /// What FileManager's `.skipsHiddenFiles` skips: a leading dot or the hidden flag.
+        var isHidden: Bool { name[0] == 0x2E || flags & UInt32(UF_HIDDEN) != 0 }
+        var nameString: String { String(cString: name) }
+        var modifiedDate: Date? { modified.map(DirSize.date) }
+        var accessedDate: Date? { accessed.map(DirSize.date) }
+    }
+
+    /// Calls `body` for each entry of a folder (with dates and flags). Returns false if it cannot be read.
+    @discardableResult
+    static func forEachEntry(atPath path: String, _ body: (Raw) -> Void) -> Bool {
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        return forEach(fd, details: true, body)
     }
 
     /// Calls `body` for every readable entry of an open directory: name, type, allocated size (0 for folders)
@@ -169,6 +161,30 @@ enum DirSize {
         }
         return true
     }
+}
+
+/// Folder sizes measured in the last minute, so scans that run one after another (Overview, Junk Files,
+/// Applications, Developer Tools) don't walk the same folders again. Every function that deletes, moves to the
+/// Trash or restores files clears it before and after, so the app never shows a size from before its own change.
+/// Changes made outside the app show up once an entry is a minute old.
+enum SizeCache {
+    static let lifetime: TimeInterval = 60
+    nonisolated(unsafe) static var enabled = true      // `bench` turns it off to time real walks
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var sizes: [String: (bytes: Int64, at: Date)] = [:]
+
+    static func get(_ path: String) -> Int64? {
+        lock.lock(); defer { lock.unlock() }
+        guard enabled, let e = sizes[path] else { return nil }
+        if Date().timeIntervalSince(e.at) > lifetime { sizes[path] = nil; return nil }
+        return e.bytes
+    }
+
+    static func put(_ path: String, _ bytes: Int64) {
+        lock.lock(); if enabled { sizes[path] = (bytes, Date()) }; lock.unlock()
+    }
+
+    static func clear() { lock.lock(); sizes.removeAll(); lock.unlock() }
 }
 
 /// A fixed set of threads that run folder-listing jobs for every walk in the app (folder sizes, Storage Map).

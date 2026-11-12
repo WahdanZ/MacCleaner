@@ -23,6 +23,7 @@ enum ShredEngine {
 
     /// Overwrites every file (folders: recursively), then deletes permanently.
     static func shred(_ url: URL) -> String? {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         if let v = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
            v.isDirectory == true, v.isSymbolicLink != true {
             let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey],

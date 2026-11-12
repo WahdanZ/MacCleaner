@@ -156,6 +156,7 @@ enum SystemDataEngine {
     /// Snapshots need one password prompt (tmutil runs as admin); everything else goes to the Trash.
     /// `bytes` = total; `freed` = the free-space change after deleting snapshots (they have no size up front).
     static func remove(_ items: [SysItem]) -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
+        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, freed: Int64 = 0, errors: [String] = [], cancelled = false
         let snaps = items.compactMap { i -> String? in if case .snapshot(let d) = i.action, reason(i) == nil { return d }; return nil }
         if !snaps.isEmpty {

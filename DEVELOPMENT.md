@@ -187,7 +187,7 @@ The server's `instructions` tell the assistant to show every item to the user an
 The product page lives in [`website/`](website/) (one `index.html`, one `style.css`, icons and the share image) and is published to GitHub Pages at <https://wahdanz.github.io/MacCleaner/> by [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
 
 - **Build:** [`scripts/build-site.sh`](scripts/build-site.sh) copies `website/` and `docs/screenshots/` into `_site/` and fills `{{VERSION}}` and `{{DMG_SIZE}}` from the newest release tag, so the download button always points at the latest DMG without any JavaScript.
-- **When it publishes:** on pushes to `main` that touch `website/`, `docs/screenshots/` or the workflow, and whenever a release is published.
+- **When it publishes:** on pushes to `main` that touch `website/`, `docs/screenshots/` or the workflow, and after every release (the Release workflow starts it, because GitHub doesn't let a release made by a workflow trigger other workflows).
 - **Rules:** no scripts, trackers, web fonts or third-party requests (a Content-Security-Policy meta tag enforces it). Screenshots come from the app with personal names blurred.
 - **Preview locally:** `scripts/build-site.sh /tmp/site && python3 -m http.server -d /tmp/site 8765`.
 - **One-time setup:** *Settings › Pages › Build and deployment › Source: GitHub Actions*.

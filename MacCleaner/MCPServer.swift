@@ -303,8 +303,16 @@ enum MCPServer {
             guard !app.caches.isEmpty else { return ["message": "\(app.name) has no caches to clear."] }
             let digest = plan([app.bundleID, app.url.path] + app.caches.map(\.url.path))
             if !confirm {
-                return withPreview(name, digest, ["preview": true, "app": app.name, "would_delete_permanently": app.caches.map(leftoverDict),
-                        "total": size(app.cacheSize),
+                let cachePlan = app.caches.map { ($0, AppEngine.cacheDecision($0.url)) }
+                let ok = cachePlan.filter { $0.1.blocked == nil }
+                return withPreview(name, digest, ["preview": true, "app": app.name,
+                        "would_delete_permanently": ok.map { c, d in
+                            var item = leftoverDict(c)
+                            if d.contentsOnly { item["note"] = AppEngine.contentsOnlyNote }
+                            return item
+                        },
+                        "skipped": cachePlan.compactMap { c, d in d.blocked.map { ["path": Scanner.tilde(c.url), "reason": $0] } },
+                        "total": size(ok.reduce(0) { $0 + $1.0.size }),
                         "next": "Show this to the user. Only after an explicit yes, call clear_app_cache again with confirm: true and the preview_id."])
             }
             try approve(name, digest, a)

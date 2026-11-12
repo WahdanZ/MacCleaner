@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 116 checks (the safety rules, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 163 checks (the safety rules, the audit fixes, the Insights forecast and history math, and the updater's version, release, signature, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -92,6 +92,7 @@ These are the project's core promise. Keep them true in the app, the CLI and the
    - **`SafetyGuard`:** permanent deletion only inside known cache roots. Symlinks are resolved first, and root folders themselves are never removed.
    - **`TrashGuard`:** never the home folder, Library, Documents or similar structural folders, and never Keychains, Mail, the Messages database or `.ssh`.
    - **`AdminGuard`:** the password step only touches direct children of a fixed list of system folders. Never `com.apple.*`.
+   - **`AdminStep`:** the root script stages items in a new `mktemp -d` folder under `/private/var/tmp` (random name, mode 700), never in a folder anyone else can create or reach first. It hands back only that folder (`chown` without `-R`); the items inside keep their system owner. Never add a recursive `chown`, `chmod` or `mkdir -p` on a predictable path to a root script.
    - **`ProtectedPaths`:** folders and files the user protected. Every guard refuses them and anything inside them. AI tools may add protection but never remove it.
 4. **Honest history.** Each cleanup is recorded as `deleted` or `trashed`, with the measured free-space change when there is one. Never report space as freed when it only went to the Trash.
 5. **Self-test.** Every guard has self-test checks. `build.sh` and CI refuse a build that fails one.

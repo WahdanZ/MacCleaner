@@ -467,6 +467,163 @@ enum SelfTest {
                   && !Updater.offerable(r, current: "1.0", publicKey: ""))
         } else { check("an unsigned release isn't offered; a signed one is", false) }
 
+        print("Apps › Clear Cache (review = execution)")
+        // Three throwaway caches: one outside the allow-list (blocked), one allowed, and one allowed when the
+        // review is built but protected before Clear runs. Only the allowed one may be deleted.
+        let ccBlocked = sandbox.appendingPathComponent("appcache-blocked")
+        let ccAllowed = h(".cache/maccleaner-selftest-appcache")
+        let ccLater = h(".cache/maccleaner-selftest-appcache-later")
+        defer { try? fm.removeItem(at: ccAllowed); try? fm.removeItem(at: ccLater) }
+        for u in [ccBlocked, ccAllowed, ccLater] {
+            try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            fm.createFile(atPath: u.appendingPathComponent("blob").path, contents: Data("x".utf8))
+        }
+        func cacheEntry(_ u: URL) -> AppLeftover { AppLeftover(id: u.path, url: u, label: "Caches", size: 1, include: true, note: nil) }
+        func testApp(_ caches: [URL]) -> AppInfo {
+            AppInfo(id: sandbox.appendingPathComponent("SelfTest.app").path, url: sandbox.appendingPathComponent("SelfTest.app"),
+                    name: "SelfTest", bundleID: "com.example.maccleaner-selftest", version: "1", isApple: false,
+                    appSize: 0, lastUsed: nil, leftovers: [], caches: caches.map(cacheEntry))
+        }
+        let ccApp = testApp([ccBlocked, ccAllowed, ccLater])
+        let ccReview = MainActor.assumeIsolated { ReviewBuild.appCache(ccApp) {} }
+        let ccBlockedIDs = Set(ccReview.items.filter { $0.blocked != nil }.map(\.id))
+        check("review blocks a cache outside the allow-list, allows the others", ccBlockedIDs == [ccBlocked.path])
+        // A sandbox cache folder (path only, never created): the review shows what the engine does.
+        let container = h("Library/Containers/com.example.maccleaner-selftest/Data/Library/Caches")
+        let containerRow = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+        check("review shows a sandboxed app cache as allowed, contents only, as the engine runs it",
+              containerRow?.blocked == nil && containerRow?.note == AppEngine.contentsOnlyNote
+              && AppEngine.cacheDecision(container) == AppEngine.CacheDecision(contentsOnly: true, blocked: nil))
+        check("a protected sandboxed app cache is blocked in the review and by the engine",
+              { () -> Bool in
+                  ProtectedPaths.set(savedProtected + [container.path])
+                  defer { ProtectedPaths.set(savedProtected) }
+                  let row = MainActor.assumeIsolated { ReviewBuild.appCache(testApp([container])) {} }.items.first
+                  return row?.blocked != nil && AppEngine.cacheDecision(container).blocked != nil
+              }())
+        ProtectedPaths.set(savedProtected + [ccLater.path])   // protected after the review was shown
+        let ccErrors = AppEngine.clearCaches(ccApp.caches)
+        ProtectedPaths.set(savedProtected)
+        check("Clear leaves the item the review marked blocked untouched",
+              fm.fileExists(atPath: ccBlocked.appendingPathComponent("blob").path))
+        check("Clear deletes the item the review allowed", !fm.fileExists(atPath: ccAllowed.path))
+        check("Clear re-checks right before deleting: protected after the review → skipped",
+              fm.fileExists(atPath: ccLater.appendingPathComponent("blob").path))
+        check("skipped items are reported, one line each",
+              ccErrors.count == 2 && ccErrors.contains { $0.hasPrefix(ccBlocked.lastPathComponent + ":") && $0.hasSuffix("skipped") }
+              && ccErrors.contains { $0.hasPrefix(ccLater.lastPathComponent + ":") && $0.hasSuffix("skipped") })
+
+        print("Password step staging (admin uninstall)")
+        // The root script stages items in a fresh random folder only root can open, never in a folder another process
+        // can create first, and gives you only that folder: a recursive chown as root would hand you any root-owned
+        // file hard-linked into it. Everything below runs as you on throwaway files; no password, no system files.
+        let uid = getuid()
+        func adminItem(_ u: URL, label: String? = nil, receipt: String? = nil) -> AppLeftover {
+            var l = AppLeftover(id: u.path, url: u, label: "x", size: 0, include: true, note: nil, needsAdmin: true)
+            l.launchLabel = label
+            l.receipt = receipt
+            return l
+        }
+        let rootScript = AdminStep.script([
+            adminItem(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.helper.plist"), label: "com.example.helper"),
+            adminItem(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.bad.plist"), label: "x; rm -rf /"),
+            adminItem(URL(fileURLWithPath: "/private/var/db/receipts/x.bom"), receipt: "com.example.pkg$(id)"),
+            adminItem(URL(fileURLWithPath: "/usr/local/bin/x")),
+        ], uid: uid)
+        check("staging folder is made by mktemp -d in /private/var/tmp",
+              rootScript.contains("/usr/bin/mktemp -d '/private/var/tmp/MacCleaner-uninstall.XXXXXXXXXX'"))
+        check("no staging folder in your home, no recursive chown",
+              !rootScript.contains(home.path) && !rootScript.contains("chown -R") && !rootScript.contains("mkdir"))
+        check("only the staging folder changes owner", rootScript.contains("'/usr/sbin/chown' \(uid) \"$D\" || exit 1"))
+        check("each item's folder is checked again (real folder, owned by root) right before the move",
+              rootScript.contains("[ ! -L '/Library/LaunchDaemons' ] && [ \"$(/usr/bin/stat -f %u '/Library/LaunchDaemons')\" = 0 ]"))
+        check("unsafe launch labels and receipt ids are left out",
+              rootScript.contains("/bin/launchctl bootout gui/\(uid)/com.example.helper ") && !rootScript.contains("rm -rf")
+              && !rootScript.contains("$(id)"))
+        check("paths outside the allowed folders are left out", !rootScript.contains("/usr/local/bin/x"))
+        let fakeStaging = "/private/var/tmp/MacCleaner-uninstall.Ab3dE6gH9k"
+        check("reads the staging path the script printed", AdminStep.parseStaging("noise\r\(fakeStaging)\n")?.path == fakeStaging)
+        check("refuses any other printed path", [
+            home.path + "/.MacCleaner-uninstalled-1700000000", "/private/var/tmp/MacCleaner-uninstall.short",
+            fakeStaging + "/..", fakeStaging + "x", "/tmp/MacCleaner-uninstall.Ab3dE6gH9k", "",
+        ].allSatisfy { AdminStep.parseStaging($0) == nil })
+
+        // The attack, with throwaway files: "victim.txt" stands in for a root-owned file. A process running as you
+        // pre-creates the old predictable staging folders for the coming minute, each holding a hard link to it, and
+        // hard-links it into a folder that is about to be moved.
+        let adm = sandbox.appendingPathComponent("admin")
+        let sysDir = adm.appendingPathComponent("System")             // stands in for e.g. /Library/LaunchDaemons
+        try? fm.createDirectory(at: sysDir.appendingPathComponent("Helper Folder"), withIntermediateDirectories: true)
+        let victim = adm.appendingPathComponent("victim.txt")
+        fm.createFile(atPath: victim.path, contents: Data("root secret".utf8))
+        try? fm.linkItem(at: victim, to: sysDir.appendingPathComponent("Helper Folder/victim-link"))
+        let quotedItem = sysDir.appendingPathComponent("it's here.plist")
+        fm.createFile(atPath: quotedItem.path, contents: Data("x".utf8))
+        let linkTarget = sandbox.appendingPathComponent("loose.txt")
+        let linkItem = sysDir.appendingPathComponent("link.plist")
+        try? fm.createSymbolicLink(at: linkItem, withDestinationURL: linkTarget)
+        var decoys: [URL] = []
+        let now = Int(Date().timeIntervalSince1970)
+        for t in (now - 5)...(now + 60) {
+            let d = home.appendingPathComponent(".MacCleaner-uninstalled-\(t)")
+            guard !fm.fileExists(atPath: d.path), (try? fm.createDirectory(at: d, withIntermediateDirectories: false)) != nil else { continue }
+            decoys.append(d)
+            try? fm.linkItem(at: victim, to: d.appendingPathComponent("x"))
+        }
+        defer { decoys.forEach { try? fm.removeItem(at: $0) } }
+        // A stand-in for chown that only records what it was asked to change.
+        let chownLog = adm.appendingPathComponent("chown.log")
+        let fakeChown = adm.appendingPathComponent("fake-chown")
+        try? "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \(AdminStep.q(chownLog.path))\n".write(to: fakeChown, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeChown.path)
+
+        func runAsYou(_ urls: [URL], parentOwner: uid_t) -> (status: Int32, staging: URL?) {
+            let s = AdminStep.script(urls.map { adminItem($0) }, uid: uid, allowed: { _ in true },
+                                     parentOwner: parentOwner, chown: fakeChown.path)
+            let r = Shell.run("/usr/bin/osascript", ["-e", AdminStep.appleScript(s, admin: false)])
+            return (r.status, AdminStep.parseStaging(r.output))
+        }
+        let moved = [sysDir.appendingPathComponent("Helper Folder"), quotedItem, linkItem]
+        let run = runAsYou(moved, parentOwner: uid)
+        defer { if let s = run.staging { try? fm.removeItem(at: s) } }
+        let stagedNames = run.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) }?.sorted() ?? []
+        check("script (via osascript) moves every item into a new staging folder",
+              run.status == 0 && stagedNames == ["0-Helper Folder", "1-it's here.plist", "2-link.plist"]
+              && moved.allSatisfy { !fm.fileExists(atPath: $0.path) && (try? fm.destinationOfSymbolicLink(atPath: $0.path)) == nil })
+        check("pre-created old staging folders are not used and stay as they were",
+              !decoys.isEmpty && run.staging.map { s in !decoys.contains { $0.path == s.path } } == true
+              && decoys.allSatisfy { (try? fm.contentsOfDirectory(atPath: $0.path)) == ["x"] })
+        let chownCalls = ((try? String(contentsOf: chownLog, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        check("hard links never change owner: chown runs once, on the staging folder only",
+              run.staging.map { chownCalls == ["\(uid) \($0.path)"] } == true)
+        check("the hard-linked file keeps its content", (try? String(contentsOf: victim, encoding: .utf8)) == "root secret")
+        check("a link is moved as a link, its target stays",
+              fm.fileExists(atPath: linkTarget.path)
+              && run.staging.map { (try? fm.destinationOfSymbolicLink(atPath: $0.appendingPathComponent("2-link.plist").path)) != nil } == true)
+        check("staging folder is a 700 folder you own", run.staging.map { AdminStep.isTrustedStaging($0, uid: uid) } == true)
+        let stagingLink = adm.appendingPathComponent("staging-link")
+        if let s = run.staging { try? fm.createSymbolicLink(at: stagingLink, withDestinationURL: s) }
+        check("a link to the staging folder or an open folder is not trusted as staging",
+              run.staging != nil && !AdminStep.isTrustedStaging(stagingLink, uid: uid) && !AdminStep.isTrustedStaging(adm, uid: uid))
+
+        // Checked again right before the move: an item whose folder became a link, or whose folder isn't owned by
+        // root, stays where it is.
+        let realDir = adm.appendingPathComponent("Real")
+        try? fm.createDirectory(at: realDir, withIntermediateDirectories: true)
+        fm.createFile(atPath: realDir.appendingPathComponent("a.plist").path, contents: Data("x".utf8))
+        let swapped = adm.appendingPathComponent("Swapped")
+        try? fm.createSymbolicLink(at: swapped, withDestinationURL: realDir)
+        let swappedRun = runAsYou([swapped.appendingPathComponent("a.plist")], parentOwner: uid)
+        defer { if let s = swappedRun.staging { try? fm.removeItem(at: s) } }
+        check("an item whose folder is now a link is not moved",
+              swappedRun.status == 0 && fm.fileExists(atPath: realDir.appendingPathComponent("a.plist").path)
+              && swappedRun.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) } == [])
+        let notRootRun = runAsYou([realDir.appendingPathComponent("a.plist")], parentOwner: 0)
+        defer { if let s = notRootRun.staging { try? fm.removeItem(at: s) } }
+        check("an item in a folder not owned by root is not moved",
+              notRootRun.status == 0 && fm.fileExists(atPath: realDir.appendingPathComponent("a.plist").path)
+              && notRootRun.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) } == [])
+
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

@@ -110,7 +110,7 @@ struct MenuBarPopover: View {
             .background(Palette.tile, in: RoundedRectangle(cornerRadius: Radius.medium))
         } else if confirming {
             VStack(alignment: .leading, spacing: Space.s) {
-                Text("Delete the recommended caches?").font(.callout.weight(.semibold))
+                Text("Run a safe clean?").font(.callout.weight(.semibold))
                 Text(SafeCleanText.confirm)
                     .font(.caption).foregroundStyle(Palette.dim)
                     .fixedSize(horizontal: false, vertical: true)

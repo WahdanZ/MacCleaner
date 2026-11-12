@@ -387,16 +387,17 @@ struct AutomationSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Toggle("Low disk alerts", isOn: $alerts)
+                Toggle("Low disk alerts", isOn: $alerts).fixedSize()
                 Spacer()
-                Text("Warn below").foregroundStyle(alerts ? Palette.fg : Palette.faint)
-                Stepper(value: $threshold, in: 5...200, step: 5) {
-                    Text("\(threshold) GB").monospacedDigit().font(.system(size: 13, weight: .semibold))
-                        .contentTransition(.numericText(value: Double(threshold)))
-                        .animation(.snappy, value: threshold)
-                }
-                .fixedSize()
-                .disabled(!alerts)
+                Text("Warn below").foregroundStyle(alerts ? Palette.fg : Palette.faint).fixedSize()
+                Text("\(threshold) GB").monospacedDigit().font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(alerts ? Palette.fg : Palette.faint)
+                    .contentTransition(.numericText(value: Double(threshold)))
+                    .animation(.snappy, value: threshold)
+                    .fixedSize()
+                Stepper("Warn below", value: $threshold, in: 5...200, step: 5)
+                    .labelsHidden()
+                    .disabled(!alerts)
             }
             .onChange(of: alerts) { _, on in if on { Notifier.requestPermission() }; auto.check() }
             .onChange(of: threshold) { auto.check() }
@@ -420,8 +421,9 @@ struct AutomationSettings: View {
                     }
                     .labelsHidden().fixedSize()
                 }
-                DatePicker("at", selection: time, displayedComponents: .hourAndMinute)
-                    .fixedSize()
+                Text("at")
+                DatePicker("Time", selection: time, displayedComponents: .hourAndMinute)
+                    .labelsHidden().fixedSize()
                 Spacer()
             }
             .disabled(!scheduled)

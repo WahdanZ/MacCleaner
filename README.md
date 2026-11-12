@@ -23,7 +23,7 @@ Mac Cleaner finds caches, leftovers, old downloads, duplicate files and develope
 | ![Duplicates found by content](docs/screenshots/duplicates.png)<br>**Duplicates:** identical files compared by content; one copy always stays | ![Storage Map of the home folder](docs/screenshots/storage-map.png)<br>**Storage Map:** every folder by size, to see where your space goes |
 | ![Applications with cache and uninstall leftovers](docs/screenshots/applications.png)<br>**Applications:** clear an app's cache, or uninstall it with everything it left behind | ![System Data: snapshots, backups, Mail and Messages](docs/screenshots/system-data.png)<br>**System Data:** Time Machine snapshots, device backups, Mail and Messages attachments |
 | ![Startup & Extensions](docs/screenshots/startup.png)<br>**Startup & Extensions:** what starts with your Mac | ![Settings: connect AI assistants](docs/screenshots/settings-integrations.png)<br>**Integrations:** connect Claude, Cursor, Codex, VS Code, Windsurf or Gemini |
-| ![Shredder](docs/screenshots/shredder.png)<br>**Shredder:** delete files permanently, without the Trash | ![Welcome tour page about the Terminal command and AI assistants](docs/screenshots/tour-terminal-ai-dark.png)<br>**Welcome tour:** the Terminal command and AI assistants |
+| ![Shredder](docs/screenshots/shredder.png)<br>**Shredder:** overwrite files, then delete them without the Trash | ![Welcome tour page about the Terminal command and AI assistants](docs/screenshots/tour-terminal-ai-dark.png)<br>**Welcome tour:** the Terminal command and AI assistants |
 
 <sub>Screenshots are from a real Mac. File, folder and project names are blurred for privacy. The Overview is shown as a full page: two captures of the same window, scrolled to the top and to the bottom, joined where they overlap.</sub>
 
@@ -77,7 +77,7 @@ A short welcome tour explains everything on first launch.
 
 **Utilities**
 - **Startup & Extensions:** what starts with your Mac, plus plug-ins and drivers from other developers.
-- **Shredder:** delete files permanently, without the Trash.
+- **Shredder:** overwrite files with zeros, then delete them without the Trash. Hard links and symlinks are refused, and a file that can't be overwritten is reported and kept. On SSDs and APFS, macOS can keep old copies of blocks, so this is best effort; FileVault encryption is the real protection.
 
 ---
 

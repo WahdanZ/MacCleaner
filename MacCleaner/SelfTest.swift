@@ -87,7 +87,7 @@ enum SelfTest {
         let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true])) as? [String: Any]
         check("MCP move_to_trash refuses protected even with confirm",
               (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
-        check("Shredder refuses protected (same rule)", TrashGuard.reason(keep) != nil)
+        check("Shredder refuses protected (same rule)", ShredEngine.reason(keep) != nil)
         check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
 
         print("Trash and Put Back")
@@ -360,6 +360,71 @@ enum SelfTest {
               swap.status == 0 && fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/new").path)
               && !fm.fileExists(atPath: oldApp.appendingPathComponent("Contents/old").path)
               && left == ["Test.app"] && !fm.fileExists(atPath: work.path))
+
+        print("Shredder (only throwaway files in ~/.maccleaner-selftest)")
+        let shredRoot = sandbox.appendingPathComponent("shred")
+        let text = { (u: URL) in try? String(contentsOf: u, encoding: .utf8) }
+        let make = { (u: URL, body: String) in
+            try? fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            fm.createFile(atPath: u.path, contents: Data(body.utf8))
+        }
+        // Hard link: a file in the folder being shredded shares its data with a name outside it.
+        let linkedDir = shredRoot.appendingPathComponent("folder")
+        let a = linkedDir.appendingPathComponent("a.txt"), b = shredRoot.appendingPathComponent("elsewhere/b.txt")
+        make(a, "alpha")
+        try? fm.createDirectory(at: b.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.linkItem(at: a, to: b)
+        check("hard-linked file is refused", ShredEngine.reason(a) != nil && ShredEngine.shred(a, expected: nil) != nil)
+        check("folder holding a hard link is refused before any write",
+              ShredEngine.shred(linkedDir, expected: ShredEngine.identity(linkedDir)) != nil)
+        check("both hard-link names keep their contents", text(a) == "alpha" && text(b) == "alpha")
+        // Symlink: never followed, the target stays as it was.
+        let target = shredRoot.appendingPathComponent("target.txt"), link = shredRoot.appendingPathComponent("link")
+        make(target, "target")
+        try? fm.createSymbolicLink(at: link, withDestinationURL: target)
+        check("symlink is refused and its target is untouched", ShredEngine.reason(link) != nil
+              && ShredEngine.shred(link, expected: nil) != nil && text(target) == "target"
+              && (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil)
+        // Protected after it was added: the guard runs again at shred time.
+        let prot = shredRoot.appendingPathComponent("protected.txt")
+        make(prot, "keep me")
+        let protID = ShredEngine.identity(prot)
+        let allowedWhenAdded = ShredEngine.reason(prot) == nil
+        ProtectedPaths.set(savedProtected + [prot.path])
+        check("file protected after it was added is refused at shred time",
+              allowedWhenAdded && ShredEngine.shred(prot, expected: protID) != nil && text(prot) == "keep me")
+        ProtectedPaths.set(savedProtected)
+        // Swapped for another file with the same name: refused.
+        let swapped = shredRoot.appendingPathComponent("swapped.txt")
+        make(swapped, "old")
+        let oldID = ShredEngine.identity(swapped)
+        try? fm.removeItem(at: swapped)
+        make(swapped, "new")
+        check("file replaced since it was added is refused", ShredEngine.shred(swapped, expected: oldID) != nil
+              && text(swapped) == "new")
+        // A file that can't be written is reported, not deleted and not counted.
+        let locked = shredRoot.appendingPathComponent("locked.txt")
+        make(locked, "locked")
+        chflags(locked.path, UInt32(UF_IMMUTABLE))
+        check("locked file (uchg) fails and is kept", ShredEngine.shred(locked, expected: nil) != nil && text(locked) == "locked")
+        chflags(locked.path, 0)
+        check("outside home and case variants of account folders are refused",
+              ShredEngine.reason(URL(fileURLWithPath: "/Applications/Example.app")) != nil
+              && ShredEngine.reason(h("documents")) != nil && ShredEngine.reason(h("library/keychains/x")) != nil)
+        // The real thing, on throwaway files: data is zeroed (read through a handle kept open), then deleted.
+        let plain = shredRoot.appendingPathComponent("plain/inner/data.bin")
+        make(plain, String(repeating: "secret", count: 400_000))
+        make(shredRoot.appendingPathComponent("plain/empty.txt"), "")
+        try? fm.createSymbolicLink(at: shredRoot.appendingPathComponent("plain/link"), withDestinationURL: target)
+        let reader = FileHandle(forReadingAtPath: plain.path)
+        let plainDir = shredRoot.appendingPathComponent("plain")
+        let shredErr = ShredEngine.shred(plainDir, expected: ShredEngine.identity(plainDir))
+        try? reader?.seek(toOffset: 0)
+        let after = (try? reader?.readToEnd()) ?? nil
+        try? reader?.close()
+        check("folder is overwritten with zeros and deleted", shredErr == nil && !fm.fileExists(atPath: plainDir.path)
+              && after?.count == 2_400_000 && after?.allSatisfy { $0 == 0 } == true)
+        check("symlink inside a shredded folder leaves its target alone", text(target) == "target")
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

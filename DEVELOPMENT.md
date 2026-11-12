@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 116 checks (the safety rules, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 126 checks (the safety rules, the Shredder's hard-link, symlink and changed-file refusals, the Insights forecast and history math, and the updater's version, release, checksum and swap logic) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -93,6 +93,7 @@ These are the project's core promise. Keep them true in the app, the CLI and the
    - **`TrashGuard`:** never the home folder, Library, Documents or similar structural folders, and never Keychains, Mail, the Messages database or `.ssh`.
    - **`AdminGuard`:** the password step only touches direct children of a fixed list of system folders. Never `com.apple.*`.
    - **`ProtectedPaths`:** folders and files the user protected. Every guard refuses them and anything inside them. AI tools may add protection but never remove it.
+   - **`ShredEngine.reason`:** the Shredder uses the `TrashGuard` rules on both the path as given and its on-disk spelling, and only inside the home folder. It refuses symlinks and files with more than one hard link (overwriting one would wipe the other names), opens each file with `O_NOFOLLOW` and checks it is still the file that was approved (device and inode). A failed write or flush is an error: that file is kept and not counted. The overwrite is best effort on SSDs and APFS, and the UI says so.
 4. **Honest history.** Each cleanup is recorded as `deleted` or `trashed`, with the measured free-space change when there is one. Never report space as freed when it only went to the Trash.
 5. **Self-test.** Every guard has self-test checks. `build.sh` and CI refuse a build that fails one.
 

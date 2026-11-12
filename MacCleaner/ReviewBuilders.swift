@@ -160,10 +160,11 @@ enum ReviewBuild {
 
     static func shred(_ items: [ShredderModel.Item], perform: @escaping () -> Void) -> ReviewRequest {
         ReviewRequest(title: "Shred Permanently",
-                      explanation: "Shredding skips the Trash and cannot be undone.",
+                      explanation: "Each file is overwritten with zeros, then deleted. This skips the Trash and can't be undone. On SSDs and APFS, macOS can keep old copies of blocks, so the overwrite can't guarantee the old data is gone; FileVault encryption is the real protection. Hard links and symlinks are refused.",
                       items: items.map {
                           ReviewItem(id: $0.id, name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size,
-                                     action: .delete, risk: .review, note: "cannot be recovered", blocked: $0.blocked)
+                                     action: .delete, risk: .review, note: "overwritten, then deleted",
+                                     blocked: $0.blocked ?? ShredEngine.reason($0.url, expected: $0.identity))
                       },
                       verb: "Shred", perform: perform)
     }

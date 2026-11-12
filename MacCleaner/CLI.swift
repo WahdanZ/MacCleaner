@@ -126,9 +126,15 @@ enum CLI {
         case "tool":
             guard args.count >= 2 else { err("Usage: mac-cleaner tool NAME ['{\"json\":\"args\"}']"); return 64 }
             let raw = args.count > 2 ? args[2] : "{}"
-            guard let a = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { err("Arguments must be a JSON object."); return 64 }
-            if (a["confirm"] as? Bool) == true && !yes {
-                err("For safety, `tool` with confirm: true also needs --yes."); return 64
+            guard var a = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { err("Arguments must be a JSON object."); return 64 }
+            if (a["confirm"] as? Bool) == true {
+                guard yes else { err("For safety, `tool` with confirm: true also needs --yes."); return 64 }
+                // --yes is the person at the keyboard approving: preview the same arguments, then confirm that preview.
+                if a["preview_id"] == nil {
+                    var p = a; p["confirm"] = false
+                    do { a["preview_id"] = (try MCPServer.call(args[1], p) as? [String: Any])?["preview_id"] }
+                    catch { err("\(error)"); return 1 }
+                }
             }
             return call(args[1], a, json: json)
         default: break
@@ -165,6 +171,7 @@ enum CLI {
                 guard readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "yes" else { print("Cancelled. Nothing was changed."); return 1 }
             }
             a["confirm"] = true
+            a["preview_id"] = (preview as? [String: Any])?["preview_id"]
             return output(try MCPServer.call(cmd.tool, a), json: json)
         } catch {
             err("\(error)"); return 1

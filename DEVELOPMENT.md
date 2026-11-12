@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 153 checks (the safety rules, the Insights forecast and history math, the updater's version, release, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 176 checks (the safety rules, the audit fixes, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -102,7 +102,7 @@ Design decisions and the UI audit are in [docs/DESIGN.md](docs/DESIGN.md). The f
 
 These are the project's core promise. Keep them true in the app, the CLI and the MCP server.
 
-1. **Review first.** Nothing is removed until the user has seen every item. In the app this is the Review sheet; in the CLI you type `yes` (or pass `--yes`); over MCP a tool returns a preview until it is called again with `confirm: true`.
+1. **Review first.** Nothing is removed until the user has seen every item. In the app this is the Review sheet; in the CLI you type `yes` (or pass `--yes`); over MCP a tool returns a preview with a single-use `preview_id`, and only a call with `confirm: true` and that id runs. The id expires after 10 minutes and is tied to the exact items, so a confirm that resolves to a different app, path or selection is refused.
 2. **Recoverable by default.** Only regenerable data (caches, build output, SDK downloads) is deleted permanently. The user's own files go to the Trash and are logged so Put Back can restore them.
 3. **Guards decide, every time.** The engines re-check the guards right before acting, even if the UI already did:
    - **`SafetyGuard`:** permanent deletion only inside known cache roots. Symlinks are resolved first, and root folders themselves are never removed.
@@ -127,7 +127,7 @@ A checklist that keeps a new feature consistent with the rest:
 2. **Guards:** before deleting or moving anything, call the right guard (`SafetyGuard.isAllowed`, `TrashGuard.reason`, `AdminGuard.isAllowed`) inside the engine, not only in the UI.
 3. **Review:** add a builder to `ReviewBuild` that lists every item with its path, size, action (`trash` / `delete` / `command` / `adminTrash`), risk and blocked reason, and open it with `review.present(…)`.
 4. **History:** call `HistoryStore.shared.add(…, outcome: .deleted | .trashed, measuredFreeChange:)`.
-5. **MCP and CLI:** add a read-only tool and a destructive tool with the preview → `confirm: true` pattern, then a CLI command that maps to them.
+5. **MCP and CLI:** add a read-only tool and a destructive tool with the preview → `confirm: true` + `preview_id` pattern (`withPreview` / `approve` with a `plan` digest of the exact items), then a CLI command that maps to them.
 6. **Self-test:** add checks for every refusal path (protected, outside allowed folders, symlinks).
 7. **UI:** use the tokens in `Theme.swift` (`Palette`, `Space`, `Radius`, `.panel()`), native controls, and the `Motion` roles so Reduce Motion is respected. Give custom controls an accessibility label and value.
 
@@ -179,7 +179,7 @@ Manual configuration for any MCP client:
 }
 ```
 
-| Read-only | Changes something (preview, then `confirm: true`) |
+| Read-only | Changes something (preview, then `confirm: true` with its `preview_id`) |
 |---|---|
 | `disk_status`, `scan_caches`, `disk_usage`, `find_duplicates`, `list_apps`, `app_details`, `scan_projects`, `list_sdks`, `system_data`, `trash_status`, `list_protected` | `clean_caches`, `clear_app_cache`, `uninstall_app`, `clean_projects`, `remove_sdks`, `remove_system_data`, `empty_trash`, `restore_from_trash`, `move_to_trash`, `protect_paths` (adds only) |
 
@@ -225,6 +225,7 @@ git push origin v1.1.0
 - **Version:** taken from the tag (`v1.1.0` becomes `1.1.0`). A tag with a suffix such as `v1.2.0-beta.1` becomes a pre-release.
 - **Release notes:** generated from the commits since the last tag, with install steps on top.
 - **Test build:** *Actions › Release › Run workflow* builds a DMG as a download on the run's page, without publishing.
+- **Sign each release for in-app updates:** after the Release workflow publishes, run `scripts/sign-release.sh vX.Y.Z`. It signs the DMG with the Ed25519 release key in your keychain (create it once with `swift scripts/release-key.swift init` and put the public key in `Updates.swift`, `releasePublicKey`) and uploads the `.sig`. The app offers a release only once it has a valid signature.
 - **In-app updates** read the latest non-pre-release from the GitHub API, so keep the asset names `MacCleaner-<version>.dmg` and `MacCleaner-<version>.dmg.sha256`; without the checksum file the app refuses to install. Before installing, the app checks:
   - the SHA-256;
   - that the app inside has the same app ID and the advertised version;

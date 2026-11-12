@@ -707,30 +707,20 @@ enum AppEngine {
         }
     }
 
-    /// What "Clear cache" does with one cache folder, used by both the review and `clearCaches`, so the review
-    /// shows exactly what runs. A sandboxed app's Caches folder (…/Containers/<app>/Data/Library/Caches) is emptied
-    /// and kept; any other cache folder is deleted. `blocked` says why it is skipped, or is nil.
-    static func cacheAction(_ url: URL) -> (emptiesFolder: Bool, blocked: String?) {
-        let contents = SafetyGuard.containerCacheDepth(url.resolvingSymlinksInPath().standardizedFileURL.path) == 4
-        if SafetyGuard.isAllowed(url, allowContainer: contents) { return (contents, nil) }
-        return (contents, ProtectedPaths.reason(url) ?? "Outside the allowed cache folders")
-    }
-
     /// Permanently deletes an app's disposable caches (cache allow-list only).
     static func clearCaches(_ items: [AppLeftover]) -> [String] {
         var errs: [String] = []
         let fm = FileManager.default
         for c in items {
-            let action = cacheAction(c.url)
-            if let why = action.blocked {
-                errs.append("\(c.url.lastPathComponent): \(why), skipped")
-            } else if action.emptiesFolder {
+            if SafetyGuard.containerCacheDepth(c.url.resolvingSymlinksInPath().path) == 4 {
                 let kids = (try? fm.contentsOfDirectory(at: c.url, includingPropertiesForKeys: nil)) ?? []
                 for k in kids where SafetyGuard.isAllowed(k) {
                     do { try fm.removeItem(at: k) } catch { errs.append("\(k.lastPathComponent): \(error.localizedDescription)") }
                 }
-            } else {
+            } else if SafetyGuard.isAllowed(c.url) {
                 do { try fm.removeItem(at: c.url) } catch { errs.append("\(c.url.lastPathComponent): \(error.localizedDescription)") }
+            } else {
+                errs.append("\(c.url.lastPathComponent): outside the cache allow-list, skipped")
             }
         }
         return errs

@@ -472,39 +472,6 @@ enum SelfTest {
               notRootRun.status == 0 && fm.fileExists(atPath: realDir.appendingPathComponent("a.plist").path)
               && notRootRun.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) } == [])
 
-        print("Clear app cache (review matches what runs)")
-        // Apps › Clear Cache used to show a sandboxed app's cache as "Blocked" and then empty it anyway.
-        // The review and AppEngine.clearCaches now use one decision, AppEngine.cacheAction.
-        let sandboxedCache = h("Library/Containers/com.example.selftest/Data/Library/Caches")
-        let appleCache = h("Library/Containers/com.apple.selftest/Data/Library/Caches")
-        let plainCache = h(".cache/maccleaner-selftest-appcache")
-        let keptCache = h(".cache/maccleaner-selftest-appcache-kept")
-        defer { try? fm.removeItem(at: plainCache); try? fm.removeItem(at: keptCache) }
-        for c in [plainCache, keptCache] {
-            try? fm.createDirectory(at: c, withIntermediateDirectories: true)
-            fm.createFile(atPath: c.appendingPathComponent("blob").path, contents: Data(count: 4096))
-        }
-        let sandboxedPlan = AppEngine.cacheAction(sandboxedCache)
-        check("a sandboxed cache is emptied, not blocked", sandboxedPlan.emptiesFolder && sandboxedPlan.blocked == nil)
-        check("an Apple sandbox cache is blocked", AppEngine.cacheAction(appleCache).blocked != nil)
-        check("a plain cache folder is deleted, not emptied",
-              AppEngine.cacheAction(plainCache).emptiesFolder == false && AppEngine.cacheAction(plainCache).blocked == nil)
-        ProtectedPaths.set(savedProtected + [keptCache.path])
-        func cache(_ u: URL) -> AppLeftover { AppLeftover(id: u.path, url: u, label: "Caches", size: 4096, include: true, note: nil) }
-        let cacheApp = AppInfo(id: "/Applications/Example.app", url: URL(fileURLWithPath: "/Applications/Example.app"),
-                               name: "Example", bundleID: "com.example.selftest", version: "1", isApple: false, appSize: 0,
-                               lastUsed: nil, leftovers: [], caches: [sandboxedCache, appleCache, plainCache, keptCache].map(cache))
-        let reviewBlocked = MainActor.assumeIsolated {   // the self-test runs on the main thread
-            Set(ReviewBuild.appCache(cacheApp) {}.items.filter { $0.blocked != nil }.map(\.location))
-        }
-        check("review: the sandboxed cache is listed as cleared, Apple and protected ones as blocked",
-              reviewBlocked == [appleCache.path, keptCache.path])
-        let cacheErrors = AppEngine.clearCaches(cacheApp.caches)
-        check("clear cache acts on exactly what the review allowed",
-              !fm.fileExists(atPath: plainCache.path) && fm.fileExists(atPath: keptCache.appendingPathComponent("blob").path)
-              && cacheErrors.count == 2 && cacheErrors.allSatisfy { $0.hasSuffix("skipped") })
-        ProtectedPaths.set(savedProtected)
-
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

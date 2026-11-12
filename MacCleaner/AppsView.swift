@@ -215,7 +215,7 @@ private struct AppDetail: View {
 
                 HStack(spacing: 8) {
                     Button {
-                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { Task { await apps.clearCaches() } }) }
+                        if let a = apps.selected { review.present(ReviewBuild.appCache(a) { Task { await apps.clearCaches(a) } }) }
                     } label: {
                         Label(a.cacheSize > 0 ? "Clear cache \(ByteText.string(a.cacheSize))" : "No cache to clear",
                               systemImage: "wind")

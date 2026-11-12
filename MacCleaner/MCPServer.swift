@@ -294,8 +294,16 @@ enum MCPServer {
             let app = try findApp(a)
             guard !app.caches.isEmpty else { return ["message": "\(app.name) has no caches to clear."] }
             if !confirm {
-                return ["preview": true, "app": app.name, "would_delete_permanently": app.caches.map(leftoverDict),
-                        "total": size(app.cacheSize),
+                let plan = app.caches.map { ($0, AppEngine.cacheDecision($0.url)) }
+                let ok = plan.filter { $0.1.blocked == nil }
+                return ["preview": true, "app": app.name,
+                        "would_delete_permanently": ok.map { c, d in
+                            var item = leftoverDict(c)
+                            if d.contentsOnly { item["note"] = AppEngine.contentsOnlyNote }
+                            return item
+                        },
+                        "skipped": plan.compactMap { c, d in d.blocked.map { ["path": Scanner.tilde(c.url), "reason": $0] } },
+                        "total": size(ok.reduce(0) { $0 + $1.0.size }),
                         "next": "Show this to the user. Only after an explicit yes, call clear_app_cache again with confirm: true."]
             }
             let errors = AppEngine.clearCaches(app.caches)

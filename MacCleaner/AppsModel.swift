@@ -449,8 +449,8 @@ final class AppsModel {
     }
 
     /// Deletes the app's disposable caches permanently (cache allow-list only).
-    func clearCaches() async {
-        guard let a = selected, !a.caches.isEmpty else { return }
+    func clearCaches(_ a: AppInfo) async {
+        guard !a.caches.isEmpty else { return }
         phase = .working
         let items = a.caches
         let errors: [String] = await Task.detached { AppEngine.clearCaches(items) }.value
@@ -707,20 +707,45 @@ enum AppEngine {
         }
     }
 
-    /// Permanently deletes an app's disposable caches (cache allow-list only).
+    /// How "Clear cache" treats one cache folder. `blocked` is nil when it may go.
+    struct CacheDecision: Equatable {
+        /// An app's sandbox cache folder (~/Library/Containers/<id>/Data/Library/Caches):
+        /// its contents are deleted and the folder itself stays.
+        let contentsOnly: Bool
+        let blocked: String?
+    }
+
+    static let contentsOnlyNote = "contents only; the folder stays"
+
+    /// The one rule for "Clear cache". The review sheet, the MCP preview and `clearCaches` all use it,
+    /// so what the review shows as blocked is never deleted, and what it allows is what runs.
+    static func cacheDecision(_ url: URL) -> CacheDecision {
+        let contentsOnly = SafetyGuard.containerCacheDepth(url.resolvingSymlinksInPath().standardizedFileURL.path) == 4
+        let ok = SafetyGuard.isAllowed(url, allowContainer: contentsOnly)
+        return CacheDecision(contentsOnly: contentsOnly,
+                             blocked: ok ? nil : (ProtectedPaths.reason(url) ?? "Outside the allowed cache folders"))
+    }
+
+    /// Permanently deletes an app's disposable caches (cache allow-list only). Each item is checked
+    /// again right before it is deleted, with the rule the review showed; blocked items are skipped and reported.
     static func clearCaches(_ items: [AppLeftover]) -> [String] {
         var errs: [String] = []
         let fm = FileManager.default
         for c in items {
-            if SafetyGuard.containerCacheDepth(c.url.resolvingSymlinksInPath().path) == 4 {
+            let d = cacheDecision(c.url)
+            if let why = d.blocked {
+                errs.append("\(c.url.lastPathComponent): \(why), skipped")
+            } else if d.contentsOnly {
                 let kids = (try? fm.contentsOfDirectory(at: c.url, includingPropertiesForKeys: nil)) ?? []
-                for k in kids where SafetyGuard.isAllowed(k) {
+                for k in kids {
+                    guard SafetyGuard.isAllowed(k) else {
+                        errs.append("\(k.lastPathComponent): \(ProtectedPaths.reason(k) ?? "Outside the allowed cache folders"), skipped")
+                        continue
+                    }
                     do { try fm.removeItem(at: k) } catch { errs.append("\(k.lastPathComponent): \(error.localizedDescription)") }
                 }
-            } else if SafetyGuard.isAllowed(c.url) {
-                do { try fm.removeItem(at: c.url) } catch { errs.append("\(c.url.lastPathComponent): \(error.localizedDescription)") }
             } else {
-                errs.append("\(c.url.lastPathComponent): outside the cache allow-list, skipped")
+                do { try fm.removeItem(at: c.url) } catch { errs.append("\(c.url.lastPathComponent): \(error.localizedDescription)") }
             }
         }
         return errs

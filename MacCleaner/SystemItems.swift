@@ -82,7 +82,7 @@ final class ExtensionsModel {
             else { message = ("\(x.name) moved to the Trash.", false) }
         }
         if !FileManager.default.fileExists(atPath: x.url.path) {
-            HistoryStore.shared.add("\(x.name) Removed", bytes: x.size, symbol: "puzzlepiece.extension")
+            HistoryStore.shared.add("\(x.name) Moved to Trash", bytes: x.size, symbol: "puzzlepiece.extension", outcome: .trashed)
         }
         await load()
     }
@@ -284,9 +284,9 @@ struct StartupView: View {
                         NSWorkspace.shared.open(u)
                     }
                 }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
             }
         }
         .task { if !m.loaded { await m.load() } }
@@ -337,9 +337,9 @@ struct SystemRow: View {
             Button { NSWorkspace.shared.activateFileViewerSelecting([reveal]) } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(.plain).foregroundStyle(Palette.dim).help("Reveal in Finder")
             if let secondaryTitle {
-                Button(secondaryTitle, action: secondary).buttonStyle(GhostButtonStyle()).disabled(busy)
+                Button(secondaryTitle, action: secondary).buttonStyle(.bordered).disabled(busy)
             }
-            Button(actionTitle, action: action).buttonStyle(GhostButtonStyle()).disabled(busy)
+            Button(actionTitle, action: action).buttonStyle(.bordered).disabled(busy)
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .background(hover ? Palette.fg.opacity(0.04) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -357,7 +357,7 @@ struct MessageBar: View {
         HStack(spacing: 8) {
             Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(isError ? Palette.warn : Palette.success)
-            Text(text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+            Text(text).font(.callout).lineLimit(4).frame(maxWidth: .infinity, alignment: .leading)
             Spacer()
             Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundStyle(Palette.dim)
         }

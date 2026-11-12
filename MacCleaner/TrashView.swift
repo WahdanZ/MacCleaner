@@ -8,21 +8,21 @@ struct TrashCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Trash").font(.system(size: 20, weight: .bold))
+                Text("Trash").font(.title3.weight(.semibold))
                 Spacer()
                 if !trash.isExact {
-                    Button("Measure all") { Task { await trash.refresh(askFinder: true) } }
-                        .buttonStyle(.plain).foregroundStyle(Palette.accent).font(.system(size: 13, weight: .medium))
+                    Button("Measure All") { Task { await trash.refresh(askFinder: true) } }
+                        .buttonStyle(.link)
                         .help("Asks Finder for the full Trash contents (macOS asks once to allow this).")
                 }
             }
             HStack(spacing: 14) {
-                IconTile(symbol: trash.displayBytes > 0 ? "trash.fill" : "trash", color: Color(hex: 0x8A94A6), size: 44)
+                IconTile(symbol: trash.displayBytes > 0 ? "trash.fill" : "trash", color: Color(nsColor: .systemGray), size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(trash.isExact ? ByteText.string(trash.displayBytes)
                                        : (trash.displayBytes > 0 ? "≥ \(ByteText.string(trash.displayBytes))" : "—"))
-                        .font(.system(size: 22, weight: .bold)).monospacedDigit()
-                    Text(subtitle).font(.system(size: 12)).foregroundStyle(Palette.dim).lineLimit(2)
+                        .font(.title2.weight(.semibold)).monospacedDigit()
+                    Text(subtitle).font(.caption).foregroundStyle(Palette.dim).lineLimit(2)
                 }
                 Spacer()
             }
@@ -31,17 +31,17 @@ struct TrashCard: View {
             }
             HStack(spacing: 8) {
                 Button { trash.showPutBack = true } label: { Label("Put Back…", systemImage: "arrow.uturn.backward") }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
                     .disabled(trash.status.appItems.isEmpty)
                 Spacer()
                 Button { trash.confirmingEmpty = true } label: { Label("Empty Trash", systemImage: "trash.slash") }
-                    .buttonStyle(AccentButtonStyle())
+                    .buttonStyle(.borderedProminent)
                     .disabled(trash.busy || (trash.isExact && trash.status.itemCount == 0))
             }
         }
-        .padding(20)
+        .padding(Space.xl)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .panel(radius: 22)
+        .panel()
         .task { await trash.refresh() }
     }
 
@@ -88,7 +88,7 @@ struct PutBackSheet: View {
                         .font(.system(size: 12)).foregroundStyle(Palette.dim)
                 }
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(AccentButtonStyle()).keyboardShortcut(.defaultAction)
+                Button("Done") { dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
             if let m = trash.message { MessageBar(text: m.text, isError: m.isError) { trash.message = nil } }
             if trash.status.appItems.isEmpty {
@@ -108,7 +108,7 @@ struct PutBackSheet: View {
                                 Spacer()
                                 Text(ByteText.string(item.size)).font(.system(size: 12)).monospacedDigit().foregroundStyle(Palette.dim)
                                 Button("Put Back") { Task { await trash.putBack(item) } }
-                                    .buttonStyle(GhostButtonStyle())
+                                    .buttonStyle(.bordered)
                                     .disabled(!item.restorable || trash.busy)
                                     .help(item.restorable ? "Move back to \(item.original)" : "System files: drag them out of the Trash in Finder")
                             }

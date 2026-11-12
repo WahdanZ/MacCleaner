@@ -188,9 +188,10 @@ final class TrashModel {
             message = (err, true)
         } else {
             try? await Task.sleep(for: .seconds(1))
-            let freed = max(Scanner.freeBytes() - before, expected)
-            HistoryStore.shared.add("Trash Emptied", bytes: freed, symbol: "trash.slash")
-            message = ("Trash emptied: about \(ByteText.string(freed)) freed.", false)
+            let measured = max(0, Scanner.freeBytes() - before)
+            let size = expected > 0 ? expected : measured
+            HistoryStore.shared.add("Trash Emptied", bytes: size, symbol: "trash.slash", outcome: .deleted, measuredFreeChange: measured)
+            message = ("Trash emptied (\(ByteText.string(size))). Free space went up by \(ByteText.string(measured)) so far; macOS can take a moment to update it.", false)
             finderAllowed = true
         }
         await refresh()

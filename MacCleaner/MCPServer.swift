@@ -149,8 +149,8 @@ enum MCPServer {
                              "confirm": confirmProp]),
          "annotations": ["destructiveHint": true]],
         ["name": "list_sdks", "title": "Developer SDKs (Xcode, Android, Docker)",
-         "description": "Lists simulator runtimes, DeviceSupport, Xcode archives, Android system images, platforms, NDKs, build tools, emulators and Docker reclaimable space. Items still used by the user's projects or emulators have in_use set. Read-only; can take ~30 s.",
-         "inputSchema": obj(["group": ["type": "string", "enum": ["Xcode", "Android", "Docker"], "description": "Only this group."]]),
+         "description": "Lists simulator runtimes, DeviceSupport, Xcode archives, Android system images, platforms, NDKs, build tools, emulators, language versions (nvm, fnm, Volta, pyenv, rbenv, rustup, SDKMAN, asdf, IDE JDKs), Homebrew formulae and apps (casks, uninstalled through brew) with brew cleanup, and Docker reclaimable space. Items still used by the user's projects or emulators have in_use set. Read-only; can take ~30 s.",
+         "inputSchema": obj(["group": ["type": "string", "enum": ["Xcode", "Android", "Languages", "Homebrew", "Docker"], "description": "Only this group."]]),
          "annotations": ["readOnlyHint": true]],
         ["name": "remove_sdks", "title": "Remove developer SDK items",
          "description": "Removes items by id from list_sdks. Runtimes, SDK parts and Docker groups are deleted permanently (re-downloadable); Xcode archives go to the Trash. Without confirm it returns a preview.",
@@ -360,8 +360,10 @@ enum MCPServer {
                 return ["preview": true, "would_delete_permanently": list, "total": size(total),
                         "next": "Show this to the user. Only after an explicit yes, call clean_projects again with the same ids and confirm: true."]
             }
+            let freeBefore = Scanner.freeBytes()
             let r = ProjectEngine.clean(pairs) { _ in }
-            HistoryStore.add(title: "Project Build Files Cleaned", bytes: r.bytes, symbol: "hammer")
+            HistoryStore.add(title: "Project Build Files Cleaned", bytes: r.bytes, symbol: "hammer",
+                             outcome: .deleted, measuredFreeChange: max(0, Scanner.freeBytes() - freeBefore))
             let gone = Set(pairs.map(\.0.id))
             for i in projectScan.indices { projectScan[i].artifacts.removeAll { gone.contains($0.id) && !FileManager.default.fileExists(atPath: $0.id) } }
             return ["freed": size(r.bytes), "errors": r.errors]
@@ -394,9 +396,10 @@ enum MCPServer {
                         "next": "Show this to the user, point out in_use and review items. Only after an explicit yes, call remove_sdks again with confirm: true."]
             }
             let r = SDKEngine.remove(list)
-            HistoryStore.add(title: "Developer SDKs Removed", bytes: r.bytes, symbol: "shippingbox")
+            HistoryStore.add(title: "Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
+            HistoryStore.add(title: "Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)
             sdkScan = SDKScan()
-            return ["freed": size(r.bytes), "errors": r.errors]
+            return ["deleted": size(r.bytes - r.trashed), "moved_to_trash": size(r.trashed), "errors": r.errors]
 
         case "system_data":
             sysReport = SystemDataEngine.scan()
@@ -424,9 +427,12 @@ enum MCPServer {
                         "next": "Show this to the user (backups and attachments can't be recreated). Only after an explicit yes, call again with confirm: true."]
             }
             let r = SystemDataEngine.remove(list)
-            HistoryStore.add(title: "System Data Cleaned", bytes: r.bytes, symbol: "internaldrive")
+            HistoryStore.add(title: "Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
+                             outcome: .deleted, measuredFreeChange: r.freed)
+            HistoryStore.add(title: "System Data Moved to Trash", bytes: r.bytes - r.freed, symbol: "internaldrive", outcome: .trashed)
             sysReport = SysReport()
-            return ["done": size(r.bytes), "errors": r.errors, "password_prompt_cancelled": r.cancelled]
+            return ["snapshots_freed": size(r.freed), "moved_to_trash": size(r.bytes - r.freed), "errors": r.errors,
+                    "password_prompt_cancelled": r.cancelled]
 
         case "trash_status":
             let st = TrashOps.status(useFinder: true)
@@ -446,8 +452,11 @@ enum MCPServer {
             }
             let before = Scanner.freeBytes()
             if let e = TrashOps.empty() { throw ToolError(description: e) }
-            HistoryStore.add(title: "Trash Emptied", bytes: max(Scanner.freeBytes() - before, st.totalBytes ?? 0), symbol: "trash.slash")
-            return ["emptied": true, "freed_about": size(max(Scanner.freeBytes() - before, st.totalBytes ?? 0))]
+            let measured = max(0, Scanner.freeBytes() - before)
+            HistoryStore.add(title: "Trash Emptied", bytes: st.totalBytes ?? measured, symbol: "trash.slash",
+                             outcome: .deleted, measuredFreeChange: measured)
+            return ["emptied": true, "trash_size_before": st.totalBytes.map(size) ?? "unknown",
+                    "free_space_change_measured": size(measured)]
 
         case "restore_from_trash":
             let all = TrashLog.shared.present()

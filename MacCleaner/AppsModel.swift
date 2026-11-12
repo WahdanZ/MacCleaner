@@ -291,6 +291,31 @@ final class AppsModel {
 
     var phase: Phase = .idle
     var apps: [AppInfo] = []
+    /// App file name → Homebrew cask token, for apps installed with `brew install --cask`.
+    var caskByApp: [String: String] = [:]
+
+    func caskToken(_ a: AppInfo) -> String? { caskByApp[a.url.lastPathComponent] }
+
+    /// Uninstalls through Homebrew so its records stay correct. brew deletes the app (it doesn't go to the Trash).
+    func uninstallWithBrew(_ a: AppInfo) async {
+        guard let token = caskToken(a) else { return }
+        phase = .working
+        if isRunning(a), !(await quit(a)) { phase = .done; return }
+        let item = SDKItem(id: "brew.cask.\(token)", group: .homebrew, kind: "Homebrew apps (casks)", name: a.name,
+                           detail: token, size: a.appSize, reveal: a.url, action: .brew(["uninstall", "--cask", token]),
+                           regen: "brew install --cask \(token)")
+        let r = await Task.detached { SDKEngine.remove([item]) }.value
+        if r.errors.isEmpty {
+            apps.removeAll { $0.id == a.id }
+            caskByApp[a.url.lastPathComponent] = nil
+            HistoryStore.shared.add("\(a.name) Uninstalled with Homebrew", bytes: a.appSize, symbol: "mug", outcome: .deleted)
+            message = ("Uninstalled \(a.name) with Homebrew. Its leftovers in your Library are still listed under Uninstall if you want them gone too.", false)
+            selectedID = visible.first?.id
+        } else {
+            message = ("Homebrew couldn't uninstall \(a.name): \(r.errors.joined(separator: "; "))", true)
+        }
+        phase = .done
+    }
     var selectedID: String?
     var search = ""
     var sort: Sort = .size
@@ -338,6 +363,7 @@ final class AppsModel {
         apps = found
         if selectedID == nil || selected == nil { selectedID = visible.first?.id }
         phase = .done
+        caskByApp = await Task.detached { SDKEngine.brewPath == nil ? [:] : SDKEngine.caskApps() }.value
     }
 
     /// Bumped whenever any app launches or quits, so running state redraws live.
@@ -415,7 +441,7 @@ final class AppsModel {
         let r = await Task.detached { AppEngine.uninstall(a, picked: picked) }.value
         if r.appRemoved {
             apps.removeAll { $0.id == a.id }
-            HistoryStore.shared.add("\(a.name) Uninstalled", bytes: r.bytes, symbol: "square.grid.2x2")
+            HistoryStore.shared.add("\(a.name) Uninstalled", bytes: r.bytes, symbol: "square.grid.2x2", outcome: .trashed)
         }
         selectedID = visible.first?.id
         message = (r.summary(appName: a.name), !(r.errors.isEmpty && r.appRemoved))
@@ -432,7 +458,7 @@ final class AppsModel {
         let fresh = await Task.detached { AppScanner.info(for: a.url, allIDs: ids) }.value
         if let i = apps.firstIndex(where: { $0.id == a.id }) { apps[i] = fresh }
         let freed = max(0, a.cacheSize - fresh.cacheSize)
-        HistoryStore.shared.add("\(a.name) Cache Cleared", bytes: freed, symbol: "wind")
+        HistoryStore.shared.add("\(a.name) Cache Cleared", bytes: freed, symbol: "wind", outcome: .deleted)
         message = errors.isEmpty
             ? ("Cleared \(ByteText.string(freed)) of \(a.name) caches.", false)
             : ("Cleared \(ByteText.string(freed)). \(errors.count) problem(s): \(errors.prefix(2).joined(separator: "; "))", true)

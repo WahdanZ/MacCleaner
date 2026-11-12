@@ -307,7 +307,7 @@ final class DiskMapModel {
         }
         marked = [:]
         lastTrash = (count, bytes, errors)
-        HistoryStore.shared.add("Files Moved to Trash", bytes: bytes, symbol: "chart.bar.xaxis")
+        HistoryStore.shared.add("Files Moved to Trash", bytes: bytes, symbol: "chart.bar.xaxis", outcome: .trashed)
         if let s = selected, s.parent == nil, s !== root { selected = nil }
         phase = .done
         revision += 1

@@ -154,8 +154,9 @@ enum SystemDataEngine {
     }
 
     /// Snapshots need one password prompt (tmutil runs as admin); everything else goes to the Trash.
-    static func remove(_ items: [SysItem]) -> (bytes: Int64, errors: [String], cancelled: Bool) {
-        var bytes: Int64 = 0, errors: [String] = [], cancelled = false
+    /// `bytes` = total; `freed` = the free-space change after deleting snapshots (they have no size up front).
+    static func remove(_ items: [SysItem]) -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
+        var bytes: Int64 = 0, freed: Int64 = 0, errors: [String] = [], cancelled = false
         let snaps = items.compactMap { i -> String? in if case .snapshot(let d) = i.action, reason(i) == nil { return d }; return nil }
         if !snaps.isEmpty {
             let before = Scanner.freeBytes()
@@ -165,7 +166,8 @@ enum SystemDataEngine {
                 let out = r.output ?? ""
                 if out.contains("-128") { cancelled = true } else { errors.append("Snapshots: \(out.trimmingCharacters(in: .whitespacesAndNewlines))") }
             } else {
-                bytes += max(0, Scanner.freeBytes() - before)
+                freed = max(0, Scanner.freeBytes() - before)
+                bytes += freed
             }
         }
         for i in items {
@@ -173,7 +175,7 @@ enum SystemDataEngine {
             if let why = reason(i) { errors.append("\(i.name): \(why)"); continue }
             if let e = AppEngine.trash(u, size: i.size, source: "System Data") { errors.append("\(i.name): \(e)") } else { bytes += i.size ?? 0 }
         }
-        return (bytes, errors, cancelled)
+        return (bytes, freed, errors, cancelled)
     }
 }
 
@@ -206,7 +208,9 @@ final class SystemDataModel {
         let list = chosen
         busy = true
         let r = await Task.detached { SystemDataEngine.remove(list) }.value
-        HistoryStore.shared.add("System Data Cleaned", bytes: r.bytes, symbol: "internaldrive")
+        HistoryStore.shared.add("Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
+                                outcome: .deleted, measuredFreeChange: r.freed)
+        HistoryStore.shared.add("System Data Moved to Trash", bytes: r.bytes - r.freed, symbol: "internaldrive", outcome: .trashed)
         if r.cancelled && r.errors.isEmpty { message = ("Snapshots kept (password prompt cancelled). Other items: \(ByteText.string(r.bytes)) to the Trash.", false) }
         else if r.errors.isEmpty { message = ("Done: \(ByteText.string(r.bytes)). Items moved to the Trash can be put back until you empty it.", false) }
         else { message = ("\(ByteText.string(r.bytes)) done. \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true) }
@@ -219,6 +223,7 @@ final class SystemDataModel {
 
 struct SystemDataView: View {
     @Environment(SystemDataModel.self) private var m
+    @Environment(ReviewCenter.self) private var review
     @State private var open: Set<SysItem.Section> = Set(SysItem.Section.allCases)
 
     var body: some View {
@@ -268,24 +273,18 @@ struct SystemDataView: View {
                     .font(.system(size: 11)).foregroundStyle(Palette.faint)
                 Spacer()
                 Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(GhostButtonStyle()).disabled(m.busy)
-                Button { m.confirming = true } label: {
+                    .buttonStyle(.bordered).disabled(m.busy)
+                Button { review.present(ReviewBuild.systemData(m) { Task { await m.remove() } }) } label: {
                     Label(m.selected.isEmpty ? "Remove" : "Remove \(ByteText.string(m.selectedBytes))", systemImage: "trash")
                         .contentTransition(.numericText())
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .disabled(m.selected.isEmpty || m.busy)
                 .animation(.snappy, value: m.selectedBytes)
             }
         }
         .animation(.snappy, value: m.loaded)
         .task { if !m.loaded { await m.load() } }
-        .alert("Remove \(m.chosen.count) item(s)?", isPresented: $m.confirming) {
-            Button("Remove", role: .destructive) { Task { await m.remove() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(summary)
-        }
     }
 
     @ViewBuilder private func sectionView(_ s: SysItem.Section) -> some View {
@@ -316,7 +315,7 @@ struct SystemDataView: View {
                     Button("Open settings") {
                         if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") { NSWorkspace.shared.open(u) }
                     }
-                    .buttonStyle(GhostButtonStyle())
+                    .buttonStyle(.bordered)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 .transition(.opacity)
@@ -416,6 +415,10 @@ private struct SysRow: View {
         .contentShape(Rectangle())
         .onTapGesture { withAnimation(.snappy(duration: 0.18)) { m.toggle(item) } }
         .onHover { hover = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(ok ? (on ? "Selected" : "Not selected") : "View only")
+        .accessibilityAction { m.toggle(item) }
         .help(SystemDataEngine.reason(item) ?? item.reveal?.path ?? "")
     }
 }

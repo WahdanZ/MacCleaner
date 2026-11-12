@@ -3,9 +3,15 @@ import SwiftUI
 struct IntegrationsView: View {
     @Environment(IntegrationsModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    /// Inside the Settings window: no title or Done button.
+    var embedded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if embedded {
+                Text("Let AI assistants use Mac Cleaner through its MCP server. They can scan and show sizes, and clean only after you say yes.")
+                    .font(.callout).foregroundStyle(Palette.dim).fixedSize(horizontal: false, vertical: true)
+            } else {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Connect AI").font(.system(size: 22, weight: .bold))
@@ -14,7 +20,8 @@ struct IntegrationsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(GhostButtonStyle()).keyboardShortcut(.cancelAction)
+                Button("Done") { dismiss() }.buttonStyle(.bordered).keyboardShortcut(.cancelAction)
+            }
             }
 
             VStack(spacing: 6) {
@@ -25,7 +32,7 @@ struct IntegrationsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: m.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                         .foregroundStyle(m.isError ? Palette.warn : Palette.accent)
-                    Text(m.text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                    Text(m.text).font(.callout).lineLimit(4).frame(maxWidth: .infinity, alignment: .leading)
                     Spacer()
                 }
                 .padding(10)
@@ -40,16 +47,16 @@ struct IntegrationsView: View {
                     Button { model.copySkill() } label: { Label("Copy skill text", systemImage: "text.badge.plus") }
                     Button { model.saveSkillFolder() } label: { Label("Save skill folder…", systemImage: "folder.badge.plus") }
                 }
-                .buttonStyle(GhostButtonStyle())
+                .buttonStyle(.bordered)
                 Text("Server command: \(SkillText.serverCommand) --mcp")
                     .font(.mono(10.5)).foregroundStyle(Palette.faint).textSelection(.enabled)
                 Text("Each config file is backed up as <file>.maccleaner-backup before it is changed.")
                     .font(.system(size: 10.5)).foregroundStyle(Palette.faint)
             }
         }
-        .padding(24)
-        .frame(width: 640)
-        .background(Palette.bgBottom)
+        .padding(embedded ? 0 : 24)
+        .frame(width: embedded ? nil : 640)
+        .background(embedded ? Color.clear : Palette.bgBottom)
         .foregroundStyle(Palette.fg)
         
         .onAppear { model.refresh() }
@@ -74,9 +81,9 @@ private struct ClientRow: View {
             Spacer()
             if connected {
                 Text("CONNECTED").font(.mono(9, .bold)).foregroundStyle(Palette.accent)
-                Button("Remove") { model.disconnect(client) }.buttonStyle(GhostButtonStyle())
+                Button("Remove") { model.disconnect(client) }.buttonStyle(.bordered)
             } else {
-                Button("Connect") { model.connect(client) }.buttonStyle(AccentButtonStyle())
+                Button("Connect") { model.connect(client) }.buttonStyle(.borderedProminent)
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)

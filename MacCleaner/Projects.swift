@@ -36,7 +36,17 @@ enum ProjectEngine {
         ("build.gradle.kts", "Android/Gradle"), ("settings.gradle", "Android/Gradle"), ("settings.gradle.kts", "Android/Gradle"),
         ("Podfile", "iOS"), ("Package.swift", "Swift"), ("Cargo.toml", "Rust"), ("pom.xml", "Java/Maven"),
         ("pyproject.toml", "Python"), ("requirements.txt", "Python"), ("CMakeLists.txt", "C/C++"), ("go.mod", "Go"),
+        ("setup.py", "Python"), ("Pipfile", "Python"), ("tox.ini", "Python"),
+        ("*.csproj", ".NET"), ("*.fsproj", ".NET"), ("mix.exs", "Elixir"), ("*.tf", "Terraform"),
+        ("stack.yaml", "Haskell"), ("*.cabal", "Haskell"), ("cabal.project", "Haskell"), ("build.zig", "Zig"),
+        ("elm.json", "Elm"), ("composer.json", "PHP"), ("Cartfile", "iOS"), ("build.sbt", "Scala"), ("Gemfile", "Ruby"),
     ]
+
+    /// Project files named after the project ("App.csproj", "main.tf") count as "*.<ext>" markers.
+    static let extensionMarkers = ["csproj", "fsproj", "tf", "cabal"]
+
+    static let pythonMarkers: Set<String> = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile", "tox.ini"]
+    static let gradleMarkers: Set<String> = ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
 
     /// Folder name → (what it is, how it comes back, needs review, markers that make it valid there)
     static let artifactRules: [String: (kind: String, regen: String, review: Bool, needs: Set<String>)] = [
@@ -49,7 +59,7 @@ enum ProjectEngine {
                     ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]),
         "Pods": ("CocoaPods", "pod install", false, ["Podfile"]),
         ".build": ("Swift build output", "swift build", false, ["Package.swift"]),
-        "target": ("Build output", "cargo / mvn build", false, ["Cargo.toml", "pom.xml"]),
+        "target": ("Build output", "cargo / mvn / sbt build", false, ["Cargo.toml", "pom.xml", "build.sbt"]),
         ".next": ("Next.js build cache", "next build", false, ["package.json"]),
         ".nuxt": ("Nuxt build cache", "nuxt build", false, ["package.json"]),
         ".turbo": ("Turborepo cache", "next build", false, ["package.json"]),
@@ -59,8 +69,29 @@ enum ProjectEngine {
         ".expo": ("Expo cache", "expo start", false, ["package.json"]),
         ".cxx": ("Android native build", "next Gradle build", false, ["build.gradle", "build.gradle.kts"]),
         "dist": ("Distribution output", "next build (may be a release you want to keep)", true, ["package.json", "pyproject.toml"]),
-        ".venv": ("Python virtualenv", "re-create + pip install (custom installs are lost)", true, ["pyproject.toml", "requirements.txt"]),
-        "venv": ("Python virtualenv", "re-create + pip install (custom installs are lost)", true, ["pyproject.toml", "requirements.txt"]),
+        ".venv": ("Python virtualenv", "re-create + pip install (custom installs are lost)", true, pythonMarkers),
+        "venv": ("Python virtualenv", "re-create + pip install (custom installs are lost)", true, pythonMarkers),
+        "__pycache__": ("Python bytecode", "the next run", false, pythonMarkers),
+        ".pytest_cache": ("pytest cache", "the next test run", false, pythonMarkers),
+        ".mypy_cache": ("mypy cache", "the next type check", false, pythonMarkers),
+        ".ruff_cache": ("Ruff cache", "the next lint", false, pythonMarkers),
+        ".tox": ("tox environments", "tox", false, pythonMarkers),
+        ".nox": ("nox environments", "nox", false, pythonMarkers.union(["noxfile.py"])),
+        "bin": (".NET build output", "dotnet build", false, ["*.csproj", "*.fsproj"]),
+        "obj": (".NET intermediate files", "dotnet build", false, ["*.csproj", "*.fsproj"]),
+        "_build": ("Elixir build output", "mix compile", false, ["mix.exs"]),
+        "deps": ("Elixir dependencies", "mix deps.get", false, ["mix.exs"]),
+        ".elixir_ls": ("ElixirLS cache", "your editor", false, ["mix.exs"]),
+        ".terraform": ("Terraform providers and modules", "terraform init", false, ["*.tf"]),
+        ".stack-work": ("Haskell Stack build", "stack build", false, ["stack.yaml"]),
+        "dist-newstyle": ("Cabal build output", "cabal build", false, ["*.cabal", "cabal.project"]),
+        ".zig-cache": ("Zig cache", "zig build", false, ["build.zig"]),
+        "zig-cache": ("Zig cache", "zig build", false, ["build.zig"]),
+        "zig-out": ("Zig build output", "zig build", true, ["build.zig"]),
+        "elm-stuff": ("Elm packages and build", "elm make", false, ["elm.json"]),
+        ".kotlin": ("Kotlin build cache", "next Gradle build", false, gradleMarkers),
+        "vendor": ("Composer packages", "composer install (some projects commit this folder)", true, ["composer.json"]),
+        "Carthage": ("Carthage checkouts and builds", "carthage bootstrap", false, ["Cartfile"]),
     ]
 
     static let skipDirs: Set<String> = [".git", ".svn", ".hg", ".idea", ".vscode", "Library"]
@@ -86,7 +117,8 @@ enum ProjectEngine {
         func walk(_ dir: URL, depth: Int, owner: String?) {
             guard depth <= 7, !ProtectedPaths.isInsideProtected(dir) else { return }
             let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
-            let nameSet = Set(names)
+            var nameSet = Set(names)
+            for ext in extensionMarkers where names.contains(where: { $0.hasSuffix("." + ext) }) { nameSet.insert("*." + ext) }
             let markersHere = markers.filter { nameSet.contains($0.0) }
             var currentOwner = owner
             if !markersHere.isEmpty && owner == nil {
@@ -276,6 +308,7 @@ final class ProjectsModel {
         let items = selectedPairs
         guard !items.isEmpty else { return }
         phase = .cleaning
+        let freeBefore = Scanner.freeBytes()
         let r = await Task.detached(priority: .userInitiated) {
             ProjectEngine.clean(items) { p in Task { @MainActor [weak self] in self?.current = p } }
         }.value
@@ -283,10 +316,11 @@ final class ProjectsModel {
         for i in projects.indices { projects[i].artifacts.removeAll { gone.contains($0.id) } }
         projects.removeAll { $0.artifacts.isEmpty }
         selected.subtract(gone)
-        HistoryStore.shared.add("Project Build Files Cleaned", bytes: r.bytes, symbol: "hammer")
+        HistoryStore.shared.add("Project Build Files Cleaned", bytes: r.bytes, symbol: "hammer",
+                                outcome: .deleted, measuredFreeChange: max(0, Scanner.freeBytes() - freeBefore))
         message = r.errors.isEmpty
-            ? ("Freed \(ByteText.string(r.bytes)) from \(Set(items.map(\.1.id)).count) project(s). Rebuild or reinstall packages when you open them again.", false)
-            : ("Freed \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
+            ? ("Deleted \(ByteText.string(r.bytes)) of build files from \(Set(items.map(\.1.id)).count) project(s). Rebuild or reinstall packages when you open them again.", false)
+            : ("Deleted \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
         phase = .done
     }
 }

@@ -3,12 +3,15 @@ import Observation
 
 /// One removable SDK component: a simulator runtime, a DeviceSupport folder, an Android system image, a Docker group…
 struct SDKItem: Identifiable, Sendable, Hashable {
-    enum Group: String, CaseIterable, Sendable { case xcode = "Xcode", android = "Android", docker = "Docker" }
+    enum Group: String, CaseIterable, Sendable {
+        case xcode = "Xcode", android = "Android", languages = "Languages", homebrew = "Homebrew", docker = "Docker"
+    }
     enum Action: Sendable, Hashable {
         case simRuntime(String)     // xcrun simctl runtime delete <uuid>
         case delete([URL])          // permanent; regenerable (re-download / re-copy)
         case trash(URL)             // not regenerable (Xcode archives)
         case docker(String)         // images | containers | volumes | build
+        case brew([String])         // brew uninstall <name> | brew uninstall --cask <token> | brew cleanup
     }
 
     let id: String
@@ -30,6 +33,7 @@ struct SDKItem: Identifiable, Sendable, Hashable {
         switch action {
         case .delete(let us): return us.contains { ProtectedPaths.isBlocked($0) }
         case .trash(let u): return ProtectedPaths.isBlocked(u)
+        case .brew: return reveal.map { ProtectedPaths.isBlocked($0) } ?? false
         default: return false
         }
     }
@@ -47,12 +51,16 @@ struct AndroidUsage: Sendable {
     var flutterCompileSdk: String?
     var flutterNdk: String?
     var timedOut = false
+    /// Language versions projects ask for (.nvmrc, .python-version, .ruby-version, rust-toolchain, .tool-versions,
+    /// .sdkmanrc): tool ("node", "python", "ruby", "rust", "java") → version → project count.
+    var runtimes: [String: [String: Int]] = [:]
 }
 
 struct SDKScan: Sendable {
     var items: [SDKItem] = []
     var usage = AndroidUsage()
     var dockerStatus: String?           // nil = running; otherwise why there's nothing to show
+    var brewStatus: String?             // nil = Homebrew found; otherwise why there's nothing to show
 }
 
 /// Synchronous, shared by the window and the MCP server. Call off the main thread.
@@ -66,6 +74,10 @@ enum SDKEngine {
         out.usage = androidUsage(roots: roots)
         out.items += xcode()
         out.items += android(out.usage)
+        out.items += languages(out.usage)
+        let b = homebrew()
+        out.items += b.items
+        out.brewStatus = b.status
         let d = docker()
         out.items += d.items
         out.dockerStatus = d.status
@@ -166,7 +178,7 @@ enum SDKEngine {
             }
             avds.append(SDKItem(id: avd.path, group: .android, kind: "Emulators", name: display,
                                 detail: "Emulator with its saved state and data", size: Scanner.allocatedSize(avd),
-                                reveal: avd, action: .delete([avd, ini]),
+                                reveal: avd, action: .delete([avd, ini]), review: true,
                                 regen: "Device Manager in Android Studio (its data is lost)"))
         }
 
@@ -240,10 +252,22 @@ enum SDKEngine {
             ]
             for root in roots where !ProtectedPaths.isInsideProtected(root) {
                 guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
-                                            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+                                            options: [.skipsPackageDescendants]) else { continue }
                 for case let u as URL in e {
                     let name = u.lastPathComponent
                     if e.level > 7 || skip.contains(name) { e.skipDescendants(); continue }
+                    if name.hasPrefix(".") && (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                        e.skipDescendants(); continue
+                    }
+                    if versionFiles.contains(name) {
+                        if let text = try? String(contentsOf: u, encoding: .utf8) {
+                            let found = runtimeVersions(file: name, text: text)
+                            box.mutate { use in
+                                for (tool, v) in found { use.runtimes[tool, default: [:]][v, default: 0] += 1 }
+                            }
+                        }
+                        continue
+                    }
                     guard name == "build.gradle" || name == "build.gradle.kts" else { continue }
                     guard let text = try? String(contentsOf: u, encoding: .utf8) else { continue }
                     box.mutate { use in
@@ -347,11 +371,17 @@ enum SDKEngine {
             return nil
         case .trash(let u): return TrashGuard.reason(u)
         case .docker(let k): return dockerPrune[k] == nil ? "Unknown Docker group" : (dockerPath == nil ? "Docker isn't installed" : nil)
+        case .brew(let args):
+            if brewPath == nil { return "Homebrew isn't installed" }
+            if !brewArgsValid(args) { return "Not an allowed Homebrew command" }
+            if let r = item.reveal, let why = ProtectedPaths.reason(r) { return why }
+            return nil
         }
     }
 
-    static func remove(_ items: [SDKItem], progress: (String) -> Void = { _ in }) -> (bytes: Int64, errors: [String]) {
-        var bytes: Int64 = 0
+    /// `bytes` = everything removed; `trashed` = the part that went to the Trash (archives).
+    static func remove(_ items: [SDKItem], progress: (String) -> Void = { _ in }) -> (bytes: Int64, trashed: Int64, errors: [String]) {
+        var bytes: Int64 = 0, trashed: Int64 = 0
         var errors: [String] = []
         for item in items {
             progress(item.name)
@@ -379,10 +409,22 @@ enum SDKEngine {
             case .docker(let k):
                 let r = Shell.run(dockerPath!, dockerPrune[k]!, timeout: 600)
                 if r.status != 0 { ok = false; errors.append("\(item.name): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "docker failed")") }
+            case .brew(let args):
+                // brew refuses to remove a formula other formulae still need (we never pass --ignore-dependencies).
+                let r = runBrew(args, timeout: 600)
+                if r.status != 0 {
+                    ok = false
+                    let msg = r.output?.split(separator: "\n").first { $0.contains("Error") }.map(String.init)
+                        ?? r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "brew failed"
+                    errors.append("\(item.name): \(msg)")
+                }
             }
-            if ok { bytes += item.size }
+            if ok {
+                bytes += item.size
+                if case .trash = item.action { trashed += item.size }
+            }
         }
-        return (bytes, errors)
+        return (bytes, trashed, errors)
     }
 
     // MARK: Helpers
@@ -455,14 +497,15 @@ final class SDKModel {
         let list = chosen
         guard !list.isEmpty else { return }
         phase = .removing
-        let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, errors: [String]) in
+        let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, trashed: Int64, errors: [String]) in
             SDKEngine.remove(list) { name in Task { @MainActor [weak self] in self?.current = name } }
         }.value
-        HistoryStore.shared.add("Developer SDKs Removed", bytes: r.bytes, symbol: "shippingbox")
+        HistoryStore.shared.add("Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
+        HistoryStore.shared.add("Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)
         message = r.errors.isEmpty
-            ? ("Freed \(ByteText.string(r.bytes)) from \(list.count) item(s)."
+            ? ("Removed \(ByteText.string(r.bytes)) in \(list.count) item(s)."
                + (list.contains { if case .trash = $0.action { return true }; return false } ? " Archives went to the Trash." : ""), false)
-            : ("Freed \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
+            : ("Removed \(ByteText.string(r.bytes)). \(r.errors.count) problem(s): \(r.errors.prefix(2).joined(separator: "; "))", true)
         selected = []
         await load()
     }

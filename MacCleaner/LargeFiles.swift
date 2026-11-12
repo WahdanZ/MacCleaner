@@ -147,7 +147,7 @@ final class LargeFilesModel {
             }
         }
         marked = []
-        HistoryStore.shared.add("Large & Old Files Removed", bytes: bytes, symbol: "folder")
+        HistoryStore.shared.add("Large & Old Files Moved to Trash", bytes: bytes, symbol: "folder", outcome: .trashed)
         message = errors.isEmpty
             ? ("Moved \(ByteText.string(bytes)) to the Trash. Empty the Trash to free it.", false)
             : ("Moved \(ByteText.string(bytes)). \(errors.count) problem(s): \(errors.prefix(2).joined(separator: "; "))", true)
@@ -157,29 +157,36 @@ final class LargeFilesModel {
 
 struct LargeFilesView: View {
     @Environment(LargeFilesModel.self) private var m
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         @Bindable var m = m
         VStack(spacing: 14) {
             HStack(spacing: 12) {
+                // Filters scroll sideways in narrow windows instead of widening the window.
+                ScrollView(.horizontal) {
+                HStack(spacing: 12) {
                 Picker("", selection: $m.filter) { ForEach(LargeFilesModel.Filter.allCases) { Text($0.rawValue).tag($0) } }
-                    .pickerStyle(.segmented).labelsHidden().frame(width: 220)
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
                 Picker("Large from", selection: $m.minLargeMB) {
                     Text("50 MB").tag(50); Text("100 MB").tag(100); Text("500 MB").tag(500); Text("1 GB").tag(1000)
                 }
-                .frame(width: 170)
+                .fixedSize()
                 Picker("Old after", selection: $m.oldMonths) {
                     Text("6 months").tag(6); Text("1 year").tag(12); Text("2 years").tag(24)
                 }
-                .frame(width: 170)
+                .fixedSize()
                 Picker("Sort", selection: $m.sort) { ForEach(LargeFilesModel.Sort.allCases) { Text($0.rawValue).tag($0) } }
-                    .frame(width: 150)
-                Spacer()
+                    .fixedSize()
+                }
+                }
+                .scrollIndicators(.never)
+                Spacer(minLength: Space.s)
                 if m.phase == .scanning {
-                    Button("Cancel") { m.cancel() }.buttonStyle(GhostButtonStyle())
+                    Button("Cancel") { m.cancel() }.buttonStyle(.bordered)
                 } else {
                     Button { m.scan() } label: { Label(m.phase == .idle ? "Scan" : "Rescan", systemImage: "magnifyingglass") }
-                        .buttonStyle(AccentButtonStyle())
+                        .buttonStyle(.borderedProminent)
                 }
             }
 
@@ -216,20 +223,12 @@ struct LargeFilesView: View {
                         .font(.system(size: 12)).foregroundStyle(Palette.dim)
                 }
                 Spacer()
-                Button { m.confirming = true } label: {
+                Button { review.present(ReviewBuild.largeFiles(m) { Task { await m.trashMarked() } }) } label: {
                     Label(m.marked.isEmpty ? "Move to Trash" : "Move \(ByteText.string(m.markedBytes)) to Trash", systemImage: "trash")
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .disabled(m.marked.isEmpty || m.phase != .done)
             }
-        }
-        .alert("Move \(m.marked.count) file(s) to the Trash?", isPresented: $m.confirming) {
-            Button("Move to Trash", role: .destructive) { Task { await m.trashMarked() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(m.markedFiles.prefix(12).map { "• \(Scanner.tilde($0.url)) — \(ByteText.string($0.size))" }.joined(separator: "\n")
-                 + (m.marked.count > 12 ? "\n• …and \(m.marked.count - 12) more" : "")
-                 + "\n\nYou can put them back from the Trash.")
         }
     }
 }

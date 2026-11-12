@@ -181,6 +181,50 @@ enum SelfTest {
         check("reads compileSdk from Groovy and Kotlin Gradle files", use.platforms["35"] == 1 && use.platforms["36"] == 1)
         check("reads ndkVersion and buildToolsVersion", use.ndk["27.0.1"] == 1 && use.buildTools["34.0.0"] == 1)
 
+        print("More developer tools")
+        check("allows Cargo registry contents", SafetyGuard.isAllowed(h(".cargo/registry/cache/x")))
+        check("allows the Go module cache", SafetyGuard.isAllowed(h("go/pkg/mod/github.com/x")))
+        check("refuses ~/.cargo/bin (installed tools)", !SafetyGuard.isAllowed(h(".cargo/bin/rg")))
+        check("allows one nvm Node version", SafetyGuard.isAllowed(h(".nvm/versions/node/v18.0.0")))
+        check("refuses the nvm versions folder itself", !SafetyGuard.isAllowed(h(".nvm/versions/node")))
+        check("refuses pyenv shims", !SafetyGuard.isAllowed(h(".pyenv/shims")))
+        check("brew: allows uninstall, cask uninstall and cleanup only",
+              SDKEngine.brewArgsValid(["uninstall", "wget"]) && SDKEngine.brewArgsValid(["uninstall", "--cask", "some-app"])
+              && SDKEngine.brewArgsValid(["cleanup"]) && SDKEngine.brewArgsValid(["uninstall", "user/tap/tool"]))
+        check("brew: refuses other commands, flags and shell text",
+              !SDKEngine.brewArgsValid(["install", "x"]) && !SDKEngine.brewArgsValid(["uninstall", "--force", "x"])
+              && !SDKEngine.brewArgsValid(["uninstall", "x; rm -rf ~"]) && !SDKEngine.brewArgsValid(["cleanup", "--prune=all"])
+              && !SDKEngine.brewArgsValid(["uninstall", "--ignore-dependencies"]))
+        check("version files are read (.nvmrc, .tool-versions, rust-toolchain.toml)",
+              SDKEngine.runtimeVersions(file: ".nvmrc", text: "v18\n").first! == ("node", "18")
+              && SDKEngine.runtimeVersions(file: ".tool-versions", text: "nodejs 20.1.0\npython 3.11.6").count == 2
+              && SDKEngine.runtimeVersions(file: "rust-toolchain.toml", text: "[toolchain]\nchannel = \"1.75.0\"").first! == ("rust", "1.75.0"))
+        check("versions match by prefix (18 → 18.19.0, not 1)",
+              SDKEngine.versionMatches("v18.19.0", "18") && !SDKEngine.versionMatches("18.19.0", "1"))
+        let py = sandbox.appendingPathComponent("pyproj"), dn = sandbox.appendingPathComponent("dotnet")
+        for d in [py.appendingPathComponent("__pycache__"), py.appendingPathComponent(".pytest_cache"),
+                  dn.appendingPathComponent("bin"), dn.appendingPathComponent("obj"), proj.appendingPathComponent("bin")] {
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("f").path, contents: Data(repeating: 1, count: 4000))
+        }
+        fm.createFile(atPath: py.appendingPathComponent("pyproject.toml").path, contents: Data("[x]".utf8))
+        fm.createFile(atPath: dn.appendingPathComponent("App.csproj").path, contents: Data("<Project/>".utf8))
+        let more = ProjectEngine.scan(roots: [sandbox]) { _ in }
+        check("finds Python __pycache__ and .pytest_cache",
+              Set(more.first { $0.name == "pyproj" }?.artifacts.map(\.rel) ?? []) == ["__pycache__", ".pytest_cache"])
+        check(".NET project found by *.csproj, with bin and obj",
+              Set(more.first { $0.name == "dotnet" }?.artifacts.map(\.rel) ?? []) == ["bin", "obj"])
+        check("bin in a Node project is not touched", more.first { $0.name == "proj" }?.artifacts.contains { $0.rel == "bin" } != true)
+        let ro = cacheItem.appendingPathComponent("readonly/inner")
+        try? fm.createDirectory(at: ro, withIntermediateDirectories: true)
+        fm.createFile(atPath: ro.appendingPathComponent("f").path, contents: Data("x".utf8))
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: ro.path)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: ro.deletingLastPathComponent().path)
+        let roTarget = CleanTarget(id: "ro", category: .devCache, name: "read-only", path: ro.path, note: "",
+                                   action: .removeItem(ro.deletingLastPathComponent()), sizeBytes: 1, exists: true)
+        check("read-only cache folders (like Go modules) can be removed", Cleaner.run([roTarget]).isEmpty
+              && !fm.fileExists(atPath: ro.deletingLastPathComponent().path))
+
         print("System Data")
         let att = h("Library/Messages/Attachments")
         check("a single Messages attachment may be trashed", TrashGuard.canTrash(att.appendingPathComponent("ab/01/GUID/photo.heic")))
@@ -209,6 +253,28 @@ enum SelfTest {
         ProtectedPaths.set(savedProtected + [cacheItem.path])
         check("skips protected caches", AutoClean.select([target("ok", .devCache, cacheItem)]).isEmpty)
         ProtectedPaths.set(savedProtected)
+
+        print("Settings migration (old app ID)")
+        let oldName = "maccleaner.selftest.old", newName = "maccleaner.selftest.new"
+        UserDefaults.standard.setPersistentDomain([ProtectedPaths.key: ["/a/keep", "/b/keep"], "appearance": "dark",
+                                                   "NSWindow Frame x": "1"], forName: oldName)
+        UserDefaults.standard.removePersistentDomain(forName: newName)
+        if let target = UserDefaults(suiteName: newName) {
+            target.set(["/c/mine"], forKey: ProtectedPaths.key)
+            target.set("light", forKey: "appearance")
+            SettingsMigration.migrate(fromDomain: oldName, to: target)
+            check("protected paths are merged, none dropped",
+                  Set(target.stringArray(forKey: ProtectedPaths.key) ?? []) == ["/a/keep", "/b/keep", "/c/mine"])
+            check("settings already set under the new ID win", target.string(forKey: "appearance") == "light")
+            check("system window keys are not copied", target.object(forKey: "NSWindow Frame x") == nil)
+            target.removeObject(forKey: ProtectedPaths.key)
+            check("runs only once", SettingsMigration.migrate(fromDomain: oldName, to: target) == 0
+                  && target.stringArray(forKey: ProtectedPaths.key) == nil)
+        } else {
+            check("test settings domain available", false)
+        }
+        UserDefaults.standard.removePersistentDomain(forName: oldName)
+        UserDefaults.standard.removePersistentDomain(forName: newName)
 
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }

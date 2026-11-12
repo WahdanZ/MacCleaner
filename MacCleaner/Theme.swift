@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Design tokens ("Quiet Utility")
+//
+// System semantic colours, system text styles and native controls first. Custom values live here only,
+// so screens never hard-code colours, sizes or animation curves.
+
 extension Color {
     init(hex: UInt32, alpha: Double = 1) {
         self.init(.sRGB,
@@ -21,210 +26,206 @@ extension Color {
     }
 }
 
+/// Semantic colours. Everything maps to macOS system colours, so the app follows the user's accent colour,
+/// light/dark mode and Increase Contrast automatically.
 enum Palette {
-    /// Main text / ink colour (near-black in light, white in dark). Also used with opacity for fills.
-    static let fg = Color.adaptive(light: 0x1D1D1F, dark: 0xFFFFFF)
-    static let dim = Color.adaptive(light: 0x1D1D1F, dark: 0xFFFFFF, lightAlpha: 0.62, darkAlpha: 0.62)
-    static let faint = Color.adaptive(light: 0x1D1D1F, dark: 0xFFFFFF, lightAlpha: 0.42, darkAlpha: 0.4)
+    static let fg = Color.primary
+    static let dim = Color.secondary
+    static let faint = Color(nsColor: .tertiaryLabelColor)
 
-    static let windowTop = Color.adaptive(light: 0xF3F6FB, dark: 0x1B1D21)
-    static let windowBottom = Color.adaptive(light: 0xE8EEF8, dark: 0x141518)
-    static let bgBottom = Color.adaptive(light: 0xF3F6FB, dark: 0x1B1D21)
-    static let sidebar = Color.adaptive(light: 0xFFFFFF, dark: 0xFFFFFF, lightAlpha: 0.45, darkAlpha: 0.035)
-    /// Card surface.
-    static let panel = Color.adaptive(light: 0xFFFFFF, dark: 0xFFFFFF, lightAlpha: 0.78, darkAlpha: 0.055)
-    static let stroke = Color.adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.07, darkAlpha: 0.09)
-    static let selection = Color.adaptive(light: 0x0A84FF, dark: 0x0A84FF, lightAlpha: 0.16, darkAlpha: 0.28)
+    static let windowTop = Color(nsColor: .windowBackgroundColor)
+    static let windowBottom = Color(nsColor: .windowBackgroundColor)
+    static let bgBottom = Color(nsColor: .windowBackgroundColor)
+    static let sidebar = Color.clear
+    /// Content card surface: white on the light window, a lifted grey on the dark one (like System Settings groups).
+    static let panel = Color(nsColor: NSColor(name: nil) { ap in
+        ap.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor.white.withAlphaComponent(0.065)
+            : NSColor.controlBackgroundColor
+    })
+    /// Inner tile / well inside a card.
+    static let tile = Color(nsColor: NSColor(name: nil) { ap in
+        ap.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor.white.withAlphaComponent(0.06)
+            : NSColor.black.withAlphaComponent(0.04)
+    })
+    static let stroke = Color(nsColor: .separatorColor)
+    static let selection = Color.accentColor.opacity(0.16)
 
-    static let accent = Color.adaptive(light: 0x0A6CFF, dark: 0x3B9BFF)
-    static let accent2 = Color.adaptive(light: 0x3E9BFF, dark: 0x64B5FF)
-    static let success = Color.adaptive(light: 0x22A54A, dark: 0x34C759)
-    static let warn = Color.adaptive(light: 0xE07A12, dark: 0xFF9F0A)
-    static let danger = Color.adaptive(light: 0xE5383B, dark: 0xFF5A6E)
+    static let accent = Color.accentColor
+    static let accent2 = Color.accentColor
+    static let success = Color(nsColor: .systemGreen)
+    static let warn = Color(nsColor: .systemOrange)
+    static let danger = Color(nsColor: .systemRed)
 
-    // Storage colours (donut)
-    static let apps = Color(hex: 0x1A7CFF)
-    static let documents = Color(hex: 0xA25BF0)
-    static let library = Color(hex: 0xF0559C)
-    static let other = Color(hex: 0xF7B731)
-    static let available = Color.adaptive(light: 0xD5DAE3, dark: 0x3A3D44)
+    // Data colours (storage bar, categories). System colours keep them legible in both appearances.
+    static let apps = Color(nsColor: .systemBlue)
+    static let documents = Color(nsColor: .systemPurple)
+    static let library = Color(nsColor: .systemPink)
+    static let other = Color(nsColor: .systemYellow)
+    static let available = Color(nsColor: .quaternaryLabelColor)
+}
+
+/// Spacing scale (points).
+enum Space {
+    static let xxs: CGFloat = 2
+    static let xs: CGFloat = 4
+    static let s: CGFloat = 8
+    static let m: CGFloat = 12
+    static let l: CGFloat = 16
+    static let xl: CGFloat = 20
+    static let xxl: CGFloat = 28
+}
+
+/// Corner radii. Nested shapes are concentric: inner radius = outer radius − the padding between them.
+enum Radius {
+    static let small: CGFloat = 6
+    static let medium: CGFloat = 10
+    static let large: CGFloat = 12
+    /// Dashboard and content cards.
+    static let card: CGFloat = 22
+    /// Padding inside a card.
+    static let cardPadding: CGFloat = 16
+    /// Tiles and wells placed inside a card's padding.
+    static let inner: CGFloat = card - cardPadding + 4
+}
+
+/// Text roles built on system text styles (they scale with the system text size).
+extension Font {
+    static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .monospaced)
+    }
+    /// Big number on a summary (free space, total selected).
+    static let figure = Font.system(.largeTitle, design: .rounded).weight(.semibold)
+    static let sectionTitle = Font.headline
+    static let rowTitle = Font.body.weight(.medium)
+    static let rowDetail = Font.callout
+    static let meta = Font.caption
+}
+
+/// Animation roles. Every one returns nil under Reduce Motion.
+enum Motion {
+    static func standard(_ reduce: Bool) -> Animation? { reduce ? nil : .snappy(duration: 0.25) }
+    static func quick(_ reduce: Bool) -> Animation? { reduce ? nil : .easeOut(duration: 0.15) }
 }
 
 extension CacheCategory {
     var color: Color {
         switch self {
-        case .xcode: return Color(hex: 0x3A8DFF)
-        case .android: return Color(hex: 0x7DC42F)
-        case .packages: return Color(hex: 0xF5A623)
-        case .editors: return Color(hex: 0xEC4899)
-        case .devCache: return Color(hex: 0x8B5CF6)
-        case .appCaches: return Color(hex: 0x14B8C8)
-        case .webCaches: return Color(hex: 0xF43F5E)
-        case .logs: return Color(hex: 0x8A94A6)
-        case .trash: return Color(hex: 0xF97316)
+        case .xcode: return Color(nsColor: .systemBlue)
+        case .android: return Color(nsColor: .systemGreen)
+        case .packages: return Color(nsColor: .systemOrange)
+        case .editors: return Color(nsColor: .systemPink)
+        case .devCache: return Color(nsColor: .systemPurple)
+        case .appCaches: return Color(nsColor: .systemTeal)
+        case .webCaches: return Color(nsColor: .systemRed)
+        case .logs: return Color(nsColor: .systemGray)
+        case .trash: return Color(nsColor: .systemBrown)
         }
-    }
-}
-
-extension Font {
-    static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
     }
 }
 
 // MARK: - Surfaces
 
+/// Window background (plain system colour, no gradient).
 struct AppBackground: View {
-    var body: some View {
-        LinearGradient(colors: [Palette.windowTop, Palette.windowBottom], startPoint: .top, endPoint: .bottom)
-            .ignoresSafeArea()
-    }
+    var body: some View { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
 }
 
 /// Kept for older call sites.
 typealias GridBackground = AppBackground
 
 extension View {
-    /// Card: soft surface, hairline border, light shadow.
-    func panel(radius: CGFloat = 18) -> some View {
-        self
-            .background(Palette.panel, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Palette.stroke))
-            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .shadow(color: .black.opacity(0.05), radius: 10, y: 3)
+    /// Content card: readable solid surface, continuous corners, hairline edge. No shadow.
+    func panel(radius: CGFloat = Radius.card) -> some View {
+        let r = min(max(radius, Radius.large), Radius.card)
+        return self
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: r, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: r, style: .continuous).strokeBorder(Palette.stroke, lineWidth: 0.5))
+            .clipShape(RoundedRectangle(cornerRadius: r, style: .continuous))
     }
-}
 
-// MARK: - Buttons
-
-struct AccentButtonStyle: ButtonStyle {
-    var large = false
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: large ? 16 : 13, weight: .semibold))
-            .foregroundStyle(isEnabled ? Color.white : Palette.faint)
-            .padding(.horizontal, large ? 26 : 16)
-            .padding(.vertical, large ? 13 : 8)
-            .background {
-                Capsule().fill(isEnabled
-                               ? AnyShapeStyle(LinearGradient(colors: [Palette.accent2, Palette.accent],
-                                                              startPoint: .top, endPoint: .bottom))
-                               : AnyShapeStyle(Palette.fg.opacity(0.08)))
-            }
-            .shadow(color: isEnabled ? Palette.accent.opacity(configuration.isPressed ? 0.15 : 0.3) : .clear,
-                    radius: 8, y: 3)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.spring(duration: 0.2), value: configuration.isPressed)
-    }
-}
-
-/// Wide primary action ("Clean 12.4 GB").
-struct WideAccentButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(isEnabled ? Color.white : Palette.faint)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 13)
-            .background {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isEnabled
-                          ? AnyShapeStyle(LinearGradient(colors: [Palette.accent2, Palette.accent],
-                                                         startPoint: .top, endPoint: .bottom))
-                          : AnyShapeStyle(Palette.fg.opacity(0.08)))
-            }
-            .shadow(color: isEnabled ? Palette.accent.opacity(0.28) : .clear, radius: 10, y: 4)
-            .scaleEffect(configuration.isPressed ? 0.99 : 1)
-    }
-}
-
-struct GhostButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(isEnabled ? Palette.fg : Palette.faint)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Palette.fg.opacity(configuration.isPressed ? 0.12 : 0.06), in: Capsule())
-            .overlay(Capsule().strokeBorder(Palette.stroke))
-    }
-}
-
-struct CircleIconButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 17, weight: .medium))
-            .foregroundStyle(Palette.fg)
-            .frame(width: 40, height: 40)
-            .background(Palette.panel, in: Circle())
-            .overlay(Circle().strokeBorder(Palette.stroke))
-            .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
-            .scaleEffect(configuration.isPressed ? 0.95 : 1)
+    /// Floating control surface: Liquid Glass on macOS 26, a regular material before that.
+    /// Used only for controls that float over content (action bars), never for content cards.
+    @ViewBuilder func floatingBar(radius: CGFloat = Radius.large) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26, *) {
+            self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        } else {
+            self.background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Palette.stroke, lineWidth: 0.5))
+        }
+        #else
+        self.background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Palette.stroke, lineWidth: 0.5))
+        #endif
     }
 }
 
 // MARK: - Small parts
 
+/// Checkbox drawn like the system one. It reports its state to VoiceOver, so a button that contains it
+/// reads as "Selected, <item>, <size>".
 struct CheckSquare: View {
     let on: Bool
     let color: Color
     var mixed = false
+    @Environment(\.isEnabled) private var enabled
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(on ? color : mixed ? color.opacity(0.35) : .clear)
-            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .strokeBorder(on || mixed ? color : Palette.fg.opacity(0.28), lineWidth: 1.5))
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(on || mixed ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
+            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder(on || mixed ? Color.clear : Color(nsColor: .tertiaryLabelColor), lineWidth: 1))
             .overlay {
                 if on || mixed {
                     Image(systemName: on ? "checkmark" : "minus")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.white)
                 }
             }
-            .frame(width: 18, height: 18)
-            .animation(.easeOut(duration: 0.12), value: on)
+            .frame(width: 14, height: 14)
+            .opacity(enabled ? 1 : 0.45)
+            .accessibilityElement()
+            .accessibilityLabel(on ? "Selected" : mixed ? "Partly selected" : "Not selected")
     }
 }
 
 struct ReviewTag: View {
     var body: some View {
         Text("REVIEW")
-            .font(.mono(8.5, .bold))
-            .padding(.horizontal, 5).padding(.vertical, 1.5)
-            .background(Palette.warn.opacity(0.16), in: Capsule())
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Palette.warn.opacity(0.15), in: Capsule())
             .foregroundStyle(Palette.warn)
+            .accessibilityLabel("Needs review")
     }
 }
 
-/// Rounded tinted icon tile, as in the Overview mockup.
+/// Symbol on a softly tinted rounded square.
 struct IconTile: View {
     let symbol: String
     let color: Color
-    var size: CGFloat = 40
+    var size: CGFloat = 32
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(color.opacity(0.13))
-            .overlay(Image(systemName: symbol).font(.system(size: size * 0.45, weight: .medium)).foregroundStyle(color))
+        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+            .fill(color.opacity(0.14))
+            .overlay(Image(systemName: symbol).font(.system(size: size * 0.46, weight: .medium)).foregroundStyle(color))
             .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }
 
-/// Page title + subtitle used at the top of every section.
+/// Title + subtitle (used by sheets; pages use the window toolbar title instead).
 struct PageHeader: View {
     let title: String
     let subtitle: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 34, weight: .bold))
-            Text(subtitle).font(.system(size: 15)).foregroundStyle(Palette.dim)
+        VStack(alignment: .leading, spacing: Space.xs) {
+            Text(title).font(.title.bold())
+            Text(subtitle).font(.callout).foregroundStyle(Palette.dim)
         }
     }
 }

@@ -64,7 +64,7 @@ enum CLI {
             if p.flag("all") { return ["__all_projects": true] }
             guard !p.positional.isEmpty else { throw UsageError(description: "Pass --all or project/artifact ids from `mac-cleaner projects`.") }
             return ["project_ids": p.positional, "artifact_ids": p.positional] },
-        Command(name: "sdks", usage: "sdks [--group Xcode|Android|Docker]", help: "Simulator runtimes, Android SDK parts, Docker data.", tool: "list_sdks") { p in
+        Command(name: "sdks", usage: "sdks [--group Xcode|Android|Languages|Homebrew|Docker]", help: "Simulators, Android SDK, language versions, Homebrew, Docker.", tool: "list_sdks") { p in
             p.flags["group"].map { ["group": $0] } ?? [:] },
         Command(name: "remove-sdks", usage: "remove-sdks ID…", help: "Remove SDK items by id. Previews first.", tool: "remove_sdks", destructive: true) { p in
             ["ids": try many(p, "ids from `mac-cleaner sdks`")] },

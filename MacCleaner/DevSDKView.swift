@@ -3,23 +3,30 @@ import SwiftUI
 
 struct DevSDKView: View {
     @Environment(SDKModel.self) private var m
+    @Environment(ReviewCenter.self) private var review
 
     var body: some View {
         @Bindable var m = m
         VStack(spacing: 14) {
             HStack(spacing: 12) {
-                ForEach([nil] + SDKItem.Group.allCases.map(Optional.some), id: \.self) { g in
-                    GroupChip(group: g, bytes: m.total(g), selected: m.filter == g) {
-                        withAnimation(.snappy) { m.filter = g }
+                ScrollView(.horizontal) {
+                    HStack(spacing: Space.s) {
+                        ForEach([nil] + SDKItem.Group.allCases.map(Optional.some), id: \.self) { g in
+                            GroupChip(group: g, bytes: m.total(g), selected: m.filter == g) {
+                                withAnimation(.snappy) { m.filter = g }
+                            }
+                            .accessibilityAddTraits(m.filter == g ? .isSelected : [])
+                        }
                     }
                 }
-                Spacer()
+                .scrollIndicators(.never)
+                Spacer(minLength: Space.s)
                 if m.phase == .done {
-                    Button("Select unused") { m.selectUnused() }.buttonStyle(GhostButtonStyle())
-                    Button("None") { m.selected = [] }.buttonStyle(GhostButtonStyle()).disabled(m.selected.isEmpty)
+                    Button("Select unused") { m.selectUnused() }.buttonStyle(.bordered)
+                    Button("None") { m.selected = [] }.buttonStyle(.bordered).disabled(m.selected.isEmpty)
                 }
                 Button { Task { await m.load() } } label: { Label(m.phase == .idle ? "Scan" : "Rescan", systemImage: "arrow.clockwise") }
-                    .buttonStyle(AccentButtonStyle())
+                    .buttonStyle(.borderedProminent)
                     .disabled(m.phase == .scanning || m.phase == .removing)
             }
 
@@ -55,6 +62,10 @@ struct DevSDKView: View {
                                 if m.filter != .docker, m.filter != .xcode, let note = usageNote {
                                     Text(note).font(.system(size: 11)).foregroundStyle(Palette.faint).padding(.horizontal, 12).padding(.top, 6)
                                 }
+                                if m.filter == nil || m.filter == .homebrew, let s = m.scan.brewStatus {
+                                    Label(s, systemImage: "mug").font(.system(size: 12)).foregroundStyle(Palette.dim)
+                                        .padding(.horizontal, 12).padding(.top, 10)
+                                }
                                 if m.filter == nil || m.filter == .docker, let s = m.scan.dockerStatus {
                                     Label(s, systemImage: "shippingbox").font(.system(size: 12)).foregroundStyle(Palette.dim)
                                         .padding(.horizontal, 12).padding(.top, 10)
@@ -73,23 +84,17 @@ struct DevSDKView: View {
                 Text("Runtimes, images and SDK parts are deleted permanently: they can be downloaded again. Xcode archives go to the Trash.")
                     .font(.system(size: 11)).foregroundStyle(Palette.faint)
                 Spacer()
-                Button { m.confirming = true } label: {
+                Button { review.present(ReviewBuild.sdks(m) { Task { await m.remove() } }) } label: {
                     Label(m.selected.isEmpty ? "Remove" : "Remove \(ByteText.string(m.selectedBytes))", systemImage: "trash")
                         .contentTransition(.numericText())
                 }
-                .buttonStyle(AccentButtonStyle())
+                .buttonStyle(.borderedProminent)
                 .disabled(m.selected.isEmpty || m.phase != .done)
                 .animation(.snappy, value: m.selectedBytes)
             }
         }
         .animation(.snappy, value: m.message?.text)
         .task { if m.phase == .idle { await m.load() } }
-        .alert("Remove \(m.chosen.count) item(s), \(ByteText.string(m.selectedBytes))?", isPresented: $m.confirming) {
-            Button("Remove", role: .destructive) { Task { await m.remove() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(summary)
-        }
     }
 
     private var sections: [(String, [SDKItem])] {
@@ -151,6 +156,8 @@ private struct GroupChip: View {
         case .xcode: return "hammer"
         case .android: return "iphone.gen3"
         case .docker: return "shippingbox"
+        case .languages: return "chevron.left.forwardslash.chevron.right"
+        case .homebrew: return "mug"
         case nil: return "square.stack.3d.up"
         }
     }
@@ -212,6 +219,10 @@ private struct SDKRow: View {
         .contentShape(Rectangle())
         .onTapGesture { withAnimation(.snappy(duration: 0.18)) { m.toggle(item) } }
         .onHover { hover = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(item.isProtected ? "Protected" : on ? "Selected" : "Not selected")
+        .accessibilityAction { m.toggle(item) }
         .help(SDKEngine.reason(item) ?? item.reveal?.path ?? item.name)
     }
 
@@ -225,7 +236,11 @@ private struct SDKRow: View {
         case "NDK": return "cpu"
         case "Build tools": return "wrench.and.screwdriver"
         case "Emulators": return "iphone.gen3"
-        default: return "shippingbox"
+        case "Homebrew formulae": return "terminal"
+        case "Homebrew apps (casks)": return "app.badge"
+        case "Homebrew cleanup": return "clock.arrow.circlepath"
+        case "Java JDKs": return "cup.and.saucer"
+        default: return item.group == .languages ? "chevron.left.forwardslash.chevron.right" : "shippingbox"
         }
     }
 
@@ -234,6 +249,8 @@ private struct SDKRow: View {
         case .xcode: return Color(hex: 0x3A8DFF)
         case .android: return Color(hex: 0x7DC42F)
         case .docker: return Color(hex: 0x1D9BF0)
+        case .languages: return Color(nsColor: .systemPurple)
+        case .homebrew: return Color(nsColor: .systemOrange)
         }
     }
 }

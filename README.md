@@ -108,9 +108,20 @@ A short welcome tour explains everything on first launch.
 
 The **Insights** card on the Overview shows how much space you reclaimed each week (deleted vs moved to the Trash), how your free space has changed over the last weeks with a forecast of when it reaches your alert level, and which kinds of junk take the most space. Mac Cleaner notes your free space once a day to draw the trend; only the numbers are kept, on your Mac.
 
-In **Settings › Automation**:
-- **Low-disk alert:** the menu bar icon turns orange, then red, and you get a notification when free space drops below your limit (20 GB by default). The menu bar menu also shows the free-space forecast, for example "Reaches 20 GB in about 6 weeks".
-- **Weekly safe clean** (off by default): clears recommended caches only. It never touches the Trash, your Downloads, your folders or anything protected. It also leaves crash reports, model caches in `~/.cache` (only simple tool caches like pip or yarn are cleared) and the caches of apps that are running.
+### From the menu bar
+
+Click the Mac Cleaner icon at the top of the screen for a small panel:
+- **Free space** with a usage bar and the forecast, for example "Reaches 20 GB in about 6 weeks".
+- **Clean Now:** runs the safe clean (below) after you confirm, and shows what it's cleaning while it runs.
+- **Last clean, next clean and total deleted**, plus your 3 latest cleanups.
+- **Open Mac Cleaner**, Open at Login, Check for Updates and Quit.
+
+Optional: show the free space or the last clean next to the icon (*Settings › General › Next to the menu bar icon*).
+
+### Settings › Automation
+
+- **Low-disk alert:** the menu bar icon turns orange, then red, and you get a notification when free space drops below your limit (20 GB by default). Free space is checked every 5 minutes.
+- **Scheduled safe clean** (off by default): every day or every week, at a day and time you pick. If your Mac was asleep or off at that time, it runs soon after it wakes, and never twice for the same scheduled time. Turning it on doesn't start a clean right away; it waits for the time you picked. It clears recommended caches only and never touches the Trash, your Downloads, your folders or anything protected. It also leaves crash reports, model caches in `~/.cache` (only simple tool caches like pip or yarn are cleared) and the caches of apps that are running.
 - **Open at login** (in *Settings › General*), so the checks keep running from the menu bar.
 
 ---

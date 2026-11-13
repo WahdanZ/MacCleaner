@@ -568,6 +568,161 @@ enum SelfTest {
         let old = MCPServer.issuePreview("clean_caches", "plan", now: Date().addingTimeInterval(-MCPServer.previewLifetime - 1))
         check("an expired preview_id is refused", (try? MCPServer.approve("clean_caches", "plan", ["preview_id": old])) == nil)
 
+        print("MCP: the person approves in Mac Cleaner's own window, for the exact files (SAFE-03)")
+        let hA = sandbox.appendingPathComponent("mcp-human.txt")
+        fm.createFile(atPath: hA.path, contents: Data("h".utf8))
+        approvals.asked = []; approvals.answer = false
+        let hPreview = (try? MCPServer.call("move_to_trash", ["paths": [hA.path]])) as? [String: Any]
+        let hID = hPreview?["preview_id"] as? String ?? ""
+        let declined = (try? MCPServer.call("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
+        check("an AI confirm the person declines in Mac Cleaner's window changes nothing",
+              declined && fm.fileExists(atPath: hA.path) && approvals.asked.count == 1)
+        check("the window lists exactly the previewed item, with Mac Cleaner's own wording",
+              approvals.asked.first?.verb == "Move to Trash"
+              && approvals.asked.first?.lines.contains { $0.contains("mcp-human.txt") } == true)
+        check("a declined preview can't be confirmed again",
+              (try? MCPServer.call("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
+              && fm.fileExists(atPath: hA.path))
+        // A path that doesn't exist: the call goes through (and is skipped) without touching the real Trash.
+        let ghost = sandbox.appendingPathComponent("mcp-ghost.txt").path
+        approvals.asked = []; approvals.answer = true
+        let gID = ((try? MCPServer.call("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        check("an AI confirm the person approves goes ahead",
+              (try? MCPServer.call("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": gID])) != nil
+              && approvals.asked.count == 1)
+        approvals.asked = []; approvals.answer = false
+        let tID = ((try? MCPServer.call("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        check("a CLI confirm (the person said yes at the terminal) needs no second window",
+              (try? MCPServer.call("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": tID], approval: .terminal)) != nil
+              && approvals.asked.isEmpty)
+        // Same path, different file: replaced (new inode) or edited (size/time) between preview and confirm.
+        approvals.asked = []; approvals.answer = true
+        let hR = sandbox.appendingPathComponent("mcp-replaced.txt")
+        fm.createFile(atPath: hR.path, contents: Data("v1".utf8))
+        let rID = ((try? MCPServer.call("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        try? fm.removeItem(at: hR)
+        fm.createFile(atPath: hR.path, contents: Data("v2".utf8))
+        check("a file replaced at the same path after the preview is refused before anyone is asked",
+              (try? MCPServer.call("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": rID])) == nil
+              && (try? String(contentsOf: hR, encoding: .utf8)) == "v2" && approvals.asked.isEmpty)
+        let eID = ((try? MCPServer.call("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        if let fh = try? FileHandle(forWritingTo: hR) { fh.seekToEndOfFile(); fh.write(Data("more".utf8)); try? fh.close() }
+        check("a file edited after the preview is refused",
+              (try? MCPServer.call("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": eID])) == nil
+              && fm.fileExists(atPath: hR.path) && approvals.asked.isEmpty)
+        let idDir = sandbox.appendingPathComponent("mcp-dir")
+        try? fm.createDirectory(at: idDir, withIntermediateDirectories: true)
+        let dirBefore = MCPServer.identity(idDir.path)
+        fm.createFile(atPath: idDir.appendingPathComponent("new.txt").path, contents: Data("x".utf8))
+        check("a folder keeps its identity when files inside change (its contents are re-checked when run)",
+              MCPServer.identity(idDir.path) == dirBefore && dirBefore != MCPServer.identity(hR.path)
+              && MCPServer.identity(sandbox.appendingPathComponent("nope").path).hasSuffix("|missing"))
+        // The real window is never shown off the main thread (or without a screen): it answers no.
+        var offMain = true
+        let done = DispatchSemaphore(value: 0)
+        Thread {
+            offMain = HumanApproval.askWithDialog(ApprovalRequest(tool: "move_to_trash", verb: "Move to Trash", lines: []))
+            done.signal()
+        }.start()
+        done.wait()
+        check("the confirmation window answers no when it can't be shown (not on the main thread)", !offMain)
+
+        print("MCP empty_trash deletes exactly the reviewed items (SAFE-03)")
+        let fakeTrash = sandbox.appendingPathComponent("fake-trash")
+        try? fm.createDirectory(at: fakeTrash, withIntermediateDirectories: true)
+        let tA = fakeTrash.appendingPathComponent("a.txt"), tB = fakeTrash.appendingPathComponent("b.txt")
+        let tLink = fakeTrash.appendingPathComponent("link"), tOut = sandbox.appendingPathComponent("trash-outside.txt")
+        let tElsewhere = sandbox.appendingPathComponent("not-in-trash.txt")
+        for f in [tA, tB, tOut, tElsewhere] { fm.createFile(atPath: f.path, contents: Data("x".utf8)) }
+        try? fm.createSymbolicLink(at: tLink, withDestinationURL: tOut)
+        let reviewed = [tA, tB, tLink, tElsewhere].map { TrashOps.snapshot($0.path) }
+        try? fm.removeItem(at: tB); fm.createFile(atPath: tB.path, contents: Data("new".utf8))     // replaced after review
+        let tLate = fakeTrash.appendingPathComponent("late.txt")
+        fm.createFile(atPath: tLate.path, contents: Data("late".utf8))                             // added after review
+        let del = TrashOps.deleteApproved(reviewed, trashFolders: [fakeTrash.path])
+        check("only reviewed, unchanged items directly in a Trash folder are deleted",
+              del.deleted.sorted() == [tA.path, tLink.path].sorted() && !fm.fileExists(atPath: tA.path))
+        check("a replaced item, an item added later and a path outside the Trash all stay",
+              (try? String(contentsOf: tB, encoding: .utf8)) == "new" && fm.fileExists(atPath: tLate.path)
+              && fm.fileExists(atPath: tElsewhere.path) && del.kept.count == 2)
+        check("a link in the Trash is deleted as a link; its target stays", fm.fileExists(atPath: tOut.path))
+        // A folder in the Trash: approved with exactly its contents.
+        func trashFolder(_ name: String) -> URL {
+            let d = fakeTrash.appendingPathComponent(name)
+            try? fm.createDirectory(at: d.appendingPathComponent("sub"), withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("a.txt").path, contents: Data("a".utf8))
+            fm.createFile(atPath: d.appendingPathComponent("sub/b.txt").path, contents: Data("b".utf8))
+            return d
+        }
+        let fNew = trashFolder("folder-added")
+        let fNewSnap = TrashOps.snapshot(fNew.path)
+        fm.createFile(atPath: fNew.appendingPathComponent("sub/new.txt").path, contents: Data("new".utf8))
+        let rNew = TrashOps.deleteApproved([fNewSnap], trashFolders: [fakeTrash.path])
+        check("a Trash folder with a file added inside after the review is kept whole",
+              rNew.deleted.isEmpty && rNew.kept.count == 1 && fm.fileExists(atPath: fNew.appendingPathComponent("a.txt").path)
+              && fm.fileExists(atPath: fNew.appendingPathComponent("sub/new.txt").path))
+        check("…and its preview digest differs, so an MCP confirm would be refused", TrashOps.snapshot(fNew.path).digest != fNewSnap.digest)
+        // Files added inside while it is being deleted: only reviewed entries go; the new files and their folders stay.
+        let fRace = trashFolder("folder-race")
+        let rRace = TrashOps.deleteApproved([TrashOps.snapshot(fRace.path)], trashFolders: [fakeTrash.path]) { p in
+            fm.createFile(atPath: URL(fileURLWithPath: p).appendingPathComponent("sub/late.txt").path, contents: Data("late".utf8))
+        }
+        check("files added inside during the delete stay, with their folders; the result says 'partly deleted'",
+              rRace.deleted.isEmpty && rRace.partial.count == 1
+              && fm.fileExists(atPath: fRace.appendingPathComponent("sub/late.txt").path)
+              && !fm.fileExists(atPath: fRace.appendingPathComponent("sub/b.txt").path))
+        let fWhole = trashFolder("folder-whole")
+        try? fm.createSymbolicLink(at: fWhole.appendingPathComponent("sub/link"), withDestinationURL: tOut)
+        let rWhole = TrashOps.deleteApproved([TrashOps.snapshot(fWhole.path)], trashFolders: [fakeTrash.path])
+        check("an unchanged Trash folder is deleted completely; a link inside is removed, its target stays",
+              rWhole.deleted == [fWhole.path] && !fm.fileExists(atPath: fWhole.path) && fm.fileExists(atPath: tOut.path))
+        let fLocked = trashFolder("folder-unreadable")
+        chmod(fLocked.appendingPathComponent("sub").path, 0)
+        let lockedSnap = TrashOps.snapshot(fLocked.path)
+        let rLocked = TrashOps.deleteApproved([lockedSnap], trashFolders: [fakeTrash.path])
+        chmod(fLocked.appendingPathComponent("sub").path, 0o755)
+        check("a Trash folder with an unreadable part is never deleted", lockedSnap.entries == nil && rLocked.deleted.isEmpty
+              && fm.fileExists(atPath: fLocked.appendingPathComponent("sub/b.txt").path))
+        let lockedTrash = sandbox.appendingPathComponent("locked-trash")
+        try? fm.createDirectory(at: lockedTrash, withIntermediateDirectories: true)
+        chmod(lockedTrash.path, 0)
+        let listing = TrashOps.listAll(in: [fakeTrash, lockedTrash])
+        chmod(lockedTrash.path, 0o755)
+        check("a Trash folder that can't be read is reported, never treated as empty",
+              listing.unreadable == [lockedTrash.path] && listing.items.contains(tLate.path))
+        // Volumes: one with a Trash, one without, one whose Trash can't be checked.
+        let volA = sandbox.appendingPathComponent("vol-a"), volB = sandbox.appendingPathComponent("vol-b"),
+            volC = sandbox.appendingPathComponent("vol-c")
+        try? fm.createDirectory(at: volA.appendingPathComponent(".Trashes/\(getuid())"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: volB, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: volC.appendingPathComponent(".Trashes/\(getuid())"), withIntermediateDirectories: true)
+        chmod(volC.appendingPathComponent(".Trashes").path, 0)
+        let cover = TrashOps.locationsReport(volumes: [volA, volB, volC])
+        chmod(volC.appendingPathComponent(".Trashes").path, 0o755)
+        check("Trash discovery: a volume's Trash is found; no Trash is fine; one that can't be checked is reported",
+              cover.folders.map(\.path) == [TrashOps.trashURL.path, volA.appendingPathComponent(".Trashes/\(getuid())").path]
+              && cover.problems.count == 1 && cover.problems[0].hasPrefix(volC.path))
+        check("Trash folders include the home Trash", TrashOps.locations().first == TrashOps.trashURL)
+        if ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] != nil {
+            // Only in a throwaway home: fill its Trash with 600 items and check the person's window lists all of them.
+            let homeTrash = TrashOps.trashURL
+            try? fm.createDirectory(at: homeTrash, withIntermediateDirectories: true)
+            let many = (0..<600).map { homeTrash.appendingPathComponent(String(format: "selftest-%03d.txt", $0)) }
+            for f in many { fm.createFile(atPath: f.path, contents: Data("t".utf8)) }
+            approvals.asked = []; approvals.answer = false
+            let tp = (try? MCPServer.call("empty_trash", [:])) as? [String: Any]
+            _ = try? MCPServer.call("empty_trash", ["confirm": true, "preview_id": tp?["preview_id"] as? String ?? ""])
+            let shownLines = approvals.asked.first?.lines ?? []
+            check("a large Trash: the JSON lists 500 and says how many more; the window lists every item",
+                  (tp?["listed"] as? [String])?.count == 500 && (tp?["listed_more"] as? Int).map { $0 >= 100 } == true
+                  && many.allSatisfy { f in shownLines.contains { $0.contains(f.lastPathComponent) } })
+            check("declined: nothing was deleted from the Trash", many.allSatisfy { fm.fileExists(atPath: $0.path) })
+            many.forEach { try? fm.removeItem(at: $0) }
+        } else {
+            print("  – skipped (needs a throwaway home): large Trash listing in the approval window")
+        }
+        approvals.asked = []; approvals.answer = true
+
         print("Audit fixes: Shredder")
         func shredDir(_ name: String, file: String = "f.txt", text: String = "secret") -> (URL, URL) {
             let d = sandbox.appendingPathComponent(name), f = d.appendingPathComponent(file)

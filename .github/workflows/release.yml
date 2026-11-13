@@ -83,23 +83,19 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          set -o pipefail
-          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
+          scripts/xcbuild.sh \
             MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
             CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
             ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_ENTITLEMENTS=MacCleaner/MacCleaner.entitlements \
-            OTHER_CODE_SIGN_FLAGS="--timestamp --keychain $KEYCHAIN" build | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' || true
-          grep -q 'BUILD SUCCEEDED' build.log
+            OTHER_CODE_SIGN_FLAGS="--timestamp --keychain $KEYCHAIN"
           codesign --verify --strict --deep "$APP"
 
       - name: Build (ad-hoc signed, TEST BUILD only)
         if: env.HAS_SIGNING != 'true' && github.ref_type != 'tag'
         run: |
-          set -o pipefail
-          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
+          scripts/xcbuild.sh \
             MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            CODE_SIGN_IDENTITY=- build | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' || true
-          grep -q 'BUILD SUCCEEDED' build.log
+            CODE_SIGN_IDENTITY=-
           codesign --force --deep --sign - "$APP"
 
       - name: Safety self-test

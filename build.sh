@@ -2,8 +2,8 @@
 # Build → self-test → ad-hoc sign → install to /Applications.
 set -e -o pipefail
 cd "$(dirname "$0")"
-xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release CODE_SIGN_IDENTITY=- build \
-  | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' | sort -u
+swift test --package-path Packages/MacCleanerKit 2>&1 | tail -1
+scripts/xcbuild.sh CODE_SIGN_IDENTITY=-
 APP="build/Release/Mac Cleaner.app"
 echo "--- self-test"
 scripts/selftest.sh "$APP"

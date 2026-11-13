@@ -63,3 +63,9 @@ with the Xcode 16+ toolchains on CI and locally). The library is a static produc
 so the bundle, signature and CLI/MCP entry points are unchanged. The app keeps `SafetyGuard`, `TrashGuard` and
 `ProtectedPaths` as thin wrappers that resolve paths on the Mac and call the pure rules (`PermanentDeleteRules`,
 `TrashRules`, `UserProtection`), so no call site changed.
+
+**Build:** the app is built with `-target`, where each project gets its own build folder; the local package's
+module then isn't visible to the app ("no such module 'MacCleanerCore'" on a fresh checkout, Xcode 16.4 on CI and
+26.3 locally). Every command-line build goes through `scripts/xcbuild.sh`, which sets one absolute `SYMROOT` for
+both. `scripts/clean-build-check.sh` builds and tests the committed HEAD in a brand-new worktree, the way CI does.
+Building in the Xcode app (scheme/workspace build) is unaffected.

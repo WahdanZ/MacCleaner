@@ -30,12 +30,13 @@ jobs:
       - name: Core tests (Swift 6 package)
         run: swift test --package-path Packages/MacCleanerKit
 
-      - name: Build (Release, ad-hoc signed)
+      # A fresh checkout: nothing built or resolved before this step (the check below proves it).
+      - name: Build (Release, ad-hoc signed, from a clean checkout)
         run: |
-          set -o pipefail
-          xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
-            CODE_SIGN_IDENTITY=- build | tee build.log | grep -E 'error:|warning:|BUILD (SUCCEEDED|FAILED)' || true
-          grep -q 'BUILD SUCCEEDED' build.log
+          test ! -e build && test ! -e Packages/MacCleanerKit/build || { echo "::error::build output already present"; exit 1; }
+          scripts/xcbuild.sh CODE_SIGN_IDENTITY=-
+          test -x "$APP/Contents/MacOS/Mac Cleaner"
+          N=$(nm -U "$APP/Contents/MacOS/Mac Cleaner" | grep -c MacCleanerCore || true); [ "$N" -gt 0 ] || { echo "::error::MacCleanerCore is not linked into the app"; exit 1; }; echo "MacCleanerCore linked ($N symbols)"
 
       - name: Safety self-test (throwaway home folder)
         run: scripts/selftest.sh "$APP"

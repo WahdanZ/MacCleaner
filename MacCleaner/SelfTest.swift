@@ -585,6 +585,52 @@ enum SelfTest {
         }.start()
         done.wait()
         check("the confirmation window answers no when it can't be shown (not on the main thread)", !offMain)
+
+        print("MCP empty_trash deletes exactly the reviewed items (SAFE-03)")
+        let fakeTrash = sandbox.appendingPathComponent("fake-trash")
+        try? fm.createDirectory(at: fakeTrash, withIntermediateDirectories: true)
+        let tA = fakeTrash.appendingPathComponent("a.txt"), tB = fakeTrash.appendingPathComponent("b.txt")
+        let tLink = fakeTrash.appendingPathComponent("link"), tOut = sandbox.appendingPathComponent("trash-outside.txt")
+        let tElsewhere = sandbox.appendingPathComponent("not-in-trash.txt")
+        for f in [tA, tB, tOut, tElsewhere] { fm.createFile(atPath: f.path, contents: Data("x".utf8)) }
+        try? fm.createSymbolicLink(at: tLink, withDestinationURL: tOut)
+        let reviewed = [tA, tB, tLink, tElsewhere].map { (path: $0.path, identity: MCPServer.identity($0.path)) }
+        try? fm.removeItem(at: tB); fm.createFile(atPath: tB.path, contents: Data("new".utf8))     // replaced after review
+        let tLate = fakeTrash.appendingPathComponent("late.txt")
+        fm.createFile(atPath: tLate.path, contents: Data("late".utf8))                             // added after review
+        let del = TrashOps.deleteApproved(reviewed, trashFolders: [fakeTrash.path])
+        check("only reviewed, unchanged items directly in a Trash folder are deleted",
+              del.deleted.sorted() == [tA.path, tLink.path].sorted() && !fm.fileExists(atPath: tA.path))
+        check("a replaced item, an item added later and a path outside the Trash all stay",
+              (try? String(contentsOf: tB, encoding: .utf8)) == "new" && fm.fileExists(atPath: tLate.path)
+              && fm.fileExists(atPath: tElsewhere.path) && del.kept.count == 2)
+        check("a link in the Trash is deleted as a link; its target stays", fm.fileExists(atPath: tOut.path))
+        let lockedTrash = sandbox.appendingPathComponent("locked-trash")
+        try? fm.createDirectory(at: lockedTrash, withIntermediateDirectories: true)
+        chmod(lockedTrash.path, 0)
+        let listing = TrashOps.listAll(in: [fakeTrash, lockedTrash])
+        chmod(lockedTrash.path, 0o755)
+        check("a Trash folder that can't be read is reported, never treated as empty",
+              listing.unreadable == [lockedTrash.path] && listing.items.contains(tLate.path))
+        check("Trash folders include the home Trash", TrashOps.locations().first == TrashOps.trashURL)
+        if ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] != nil {
+            // Only in a throwaway home: fill its Trash with 600 items and check the person's window lists all of them.
+            let homeTrash = TrashOps.trashURL
+            try? fm.createDirectory(at: homeTrash, withIntermediateDirectories: true)
+            let many = (0..<600).map { homeTrash.appendingPathComponent(String(format: "selftest-%03d.txt", $0)) }
+            for f in many { fm.createFile(atPath: f.path, contents: Data("t".utf8)) }
+            approvals.asked = []; approvals.answer = false
+            let tp = (try? MCPServer.call("empty_trash", [:])) as? [String: Any]
+            _ = try? MCPServer.call("empty_trash", ["confirm": true, "preview_id": tp?["preview_id"] as? String ?? ""])
+            let shownLines = approvals.asked.first?.lines ?? []
+            check("a large Trash: the JSON lists 500 and says how many more; the window lists every item",
+                  (tp?["listed"] as? [String])?.count == 500 && (tp?["listed_more"] as? Int).map { $0 >= 100 } == true
+                  && many.allSatisfy { f in shownLines.contains { $0.contains(f.lastPathComponent) } })
+            check("declined: nothing was deleted from the Trash", many.allSatisfy { fm.fileExists(atPath: $0.path) })
+            many.forEach { try? fm.removeItem(at: $0) }
+        } else {
+            print("  – skipped (needs a throwaway home): large Trash listing in the approval window")
+        }
         approvals.asked = []; approvals.answer = true
 
         print("Audit fixes: Shredder")

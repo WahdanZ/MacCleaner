@@ -475,26 +475,42 @@ enum MCPServer {
                                                            "restorable": $0.restorable] as [String: Any] }]
 
         case "empty_trash":
-            let st = TrashOps.status(useFinder: true)
-            // The Trash must hold exactly what the user was shown: the same items (by file identity), not
-            // just the same count and size. If its contents can't be listed exactly, nothing is emptied.
-            guard let listed = TrashOps.exactPaths(useFinder: true) else {
-                throw ToolError(description: "Mac Cleaner can't list exactly what is in the Trash (it needs Full Disk Access, or Finder didn't answer), so it won't empty it. Empty it in Finder instead.")
+            // Not Finder's "Empty Trash" (which empties every Trash folder, including ones Mac Cleaner can't list
+            // and items added after the preview): Mac Cleaner deletes exactly the listed items itself, each
+            // re-checked by identity. Trash folders it can't read are named and left alone.
+            let folders = TrashOps.locations()
+            let found = TrashOps.listAll(in: folders)
+            let unreadable = found.unreadable.map { Scanner.tilde(URL(fileURLWithPath: $0)) }
+            guard !found.items.isEmpty else {
+                if unreadable.isEmpty { return ["message": "The Trash is empty."] }
+                throw ToolError(description: "Mac Cleaner can't read \(unreadable.joined(separator: ", ")) (it needs Full Disk Access), so it won't empty the Trash. Empty it in Finder instead.")
             }
-            let digest = plan(listed.map(identity))
+            let approved = found.items.map { (path: $0, identity: identity($0)) }
+            let digest = plan(approved.map(\.identity))
+            let sizes = Dictionary(found.items.map { ($0, Scanner.allocatedSize(URL(fileURLWithPath: $0))) }, uniquingKeysWith: { a, _ in a })
+            let total = sizes.values.reduce(0, +)
             if !confirm {
-                return withPreview(name, digest, ["preview": true, "total": st.totalBytes.map(size) ?? "unknown", "items": listed.count,
-                        "listed": listed.prefix(500).map { Scanner.tilde(URL(fileURLWithPath: $0)) },
-                        "warning": "Permanently deletes everything in the Trash, including items other apps put there.",
-                        "next": "Tell the user the size and the warning. Only after an explicit yes, call empty_trash with confirm: true and the preview_id."])
+                let shown = 500
+                let notice = "Permanently deletes exactly these \(found.items.count) items (including ones other apps put in the Trash). Anything added to the Trash after this preview stays."
+                    + (unreadable.isEmpty ? "" : " These Trash folders can't be read and are left alone: \(unreadable.joined(separator: ", ")).")
+                var lines = found.items.map { "• " + Scanner.tilde(URL(fileURLWithPath: $0)) + "  (\(size(sizes[$0] ?? 0)))" }
+                lines.append("Total: \(found.items.count) items, \(size(total))")
+                lines.append("Note: " + notice)
+                return withPreview(name, digest, ["preview": true, "total": size(total), "items": found.items.count,
+                        "listed": found.items.prefix(shown).map { Scanner.tilde(URL(fileURLWithPath: $0)) },
+                        "listed_more": max(0, found.items.count - shown),
+                        "not_readable": unreadable,
+                        "warning": notice,
+                        "next": "Tell the user the number of items, the size and the warning. Only after an explicit yes, call empty_trash with confirm: true and the preview_id. Mac Cleaner's window shows the person every item."],
+                        lines: lines)
             }
             try approve(name, digest, a, approval)
             let before = Scanner.freeBytes()
-            if let e = TrashOps.empty() { throw ToolError(description: e) }
+            let r = TrashOps.deleteApproved(approved, trashFolders: folders.map(\.path))
             let measured = max(0, Scanner.freeBytes() - before)
-            HistoryStore.add(title: "Trash Emptied", bytes: st.totalBytes ?? measured, symbol: "trash.slash",
-                             outcome: .deleted, measuredFreeChange: measured)
-            return ["emptied": true, "trash_size_before": st.totalBytes.map(size) ?? "unknown",
+            let bytes = r.deleted.reduce(Int64(0)) { $0 + (sizes[$1] ?? 0) }
+            HistoryStore.add(title: "Trash Emptied", bytes: bytes, symbol: "trash.slash", outcome: .deleted, measuredFreeChange: measured)
+            return ["deleted": r.deleted.count, "deleted_size": size(bytes), "kept": r.kept, "not_readable": unreadable,
                     "free_space_change_measured": size(measured)]
 
         case "restore_from_trash":
@@ -654,9 +670,12 @@ enum MCPServer {
         return lines
     }
 
-    private static func withPreview(_ tool: String, _ digest: String, _ result: [String: Any]) -> [String: Any] {
+    /// `lines` replaces the window's list when the JSON result shows only part of it (e.g. a huge Trash):
+    /// the person always sees every item.
+    private static func withPreview(_ tool: String, _ digest: String, _ result: [String: Any],
+                                    lines: [String]? = nil) -> [String: Any] {
         var r = result
-        let request = ApprovalRequest(tool: tool, verb: verb(for: tool), lines: approvalLines(result))
+        let request = ApprovalRequest(tool: tool, verb: verb(for: tool), lines: lines ?? approvalLines(result))
         r["preview_id"] = issuePreview(tool, digest, request: request)
         r["approval"] = "When you confirm, Mac Cleaner shows the person this list in its own window. Nothing happens unless they approve there."
         return r

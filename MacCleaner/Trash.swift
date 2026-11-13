@@ -94,13 +94,53 @@ enum TrashOps {
     }
 
     /// POSIX paths of everything in your Trash, via Finder (nil if Finder access was denied).
-    /// Every item in the Trash by path: read directly (needs Full Disk Access) or asked from Finder.
-    /// nil when neither works, so callers never act on a guess.
-    static func exactPaths(useFinder: Bool) -> [String]? {
-        if let kids = try? FileManager.default.contentsOfDirectory(at: trashURL, includingPropertiesForKeys: nil) {
-            return kids.filter { $0.lastPathComponent != ".DS_Store" }.map(\.path).sorted()
+    /// Every Trash folder of this user: the home Trash and, on each other mounted volume, .Trashes/<uid>.
+    /// (Finder's "Empty Trash" empties all of them.)
+    static func locations() -> [URL] {
+        var out = [trashURL]
+        let vols = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
+        for v in vols where v.path != "/" && !v.path.hasPrefix("/System/Volumes") {
+            let t = v.appendingPathComponent(".Trashes/\(getuid())")
+            var st = stat()
+            if lstat(t.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR { out.append(t) }
         }
-        return useFinder ? finderTrashPaths()?.sorted() : nil
+        return out
+    }
+
+    /// The items directly inside these Trash folders, and the folders that couldn't be read (never treated
+    /// as empty).
+    static func listAll(in folders: [URL] = locations()) -> (items: [String], unreadable: [String]) {
+        var items: [String] = [], unreadable: [String] = []
+        for f in folders {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: f.path) else {
+                unreadable.append(f.path); continue
+            }
+            items += names.filter { $0 != ".DS_Store" }.map { f.appendingPathComponent($0).path }
+        }
+        return (items.sorted(), unreadable)
+    }
+
+    /// Permanently deletes exactly the approved Trash items, nothing else. Each must sit directly in one of
+    /// `trashFolders`, not be protected, and still be the same file system object as when it was reviewed
+    /// (`MCPServer.identity`). Anything else in the Trash — added later, replaced, or unreadable — stays.
+    /// Links are deleted as links.
+    static func deleteApproved(_ approved: [(path: String, identity: String)], trashFolders: [String])
+        -> (deleted: [String], kept: [String]) {
+        SizeCache.clear(); defer { SizeCache.clear() }
+        let folders = Set(trashFolders.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+        var deleted: [String] = [], kept: [String] = []
+        for (path, planned) in approved {
+            let u = URL(fileURLWithPath: path)
+            let name = u.lastPathComponent
+            guard folders.contains(u.deletingLastPathComponent().standardizedFileURL.path) else {
+                kept.append("\(name): not directly in a Trash folder"); continue
+            }
+            if let why = ProtectedPaths.reason(u) { kept.append("\(name): \(why)"); continue }
+            guard MCPServer.identity(path) == planned else { kept.append("\(name): changed since the preview"); continue }
+            do { try FileManager.default.removeItem(atPath: path); deleted.append(path) }
+            catch { kept.append("\(name): \(error.localizedDescription)") }
+        }
+        return (deleted, kept)
     }
 
     static func finderTrashPaths() -> [String]? {

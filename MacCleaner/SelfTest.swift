@@ -594,7 +594,7 @@ enum SelfTest {
         let tElsewhere = sandbox.appendingPathComponent("not-in-trash.txt")
         for f in [tA, tB, tOut, tElsewhere] { fm.createFile(atPath: f.path, contents: Data("x".utf8)) }
         try? fm.createSymbolicLink(at: tLink, withDestinationURL: tOut)
-        let reviewed = [tA, tB, tLink, tElsewhere].map { (path: $0.path, identity: MCPServer.identity($0.path)) }
+        let reviewed = [tA, tB, tLink, tElsewhere].map { TrashOps.snapshot($0.path) }
         try? fm.removeItem(at: tB); fm.createFile(atPath: tB.path, contents: Data("new".utf8))     // replaced after review
         let tLate = fakeTrash.appendingPathComponent("late.txt")
         fm.createFile(atPath: tLate.path, contents: Data("late".utf8))                             // added after review
@@ -605,6 +605,43 @@ enum SelfTest {
               (try? String(contentsOf: tB, encoding: .utf8)) == "new" && fm.fileExists(atPath: tLate.path)
               && fm.fileExists(atPath: tElsewhere.path) && del.kept.count == 2)
         check("a link in the Trash is deleted as a link; its target stays", fm.fileExists(atPath: tOut.path))
+        // A folder in the Trash: approved with exactly its contents.
+        func trashFolder(_ name: String) -> URL {
+            let d = fakeTrash.appendingPathComponent(name)
+            try? fm.createDirectory(at: d.appendingPathComponent("sub"), withIntermediateDirectories: true)
+            fm.createFile(atPath: d.appendingPathComponent("a.txt").path, contents: Data("a".utf8))
+            fm.createFile(atPath: d.appendingPathComponent("sub/b.txt").path, contents: Data("b".utf8))
+            return d
+        }
+        let fNew = trashFolder("folder-added")
+        let fNewSnap = TrashOps.snapshot(fNew.path)
+        fm.createFile(atPath: fNew.appendingPathComponent("sub/new.txt").path, contents: Data("new".utf8))
+        let rNew = TrashOps.deleteApproved([fNewSnap], trashFolders: [fakeTrash.path])
+        check("a Trash folder with a file added inside after the review is kept whole",
+              rNew.deleted.isEmpty && rNew.kept.count == 1 && fm.fileExists(atPath: fNew.appendingPathComponent("a.txt").path)
+              && fm.fileExists(atPath: fNew.appendingPathComponent("sub/new.txt").path))
+        check("…and its preview digest differs, so an MCP confirm would be refused", TrashOps.snapshot(fNew.path).digest != fNewSnap.digest)
+        // Files added inside while it is being deleted: only reviewed entries go; the new files and their folders stay.
+        let fRace = trashFolder("folder-race")
+        let rRace = TrashOps.deleteApproved([TrashOps.snapshot(fRace.path)], trashFolders: [fakeTrash.path]) { p in
+            fm.createFile(atPath: URL(fileURLWithPath: p).appendingPathComponent("sub/late.txt").path, contents: Data("late".utf8))
+        }
+        check("files added inside during the delete stay, with their folders; the result says 'partly deleted'",
+              rRace.deleted.isEmpty && rRace.partial.count == 1
+              && fm.fileExists(atPath: fRace.appendingPathComponent("sub/late.txt").path)
+              && !fm.fileExists(atPath: fRace.appendingPathComponent("sub/b.txt").path))
+        let fWhole = trashFolder("folder-whole")
+        try? fm.createSymbolicLink(at: fWhole.appendingPathComponent("sub/link"), withDestinationURL: tOut)
+        let rWhole = TrashOps.deleteApproved([TrashOps.snapshot(fWhole.path)], trashFolders: [fakeTrash.path])
+        check("an unchanged Trash folder is deleted completely; a link inside is removed, its target stays",
+              rWhole.deleted == [fWhole.path] && !fm.fileExists(atPath: fWhole.path) && fm.fileExists(atPath: tOut.path))
+        let fLocked = trashFolder("folder-unreadable")
+        chmod(fLocked.appendingPathComponent("sub").path, 0)
+        let lockedSnap = TrashOps.snapshot(fLocked.path)
+        let rLocked = TrashOps.deleteApproved([lockedSnap], trashFolders: [fakeTrash.path])
+        chmod(fLocked.appendingPathComponent("sub").path, 0o755)
+        check("a Trash folder with an unreadable part is never deleted", lockedSnap.entries == nil && rLocked.deleted.isEmpty
+              && fm.fileExists(atPath: fLocked.appendingPathComponent("sub/b.txt").path))
         let lockedTrash = sandbox.appendingPathComponent("locked-trash")
         try? fm.createDirectory(at: lockedTrash, withIntermediateDirectories: true)
         chmod(lockedTrash.path, 0)
@@ -612,6 +649,18 @@ enum SelfTest {
         chmod(lockedTrash.path, 0o755)
         check("a Trash folder that can't be read is reported, never treated as empty",
               listing.unreadable == [lockedTrash.path] && listing.items.contains(tLate.path))
+        // Volumes: one with a Trash, one without, one whose Trash can't be checked.
+        let volA = sandbox.appendingPathComponent("vol-a"), volB = sandbox.appendingPathComponent("vol-b"),
+            volC = sandbox.appendingPathComponent("vol-c")
+        try? fm.createDirectory(at: volA.appendingPathComponent(".Trashes/\(getuid())"), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: volB, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: volC.appendingPathComponent(".Trashes/\(getuid())"), withIntermediateDirectories: true)
+        chmod(volC.appendingPathComponent(".Trashes").path, 0)
+        let cover = TrashOps.locationsReport(volumes: [volA, volB, volC])
+        chmod(volC.appendingPathComponent(".Trashes").path, 0o755)
+        check("Trash discovery: a volume's Trash is found; no Trash is fine; one that can't be checked is reported",
+              cover.folders.map(\.path) == [TrashOps.trashURL.path, volA.appendingPathComponent(".Trashes/\(getuid())").path]
+              && cover.problems.count == 1 && cover.problems[0].hasPrefix(volC.path))
         check("Trash folders include the home Trash", TrashOps.locations().first == TrashOps.trashURL)
         if ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] != nil {
             // Only in a throwaway home: fill its Trash with 600 items and check the person's window lists all of them.

@@ -478,28 +478,38 @@ enum MCPServer {
             // Not Finder's "Empty Trash" (which empties every Trash folder, including ones Mac Cleaner can't list
             // and items added after the preview): Mac Cleaner deletes exactly the listed items itself, each
             // re-checked by identity. Trash folders it can't read are named and left alone.
-            let folders = TrashOps.locations()
+            let coverage = TrashOps.locationsReport()
+            let folders = coverage.folders
             let found = TrashOps.listAll(in: folders)
-            let unreadable = found.unreadable.map { Scanner.tilde(URL(fileURLWithPath: $0)) }
+            let unreadable = found.unreadable.map { Scanner.tilde(URL(fileURLWithPath: $0)) } + coverage.problems
             guard !found.items.isEmpty else {
                 if unreadable.isEmpty { return ["message": "The Trash is empty."] }
-                throw ToolError(description: "Mac Cleaner can't read \(unreadable.joined(separator: ", ")) (it needs Full Disk Access), so it won't empty the Trash. Empty it in Finder instead.")
+                throw ToolError(description: "Mac Cleaner can't read all of the Trash (\(unreadable.joined(separator: "; "))), and found nothing it can empty. Empty it in Finder instead.")
             }
-            let approved = found.items.map { (path: $0, identity: identity($0)) }
-            let digest = plan(approved.map(\.identity))
+            // Each item is approved with everything inside it (a folder's full contents), so the confirm is
+            // refused if anything in it changed, and nothing added later is ever deleted.
+            let approved = found.items.map(TrashOps.snapshot)
+            let digest = plan(approved.map(\.digest))
             let sizes = Dictionary(found.items.map { ($0, Scanner.allocatedSize(URL(fileURLWithPath: $0))) }, uniquingKeysWith: { a, _ in a })
             let total = sizes.values.reduce(0, +)
             if !confirm {
                 let shown = 500
                 let notice = "Permanently deletes exactly these \(found.items.count) items (including ones other apps put in the Trash). Anything added to the Trash after this preview stays."
-                    + (unreadable.isEmpty ? "" : " These Trash folders can't be read and are left alone: \(unreadable.joined(separator: ", ")).")
-                var lines = found.items.map { "• " + Scanner.tilde(URL(fileURLWithPath: $0)) + "  (\(size(sizes[$0] ?? 0)))" }
+                    + (unreadable.isEmpty ? "" : " Not covered, left alone: \(unreadable.joined(separator: "; ")).")
+                    + (approved.contains { $0.entries == nil } ? " Items marked [skipped] can't be read completely and are kept." : "")
+                var lines = approved.map { a -> String in
+                    var line = "• " + Scanner.tilde(URL(fileURLWithPath: a.path)) + "  (\(size(sizes[a.path] ?? 0))"
+                    if a.isFolder, let n = a.entries?.count { line += ", folder with \(n - 1) item\(n == 2 ? "" : "s") inside" }
+                    line += ")"
+                    if a.entries == nil { line += "  [skipped: can't read all of it]" }
+                    return line
+                }
                 lines.append("Total: \(found.items.count) items, \(size(total))")
                 lines.append("Note: " + notice)
                 return withPreview(name, digest, ["preview": true, "total": size(total), "items": found.items.count,
                         "listed": found.items.prefix(shown).map { Scanner.tilde(URL(fileURLWithPath: $0)) },
                         "listed_more": max(0, found.items.count - shown),
-                        "not_readable": unreadable,
+                        "not_covered": unreadable,
                         "warning": notice,
                         "next": "Tell the user the number of items, the size and the warning. Only after an explicit yes, call empty_trash with confirm: true and the preview_id. Mac Cleaner's window shows the person every item."],
                         lines: lines)
@@ -510,8 +520,8 @@ enum MCPServer {
             let measured = max(0, Scanner.freeBytes() - before)
             let bytes = r.deleted.reduce(Int64(0)) { $0 + (sizes[$1] ?? 0) }
             HistoryStore.add(title: "Trash Emptied", bytes: bytes, symbol: "trash.slash", outcome: .deleted, measuredFreeChange: measured)
-            return ["deleted": r.deleted.count, "deleted_size": size(bytes), "kept": r.kept, "not_readable": unreadable,
-                    "free_space_change_measured": size(measured)]
+            return ["deleted": r.deleted.count, "deleted_size": size(bytes), "kept": r.kept, "partly_deleted": r.partial,
+                    "not_covered": unreadable, "free_space_change_measured": size(measured)]
 
         case "restore_from_trash":
             let all = TrashLog.shared.present()

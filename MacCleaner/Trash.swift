@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 
@@ -95,17 +96,31 @@ enum TrashOps {
 
     /// POSIX paths of everything in your Trash, via Finder (nil if Finder access was denied).
     /// Every Trash folder of this user: the home Trash and, on each other mounted volume, .Trashes/<uid>.
-    /// (Finder's "Empty Trash" empties all of them.)
-    static func locations() -> [URL] {
-        var out = [trashURL]
-        let vols = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
-        for v in vols where v.path != "/" && !v.path.hasPrefix("/System/Volumes") {
+    /// (Finder's "Empty Trash" empties all of them.) `problems` names volumes whose Trash couldn't be checked,
+    /// so callers report incomplete coverage instead of treating those volumes as having an empty Trash.
+    static func locationsReport(volumes: [URL]? = nil) -> (folders: [URL], problems: [String]) {
+        var out = [trashURL], problems: [String] = []
+        let vols: [URL]
+        if let volumes { vols = volumes }
+        else if let mounted = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) {
+            vols = mounted.filter { $0.path != "/" && !$0.path.hasPrefix("/System/Volumes") }
+        } else {
+            return (out, ["The mounted volumes couldn't be listed, so only the home Trash was checked"])
+        }
+        for v in vols {
             let t = v.appendingPathComponent(".Trashes/\(getuid())")
             var st = stat()
-            if lstat(t.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR { out.append(t) }
+            if lstat(t.path, &st) == 0 {
+                if (st.st_mode & S_IFMT) == S_IFDIR { out.append(t) }
+                else { problems.append("\(v.path): its Trash isn't a folder") }
+            } else if errno != ENOENT {
+                problems.append("\(v.path): its Trash couldn't be checked (\(String(cString: strerror(errno))))")
+            }
         }
-        return out
+        return (out, problems)
     }
+
+    static func locations() -> [URL] { locationsReport().folders }
 
     /// The items directly inside these Trash folders, and the folders that couldn't be read (never treated
     /// as empty).
@@ -120,27 +135,102 @@ enum TrashOps {
         return (items.sorted(), unreadable)
     }
 
-    /// Permanently deletes exactly the approved Trash items, nothing else. Each must sit directly in one of
-    /// `trashFolders`, not be protected, and still be the same file system object as when it was reviewed
-    /// (`MCPServer.identity`). Anything else in the Trash — added later, replaced, or unreadable — stays.
-    /// Links are deleted as links.
-    static func deleteApproved(_ approved: [(path: String, identity: String)], trashFolders: [String])
-        -> (deleted: [String], kept: [String]) {
+    /// One entry of a Trash item as reviewed: the item itself (`rel` "") or anything inside it. Links are
+    /// recorded as links, never followed.
+    struct Entry: Equatable, Sendable {
+        let rel: String
+        let dev: Int32, ino: UInt64, type: UInt16
+        let size: Int64, mtime: Int, mtimeNs: Int
+        init(_ rel: String, _ st: stat) {
+            self.rel = rel; dev = st.st_dev; ino = st.st_ino; type = st.st_mode & S_IFMT
+            size = st.st_size; mtime = st.st_mtimespec.tv_sec; mtimeNs = st.st_mtimespec.tv_nsec
+        }
+        /// Still this object: same device, inode and type, and for a file the same size and time.
+        func matches(_ st: stat) -> Bool {
+            st.st_dev == dev && st.st_ino == ino && (st.st_mode & S_IFMT) == type
+                && (type != S_IFREG || (st.st_size == size && st.st_mtimespec.tv_sec == mtime && st.st_mtimespec.tv_nsec == mtimeNs))
+        }
+    }
+
+    /// What was reviewed for one Trash item: every entry in it, so a folder is approved with exactly its
+    /// contents at the time. `entries` is nil when part of it couldn't be read; such an item is never deleted.
+    struct Snapshot: Sendable {
+        let path: String
+        let entries: [Entry]?
+        /// Changes when anything in the item changes (added, removed, replaced, edited, or a folder's own time).
+        var digest: String {
+            guard let entries else { return "\(path)|unreadable" }
+            let text = entries.map { "\($0.rel)\u{0}\($0.dev):\($0.ino):\($0.type):\($0.size):\($0.mtime).\($0.mtimeNs)" }
+                .joined(separator: "\n")
+            return "\(path)|\(entries.count)|" + SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        var isFolder: Bool { entries?.first?.type == S_IFDIR }
+    }
+
+    static func snapshot(_ path: String) -> Snapshot {
+        var out: [Entry] = []
+        func walk(_ rel: String) -> Bool {
+            let full = rel.isEmpty ? path : path + "/" + rel
+            var st = stat()
+            guard lstat(full, &st) == 0 else { return false }
+            out.append(Entry(rel, st))
+            guard (st.st_mode & S_IFMT) == S_IFDIR else { return true }
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: full) else { return false }
+            for n in names.sorted() where !walk(rel.isEmpty ? n : rel + "/" + n) { return false }
+            return true
+        }
+        return Snapshot(path: path, entries: walk("") ? out : nil)
+    }
+
+    /// Permanently deletes exactly the approved Trash items and, inside folders, exactly the approved entries.
+    /// Each item must sit directly in one of `trashFolders`, not be protected, and still match its snapshot
+    /// entirely (otherwise it stays whole). Then entries are removed deepest first, each re-checked right
+    /// before; files and links are unlinked (links are never followed) and folders are removed only when
+    /// empty, so anything added inside after the review stays — and so does its folder. If a step fails, the
+    /// rest of that item stays and the result says it was only partly deleted.
+    /// `beforeDelete` is for the self-test only (runs after the snapshot check, before the first removal).
+    static func deleteApproved(_ approved: [Snapshot], trashFolders: [String], beforeDelete: ((String) -> Void)? = nil)
+        -> (deleted: [String], kept: [String], partial: [String]) {
         SizeCache.clear(); defer { SizeCache.clear() }
         let folders = Set(trashFolders.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
-        var deleted: [String] = [], kept: [String] = []
-        for (path, planned) in approved {
-            let u = URL(fileURLWithPath: path)
+        var deleted: [String] = [], kept: [String] = [], partial: [String] = []
+        for item in approved {
+            let u = URL(fileURLWithPath: item.path)
             let name = u.lastPathComponent
             guard folders.contains(u.deletingLastPathComponent().standardizedFileURL.path) else {
                 kept.append("\(name): not directly in a Trash folder"); continue
             }
             if let why = ProtectedPaths.reason(u) { kept.append("\(name): \(why)"); continue }
-            guard MCPServer.identity(path) == planned else { kept.append("\(name): changed since the preview"); continue }
-            do { try FileManager.default.removeItem(atPath: path); deleted.append(path) }
-            catch { kept.append("\(name): \(error.localizedDescription)") }
+            guard let entries = item.entries else { kept.append("\(name): part of it couldn't be read, so it was kept"); continue }
+            guard snapshot(item.path).entries == entries else { kept.append("\(name): changed since the preview"); continue }
+            beforeDelete?(item.path)
+            // Deepest first, so a folder comes after everything in it.
+            let order = entries.sorted { $0.rel.split(separator: "/").count > $1.rel.split(separator: "/").count }
+            var removed = 0
+            var problem: String?
+            for e in order {
+                let p = e.rel.isEmpty ? item.path : item.path + "/" + e.rel
+                var st = stat()
+                guard lstat(p, &st) == 0, e.matches(st) else { problem = "\(e.rel.isEmpty ? name : e.rel) changed while deleting"; break }
+                if e.type == S_IFDIR {
+                    if rmdir(p) != 0 {
+                        problem = errno == ENOTEMPTY ? "new files appeared in \(e.rel.isEmpty ? name : e.rel); they were kept"
+                                                     : "\(e.rel.isEmpty ? name : e.rel): \(String(cString: strerror(errno)))"
+                        break
+                    }
+                } else if unlink(p) != 0 {
+                    problem = "\(e.rel.isEmpty ? name : e.rel): \(String(cString: strerror(errno)))"; break
+                }
+                removed += 1
+            }
+            if let problem {
+                if removed == 0 { kept.append("\(name): \(problem)") }
+                else { partial.append("\(name): partly deleted (\(removed) of \(entries.count) entries); \(problem)") }
+            } else {
+                deleted.append(item.path)
+            }
         }
-        return (deleted, kept)
+        return (deleted, kept, partial)
     }
 
     static func finderTrashPaths() -> [String]? {

@@ -502,8 +502,40 @@ enum SelfTest {
                         recommended: true, sizeBytes: 100, exists: true)
         }
         check("weekly clean never runs simulator commands",
-              AutoClean.select([cmdTarget(.deleteUnavailableSimulators), cmdTarget(.deleteSimRuntime("x"))]).isEmpty)
+              AutoClean.select([cmdTarget(.deleteUnavailableSimulators([])), cmdTarget(.deleteSimRuntime("x"))]).isEmpty)
         check("weekly clean refuses a target with no paths", AutoClean.select([cmdTarget(.removeItems([]))]).isEmpty)
+
+        print("Simulators are never deleted without review (SAFE-04)")
+        let simTarget = Scanner.plan().first { $0.id == "xcode.sims" }
+        check("unavailable simulators are not recommended (not pre-selected, not in Select All Safe)",
+              simTarget != nil && simTarget?.recommended == false)
+        let simJSON: [String: [[String: Any]]] = [
+            "com.apple.CoreSimulator.SimRuntime.iOS-17-2": [
+                ["udid": "11111111-1111-1111-1111-111111111111", "name": "iPhone 15", "isAvailable": false],
+                ["udid": "not-a-uuid", "name": "Broken"],
+            ],
+            "com.apple.CoreSimulator.SimRuntime.watchOS-10-0": [
+                ["udid": "22222222-2222-2222-2222-222222222222", "name": "Apple Watch Series 9", "isAvailable": false],
+            ],
+        ]
+        let parsedSims = Scanner.parseSimulators(simJSON)
+        check("simulators are listed by name and OS; bad ids are ignored",
+              parsedSims.map(\.name) == ["iPhone 15", "Apple Watch Series 9"] && parsedSims.map(\.os) == ["iOS 17.2", "watchOS 10.0"])
+        var reviewedSims = CleanTarget(id: "xcode.sims", category: .xcode, name: "Unavailable simulators", path: "", note: "",
+                                       action: .deleteUnavailableSimulators(parsedSims), recommended: false, sizeBytes: 1, exists: true)
+        reviewedSims.note = Scanner.simulatorNote(parsedSims)
+        let simRow = MainActor.assumeIsolated { ReviewBuild.cacheItems([reviewedSims]).first }
+        check("the review names each simulator and says its apps and data are deleted",
+              simRow?.risk == .review && simRow?.note?.contains("iPhone 15 (iOS 17.2)") == true
+              && simRow?.note?.contains("apps, files and settings") == true)
+        let laterUnavailable = SimDevice(udid: "33333333-3333-3333-3333-333333333333", name: "iPad", os: "iOS 16.4")
+        check("only reviewed simulators that are still unavailable are deleted (new ones are not added)",
+              Scanner.stillUnavailable(parsedSims, now: [parsedSims[1], laterUnavailable]) == [parsedSims[1]])
+        check("a reviewed simulator that became available again is kept",
+              Scanner.stillUnavailable(parsedSims, now: []).isEmpty)
+        let runtimeItems = SDKEngine.xcode().filter { $0.id.hasPrefix("simrt.") }
+        check("simulator runtimes are always review items (\(runtimeItems.count) found on this Mac)",
+              runtimeItems.allSatisfy { $0.review && !$0.isUnused })
 
         print("Audit fixes: AI assistant approvals (MCP)")
         let mA = sandbox.appendingPathComponent("mcp-a.txt"), mB = sandbox.appendingPathComponent("mcp-b.txt")

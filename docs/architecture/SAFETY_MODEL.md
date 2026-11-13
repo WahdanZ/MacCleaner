@@ -38,6 +38,20 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
 | Shredder | overwrite + delete | home only, regular files only, no hard links, every folder readable, every file ≤ 4 GB and writable; per-file overwrite → flush → unlink |
 | Admin step | privileged uninstall | random 0700 staging dir, root-owned parent re-check, `mv -n`, chown staging dir only |
 
+## 2a. Letter case and case-sensitive volumes
+
+macOS disks are usually case-insensitive APFS, where `~/Documents` and `~/documents` are the same folder. The
+guards are written for that and **fail toward refusing** on a case-sensitive APFS volume:
+
+| Rule | Comparison | On case-sensitive APFS |
+|---|---|---|
+| User protection (`UserProtection`) | case-folded | A folder differing only in case from a protected one is also protected (stricter, never looser). |
+| Move to Trash (`TrashRules`: structural, sensitive) | case-folded key | A separate `~/documents` folder is refused as a system folder (stricter). Its contents follow the normal rules. |
+| Permanent delete allow-list (`PermanentDeleteRules`) | exact, on the resolved path | Only the real `~/Library/Caches` etc. qualify; a look-alike `~/library/caches` is a different folder and is never swept. |
+
+Verified on a case-sensitive APFS disk image (2026-11-13): the isolated self-test passes 258/258 with the test home
+on that volume, and a separate lowercase `~/documents` is refused by Move to Trash.
+
 ## 3. Shredder semantics (on `main` since #26)
 
 * **Plan at review.** When an item is added, it is listed without following links and every entry's identity

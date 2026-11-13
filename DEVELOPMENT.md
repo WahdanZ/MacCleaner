@@ -25,12 +25,24 @@ cd MacCleaner
 ```
 
 `build.sh` does four things:
-1. Builds a Release version.
+1. Runs the Core package tests (`swift test`) and builds a Release version (`scripts/xcbuild.sh`).
 2. Runs the safety self-test, and stops if any check fails.
 3. Signs the app ad-hoc.
 4. Installs it to `/Applications/Mac Cleaner.app`.
 
 You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project uses a synchronized folder, so new `.swift` files in `MacCleaner/` are picked up automatically.
+
+**Build from the command line** with `scripts/xcbuild.sh` (CI, the release workflow, `build.sh` and `release.sh` all use it); extra build settings go after it, e.g. `scripts/xcbuild.sh CODE_SIGN_IDENTITY=-`. Calling `xcodebuild -target …` directly without `SYMROOT` fails on a fresh checkout with "no such module 'MacCleanerCore'": the local package would build into its own folder.
+
+**Check a fresh checkout** (committed HEAD only, in a new temporary worktree, nothing reused from your copy): `scripts/clean-build-check.sh`. It runs the package tests, the build, a check that MacCleanerCore is linked, and the self-test.
+
+**Core package tests.** The pure rules (what may be deleted or trashed, user protection) live in the local package `Packages/MacCleanerKit` (`MacCleanerCore`, Swift 6 language mode) and have their own tests:
+
+```bash
+swift test --package-path Packages/MacCleanerKit
+```
+
+They need no files and no home folder. CI runs them before building the app.
 
 **Run the self-test on its own:**
 

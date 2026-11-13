@@ -18,11 +18,10 @@ IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Applica
 [[ -n "$IDENTITY" ]] || { echo "No 'Developer ID Application' certificate for team $TEAM_ID in your keychain (see step 1)."; exit 1; }
 echo "Signing as: $IDENTITY"
 
-xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
+scripts/xcbuild.sh \
   CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Manual \
   ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_ENTITLEMENTS=MacCleaner/MacCleaner.entitlements \
-  OTHER_CODE_SIGN_FLAGS="--timestamp" build \
-  | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' | sort -u
+  OTHER_CODE_SIGN_FLAGS="--timestamp"
 
 APP="build/Release/Mac Cleaner.app"
 echo "--- self-test"

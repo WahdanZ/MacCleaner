@@ -219,6 +219,9 @@ public struct CleanupApproval: Sendable, Hashable {
         case userInTerminal
         /// The person confirmed in Mac Cleaner's own window (HumanApproval), never the AI client's `confirm`.
         case userViaMCPPrompt
+        /// `--yes` on the command line: nobody confirmed this run interactively. Whoever (or whatever) started the
+        /// command chose to skip the prompt. Recorded as an override, never as a person's confirmation.
+        case nonInteractiveOverride
         /// An enabled, versioned automation policy whose scope covers every entry of the plan.
         case standingPolicy(id: String, version: Int)
     }

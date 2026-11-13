@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MacCleanerCore
 
 /// Model Context Protocol server over stdio. Start with: "Mac Cleaner" --mcp
 /// Every tool that deletes or moves something returns a preview unless called with confirm: true.
@@ -203,8 +204,9 @@ enum MCPServer {
 
     private static func size(_ b: Int64) -> String { ByteText.string(b) }
 
-    /// `approval` is set only by the CLI (the person at the terminal said yes). Calls from the MCP connection
-    /// pass nil, so every confirm from an AI client also needs the person's yes in Mac Cleaner's own window.
+    /// `approval` is set only by the CLI: `.terminal` when a person typed "yes" at its prompt, `.yesFlag` for the
+    /// `--yes` override (no prompt, not a person's confirmation). Calls from the MCP connection pass nil, so every
+    /// confirm from an AI client also needs the person's yes in Mac Cleaner's own window.
     static func call(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
         let confirm = a["confirm"] as? Bool ?? false
         switch name {
@@ -553,23 +555,45 @@ enum MCPServer {
         case "move_to_trash":
             let urls = (a["paths"] as? [String] ?? []).map(expand)
             guard !urls.isEmpty else { throw ToolError(description: "Pass paths.") }
-            let items: [[String: Any]] = urls.map { u in
-                let exists = FileManager.default.fileExists(atPath: u.path)
-                let why = exists ? TrashGuard.reason(u) : "Does not exist"
-                return ["path": Scanner.tilde(u), "size": exists ? size(Scanner.allocatedSize(u)) : "—",
-                        "allowed": why == nil, "reason": why ?? NSNull()]
-            }
             let digest = plan(urls.map { "\(TrashGuard.key($0))|\(identity($0.path))" })
             if !confirm {
+                // The preview captures what each allowed item is now; the confirm can only approve exactly these.
+                var snapshots: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] = []
+                var seen = Set<String>()
+                let items: [[String: Any]] = urls.map { u in
+                    let exists = FileManager.default.fileExists(atPath: u.path)
+                    var why = exists ? TrashGuard.reason(u) : "Does not exist"
+                    let bytes = exists ? Scanner.allocatedSize(u) : 0
+                    if why == nil, seen.insert(u.path).inserted {
+                        if let snap = AppCleanup.snapshot(u) {
+                            snapshots.append((u.path, u.lastPathComponent, snap, bytes, "Requested through Mac Cleaner's AI connection or command line"))
+                        } else { why = "Does not exist" }
+                    }
+                    return ["path": Scanner.tilde(u), "size": exists ? size(bytes) : "—",
+                            "allowed": why == nil, "reason": why ?? NSNull()]
+                }
                 return withPreview(name, digest, ["preview": true, "items": items,
-                        "next": "Show this to the user. Only after an explicit yes, call move_to_trash again with the same paths, confirm: true and the preview_id. Items with allowed=false will be skipped."])
+                        "next": "Show this to the user. Only after an explicit yes, call move_to_trash again with the same paths, confirm: true and the preview_id. Items with allowed=false will be skipped."],
+                        trashPlan: AppCleanup.trashPlan(snapshots, module: "mcp"))
             }
-            try approve(name, digest, a, approval)
-            var moved: [String] = [], errors: [String] = []
+            let confirmed = try approve(name, digest, a, approval)
+            let planned = Set(confirmed.trashPlan?.candidates.map(\.id) ?? [])
+            let run = ToolConfirmation.moveToTrash(confirmed)
+            var moved: [String] = [], errors: [String] = [], reported = Set<String>()
             for u in urls {
-                guard FileManager.default.fileExists(atPath: u.path) else { errors.append("\(u.path): does not exist"); continue }
-                if let why = TrashGuard.reason(u) { errors.append("\(Scanner.tilde(u)): \(why)"); continue }
-                if let e = AppEngine.trash(u, source: "AI assistant") { errors.append("\(Scanner.tilde(u)): \(e)") } else { moved.append(Scanner.tilde(u)) }
+                guard planned.contains(u.path) else {
+                    // Not allowed when previewed (still the same, or the digest would have refused the confirm).
+                    if !FileManager.default.fileExists(atPath: u.path) { errors.append("\(u.path): does not exist") }
+                    else { errors.append("\(Scanner.tilde(u)): \(TrashGuard.reason(u) ?? "it couldn't be moved when previewed")") }
+                    continue
+                }
+                guard reported.insert(u.path).inserted else { errors.append("\(Scanner.tilde(u)): listed more than once"); continue }
+                // An item can be both moved and have a problem (moved, but its Put Back record couldn't be written):
+                // report both.
+                let problems = run.problems.filter { $0.id == u.path }.map(\.message)
+                if run.moved[u.path] != nil { moved.append(Scanner.tilde(u)) }
+                else if problems.isEmpty { errors.append("\(Scanner.tilde(u)): not moved") }
+                for p in problems { errors.append("\(Scanner.tilde(u)): \(p)") }
             }
             return ["moved_to_trash": moved, "errors": errors, "note": "Empty the Trash to free the space."]
 
@@ -583,25 +607,43 @@ enum MCPServer {
     /// A confirm only runs a plan the user was shown: each preview gets a single-use id, valid for
     /// 10 minutes, tied to the tool and to a digest of the exact items. The confirm recomputes the
     /// digest from the same arguments, so a different app, path or selection is refused.
-    private static var previews: [String: (tool: String, digest: String, expires: Date, request: ApprovalRequest)] = [:]
+    private static var previews: [String: (tool: String, digest: String, expires: Date, request: ApprovalRequest,
+                                           trashPlan: CleanupPlan?)] = [:]
     static let previewLifetime: TimeInterval = 600
 
     static func plan(_ parts: [String]) -> String { parts.sorted().joined(separator: "\n") }
 
-    static func issuePreview(_ tool: String, _ digest: String, now: Date = Date(), request: ApprovalRequest? = nil) -> String {
+    static func issuePreview(_ tool: String, _ digest: String, now: Date = Date(), request: ApprovalRequest? = nil,
+                             trashPlan: CleanupPlan? = nil) -> String {
         previews = previews.filter { $0.value.expires > now }
         let id = UUID().uuidString.lowercased()
         previews[id] = (tool, digest, now.addingTimeInterval(previewLifetime),
-                        request ?? ApprovalRequest(tool: tool, verb: verb(for: tool), lines: []))
+                        request ?? ApprovalRequest(tool: tool, verb: verb(for: tool), lines: []), trashPlan)
         return id
     }
 
+    /// A confirm that `approve` has checked: its single-use preview, the same items, and the person's yes in Mac
+    /// Cleaner's window (`approvedBy` nil), at the terminal (`.terminal`) or the `--yes` override (`.yesFlag`).
+    /// Only `approve` can make one.
+    struct ConfirmedPreview {
+        let tool: String
+        let approvedBy: ToolApproval?
+        /// What the preview captured for an approved-Trash tool (move_to_trash).
+        let trashPlan: CleanupPlan?
+        fileprivate init(tool: String, approvedBy: ToolApproval?, trashPlan: CleanupPlan?) {
+            self.tool = tool
+            self.approvedBy = approvedBy
+            self.trashPlan = trashPlan
+        }
+    }
+
     /// Checks a confirm: a single-use preview_id for this tool, issued less than 10 minutes ago, whose items are
-    /// still exactly the same files (path and file identity). Then, unless the person already approved at the
-    /// terminal, Mac Cleaner asks them in its own window, showing the preview's list. The preview is used up
+    /// still exactly the same files (path and file identity). Then, unless the CLI already approved it (a typed
+    /// "yes", or the --yes override), Mac Cleaner asks the person in its own window, showing the preview's list. The preview is used up
     /// either way, so a refused confirm can't be retried without a new preview.
+    @discardableResult
     static func approve(_ tool: String, _ digest: String, _ a: [String: Any], _ approval: ToolApproval? = nil,
-                        now: Date = Date()) throws {
+                        now: Date = Date()) throws -> ConfirmedPreview {
         guard let id = a["preview_id"] as? String, !id.isEmpty else {
             throw ToolError(description: "confirm: true needs the preview_id from this tool's preview. Call it without confirm, show the user the list, and confirm only after they say yes.")
         }
@@ -617,6 +659,7 @@ enum MCPServer {
                 throw ToolError(description: "The person did not approve this in Mac Cleaner's confirmation window (or the window couldn't be shown, e.g. no one is logged in at the screen). Nothing was changed.")
             }
         }
+        return ConfirmedPreview(tool: tool, approvedBy: approval, trashPlan: p.trashPlan)
     }
 
     /// "path|device:inode:type[:size:mtime]" — tells the same file apart from a different one at the same path.
@@ -683,10 +726,10 @@ enum MCPServer {
     /// `lines` replaces the window's list when the JSON result shows only part of it (e.g. a huge Trash):
     /// the person always sees every item.
     private static func withPreview(_ tool: String, _ digest: String, _ result: [String: Any],
-                                    lines: [String]? = nil) -> [String: Any] {
+                                    lines: [String]? = nil, trashPlan: CleanupPlan? = nil) -> [String: Any] {
         var r = result
         let request = ApprovalRequest(tool: tool, verb: verb(for: tool), lines: lines ?? approvalLines(result))
-        r["preview_id"] = issuePreview(tool, digest, request: request)
+        r["preview_id"] = issuePreview(tool, digest, request: request, trashPlan: trashPlan)
         r["approval"] = "When you confirm, Mac Cleaner shows the person this list in its own window. Nothing happens unless they approve there."
         return r
     }

@@ -4,10 +4,13 @@
 # This only finds UNEXPECTED CALL SITES in the source. It does not prove that a person confirmed anything; the
 # self-test checks the confirmation behaviour itself (scripts/selftest.sh, "Approved Trash").
 #
-# Allowed:
-#   * approvals issued (CleanupExecutor.approve / an Approver label): MacCleaner/ReviewConfirmation.swift
+# Allowed (each a verified confirmation boundary):
+#   * approvals issued (CleanupExecutor.approve / an Approver label): MacCleaner/ReviewConfirmation.swift (the review
+#     sheet's button) and MacCleaner/ToolConfirmation.swift (an MCP/CLI confirm already checked by MCPServer.approve)
 #   * ReviewConfirmation.confirm(...) called: the review sheet (MacCleaner/Review.swift) and the self-test
-#   * ApprovedTrash(...) made: MacCleaner/ReviewConfirmation.swift
+#   * ApprovedTrash(...) made: the same two files
+#   * a terminal approval (ToolApproval .terminal / .yesFlag) made: the CLI (after its TTY prompt or --yes) and the
+#     self-test; MCPServer.ConfirmedPreview made: only MCPServer.approve (its initializer is fileprivate)
 #   * inside MacCleanerKit, approvals are issued only by CleanupExecutor itself
 set -u
 cd "$(dirname "$0")/.."
@@ -33,13 +36,18 @@ only_in() {
 
 # An instance call (executor.approve, foo().approve); MCPServer.approve is the MCP preview check, not an approval.
 only_in "cleanup approvals issued (.approve)" '(^|[^A-Za-z0-9_])([a-z_][A-Za-z0-9_]*|\))\.approve\(' MacCleaner \
-    MacCleaner/ReviewConfirmation.swift
-only_in "approver labels" '\.(userInApp|userInTerminal|userViaMCPPrompt|standingPolicy)\b' MacCleaner \
-    MacCleaner/ReviewConfirmation.swift
+    MacCleaner/ReviewConfirmation.swift MacCleaner/ToolConfirmation.swift
+# The self-test may name labels to compare against; it can't issue an approval (the rule above excludes it).
+only_in "approver labels" '\.(userInApp|userInTerminal|userViaMCPPrompt|nonInteractiveOverride|standingPolicy)\b' MacCleaner \
+    MacCleaner/ReviewConfirmation.swift MacCleaner/ToolConfirmation.swift MacCleaner/SelfTest.swift
 only_in "review confirmations" 'ReviewConfirmation\.confirm\(' MacCleaner \
     MacCleaner/Review.swift MacCleaner/SelfTest.swift
 only_in "approved-Trash values made" 'ApprovedTrash\(' MacCleaner \
-    MacCleaner/ReviewConfirmation.swift
+    MacCleaner/ReviewConfirmation.swift MacCleaner/ToolConfirmation.swift
+only_in "terminal approvals made" '(approval: *|\? *)\.(terminal|yesFlag)\b|ToolApproval\.(terminal|yesFlag)' MacCleaner \
+    MacCleaner/CLI.swift MacCleaner/SelfTest.swift
+only_in "confirmed previews made" 'ConfirmedPreview\(' MacCleaner \
+    MacCleaner/MCPServer.swift
 only_in "approvals issued inside MacCleanerKit" '\.(approve|issue)\(' Packages/MacCleanerKit/Sources \
     Packages/MacCleanerKit/Sources/MacCleanerFeatures/CleanupExecutor.swift
 

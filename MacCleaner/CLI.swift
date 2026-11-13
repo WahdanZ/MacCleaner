@@ -129,7 +129,8 @@ enum CLI {
             guard var a = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { err("Arguments must be a JSON object."); return 64 }
             if (a["confirm"] as? Bool) == true {
                 guard yes else { err("For safety, `tool` with confirm: true also needs --yes."); return 64 }
-                // --yes is the person at the keyboard approving: preview the same arguments, then confirm that preview.
+                // --yes is a non-interactive override, not a person confirming (attributed as such, never as a typed
+                // "yes"): preview the same arguments, then confirm that preview.
                 if a["preview_id"] == nil {
                     var p = a; p["confirm"] = false
                     do { a["preview_id"] = (try MCPServer.call(args[1], p) as? [String: Any])?["preview_id"] }
@@ -172,15 +173,15 @@ enum CLI {
             }
             a["confirm"] = true
             a["preview_id"] = (preview as? [String: Any])?["preview_id"]
-            return output(try MCPServer.call(cmd.tool, a, approval: .terminal), json: json)
+            return output(try MCPServer.call(cmd.tool, a, approval: yes ? .yesFlag : .terminal), json: json)
         } catch {
             err("\(error)"); return 1
         }
     }
 
-    /// A confirm reaching here was approved by the person at the terminal (typed yes, or --yes).
+    /// A confirm reaching here came with --yes (`tool` refuses confirm without it): a non-interactive override.
     private static func call(_ tool: String, _ a: [String: Any], json: Bool) -> Int32 {
-        let approval: ToolApproval? = (a["confirm"] as? Bool) == true ? .terminal : nil
+        let approval: ToolApproval? = (a["confirm"] as? Bool) == true ? .yesFlag : nil
         do { return output(try MCPServer.call(tool, a, approval: approval), json: json) } catch { err("\(error)"); return 1 }
     }
 

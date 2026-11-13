@@ -1069,10 +1069,14 @@ enum SelfTest {
         // can create first, and gives you only that folder: a recursive chown as root would hand you any root-owned
         // file hard-linked into it. Everything below runs as you on throwaway files; no password, no system files.
         let uid = getuid()
+        /// An item for the password step with its reviewed identity: captured now for a real file, a fixed one for the
+        /// script-text checks on paths that don't exist here.
         func adminItem(_ u: URL, label: String? = nil, receipt: String? = nil) -> AppLeftover {
             var l = AppLeftover(id: u.path, url: u, label: "x", size: 0, include: true, note: nil, needsAdmin: true)
             l.launchLabel = label
             l.receipt = receipt
+            l.identity = AppCleanup.snapshot(u)
+                ?? FileIdentity(path: u.path, device: 1, inode: 2, kind: .file, size: 3, modificationNanos: 4_000_000_000)
             return l
         }
         let rootScript = AdminStep.script([
@@ -1089,7 +1093,7 @@ enum SelfTest {
         check("each item's folder is checked again (real folder, owned by root) right before the move",
               rootScript.contains("[ ! -L '/Library/LaunchDaemons' ] && [ \"$(/usr/bin/stat -f %u '/Library/LaunchDaemons')\" = 0 ]"))
         check("unsafe launch labels and receipt ids are left out",
-              rootScript.contains("/bin/launchctl bootout gui/\(uid)/com.example.helper ") && !rootScript.contains("rm -rf")
+              rootScript.contains("'/bin/launchctl' bootout gui/\(uid)/com.example.helper ") && !rootScript.contains("rm -rf")
               && !rootScript.contains("$(id)"))
         check("paths outside the allowed folders are left out", !rootScript.contains("/usr/local/bin/x"))
         let fakeStaging = "/private/var/tmp/MacCleaner-uninstall.Ab3dE6gH9k"
@@ -1542,6 +1546,7 @@ extension SelfTest {
         sharedFileLocking(dir: dir)
         mcpAndCLITrash(dir: dir, runID: runID)
         engineTrash(dir: dir, runID: runID)
+        uninstallAndAlerts(dir: dir, runID: runID, savedProtected: savedProtected)
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
@@ -2051,6 +2056,494 @@ extension SelfTest {
               && log(mcpBackup).first?.source == "System Data · Command line")
         check("the MCP backup can be put back", putBack(mcpBackup))
         try? fm.removeItem(at: mcpArch); try? fm.removeItem(at: mcpBackup)
+    }
+
+    // MARK: Uninstall and Remove alerts through the executor (M01-04b-3b)
+
+    static func uninstallAndAlerts(dir: URL, runID: String, savedProtected: [String]) {
+        print("Uninstall and Remove alerts: scan identity → review / alert → executor; the password step checks identity (M01-04b-3b)")
+        let fm = FileManager.default
+        let base = dir.appendingPathComponent("3b")
+        func folder(_ u: URL, _ text: String = "x") -> URL {
+            try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: u.appendingPathComponent("content.txt"))
+            return u
+        }
+        func plain(_ u: URL, _ text: String) -> URL {
+            try? fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: u)
+            return u
+        }
+        func log(_ u: URL) -> [TrashedItem] { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) } }
+        func putBack(_ u: URL) -> Bool { log(u).first.map { TrashOps.restore($0) == nil } ?? false }
+        func leftover(_ u: URL, admin: Bool = false) -> AppLeftover {
+            var l = AppLeftover(id: u.path, url: u, label: "Support", size: 5, include: true, note: nil)
+            l.needsAdmin = admin
+            l.identity = AppCleanup.snapshot(u)
+            return l
+        }
+        /// An app and its leftovers as the scan reports them (identities captured now).
+        func app(_ name: String, _ u: URL, _ leftovers: [AppLeftover]) -> AppInfo {
+            AppInfo(id: u.path, url: u, name: name, bundleID: "com.example.selftest.\(name)", version: "1", isApple: false,
+                    appSize: 10, lastUsed: nil, leftovers: leftovers, caches: [], identity: AppCleanup.snapshot(u))
+        }
+        @MainActor func confirmed(_ a: AppInfo, beforeConfirm: () -> Void = {}) -> ([AppLeftover], TrashApproval?)? {
+            let got = Slot<([AppLeftover], TrashApproval?)>()
+            let request = ReviewBuild.uninstall(a, running: false) { got.value = ($0, $1) }
+            beforeConfirm()
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        // The password step is watched, never run: it records what it would have been given.
+        // Passed in, never global: every uninstall here gets this watcher instead of the real password step.
+        let isolatedMover = AppCleanup.trashMover
+        let stepCalls = PathList()
+        let step: AppEngine.AdminStepRunner = { items, _ in
+            stepCalls.add(items.map { "\($0.id)|\($0.identity.map { "\($0.device):\($0.inode)" } ?? "none")" }.joined(separator: ","))
+            return .cancelled
+        }
+        let allowAll: @Sendable (URL) -> Bool = { _ in true }, allowNone: @Sendable (URL) -> Bool = { _ in false }
+        defer { AppCleanup.trashMover = isolatedMover; ProtectedPaths.set(savedProtected) }
+
+        // 1. A normal uninstall: the app and both leftovers go to the Trash through the executor.
+        let fooURL = folder(base.appendingPathComponent("Foo-\(runID).app"), "app")
+        let fooSupport = folder(base.appendingPathComponent("Support/Foo-\(runID)"), "support")
+        let fooPrefs = plain(base.appendingPathComponent("Prefs/com.example.foo-\(runID).plist"), "prefs")
+        let foo = app("Foo", fooURL, [leftover(fooSupport), leftover(fooPrefs)])
+        let r1in = MainActor.assumeIsolated { confirmed(foo) }
+        let r1 = AppEngine.uninstall(foo, picked: r1in?.0 ?? [], trash: r1in?.1, adminStep: step, adminAllowed: allowNone)
+        check("an uninstall moves the app and its reviewed leftovers through the executor",
+              r1.appRemoved && r1.errors.isEmpty && r1.bytes == 20 && ![fooURL, fooSupport, fooPrefs].contains { fm.fileExists(atPath: $0.path) }
+              && stepCalls.count == 0)
+        check("each is logged as the uninstall and Put Back restores them",
+              log(fooURL).first?.source == "Uninstall Foo" && putBack(fooURL) && putBack(fooSupport) && putBack(fooPrefs))
+
+        // 2. A preference file rewritten while the app quits (after the confirmation) is changed: kept and reported.
+        let foo2 = app("Foo", fooURL, [leftover(fooSupport), leftover(fooPrefs)])
+        let r2in = MainActor.assumeIsolated { confirmed(foo2) }
+        try? Data("rewritten on quit".utf8).write(to: fooPrefs)
+        let r2 = AppEngine.uninstall(foo2, picked: r2in?.0 ?? [], trash: r2in?.1, adminStep: step, adminAllowed: allowNone)
+        check("preferences rewritten during quit are left alone and reported; the rest is uninstalled",
+              r2.appRemoved && fm.fileExists(atPath: fooPrefs.path) && !fm.fileExists(atPath: fooSupport.path)
+              && r2.errors.first?.contains("changed after you reviewed") == true)
+        _ = putBack(fooURL); _ = putBack(fooSupport)
+
+        // 3. The app replaced after the review: nothing is removed, the leftovers stay.
+        let foo3 = app("Foo", fooURL, [leftover(fooSupport)])
+        let r3in = MainActor.assumeIsolated { confirmed(foo3, beforeConfirm: { try? fm.removeItem(at: fooURL); _ = folder(fooURL, "other app") }) }
+        let r3 = AppEngine.uninstall(foo3, picked: r3in?.0 ?? [], trash: r3in?.1, adminStep: step, adminAllowed: allowNone)
+        check("an app replaced after review is left alone, and so are its leftovers",
+              !r3.appRemoved && fm.fileExists(atPath: fooURL.path) && fm.fileExists(atPath: fooSupport.path)
+              && r3.errors.contains { $0.contains("changed after you reviewed") } && stepCalls.count == 0)
+
+        // 4. Replaced between the scan and the review: the row is blocked (rescan), the app can't be confirmed.
+        let foo4 = app("Foo", fooURL, [leftover(fooSupport)])
+        try? fm.removeItem(at: fooURL); _ = folder(fooURL, "replaced before review")
+        let req4 = MainActor.assumeIsolated { ReviewBuild.uninstall(foo4, running: false) { _, _ in } }
+        check("an app replaced between the scan and the review is blocked and needs a rescan",
+              req4.items.first?.blocked?.contains("changed since the scan") == true && !req4.allowed.contains { $0.id == fooURL.path })
+
+        // 5. A protected app never reaches the password step, even when its Trash move would be refused for permission.
+        let foo5 = app("Foo", fooURL, [leftover(fooSupport)])
+        let r5in = MainActor.assumeIsolated { confirmed(foo5) }
+        ProtectedPaths.set(savedProtected + [fooURL.path])
+        AppCleanup.trashMover = { url in if url.path.hasSuffix("/Foo-\(runID).app") { throw CocoaError(.fileWriteNoPermission) }; return try isolatedMover(url) }
+        let r5 = AppEngine.uninstall(foo5, picked: r5in?.0 ?? [], trash: r5in?.1, adminStep: step, adminAllowed: allowAll)
+        ProtectedPaths.set(savedProtected)
+        check("a protection refusal never falls back to the password step",
+              !r5.appRemoved && stepCalls.count == 0 && fm.fileExists(atPath: fooURL.path) && fm.fileExists(atPath: fooSupport.path))
+
+        // 6. Refused only for permission, in an allowed folder, unchanged: the password step gets the reviewed app.
+        let foo6 = app("Foo", fooURL, [leftover(fooSupport)])
+        let r6in = MainActor.assumeIsolated { confirmed(foo6) }
+        let r6 = AppEngine.uninstall(foo6, picked: r6in?.0 ?? [], trash: r6in?.1, adminStep: step, adminAllowed: allowAll)
+        let expected6 = "\(fooURL.path)|\(foo6.identity.map { "\($0.device):\($0.inode)" } ?? "?")"
+        check("a permission refusal for an unchanged app in an allowed folder goes to the password step with its reviewed identity",
+              stepCalls.all.last == expected6 && r6.adminNote.contains("cancelled") && !fm.fileExists(atPath: fooSupport.path))
+        _ = putBack(fooSupport)
+
+        // 7. Refused for permission but not in a folder the password step may touch: nothing more happens.
+        let before7 = stepCalls.count
+        let foo7 = app("Foo", fooURL, [leftover(fooSupport)])
+        let r7in = MainActor.assumeIsolated { confirmed(foo7) }
+        let r7 = AppEngine.uninstall(foo7, picked: r7in?.0 ?? [], trash: r7in?.1, adminStep: step, adminAllowed: allowNone)
+        check("a permission refusal outside the allowed folders doesn't use the password step, and the leftovers stay",
+              stepCalls.count == before7 && !r7.appRemoved && fm.fileExists(atPath: fooSupport.path)
+              && r7.errors.first?.contains("password step can't be used") == true)
+
+        // 8. Refused for permission, then replaced before the fallback: no password step.
+        let foo8 = app("Foo", fooURL, [leftover(fooSupport)])
+        let r8in = MainActor.assumeIsolated { confirmed(foo8) }
+        AppCleanup.trashMover = { url in
+            if url.path.hasSuffix("/Foo-\(runID).app") {
+                let f = FileManager.default
+                try? f.removeItem(at: fooURL)
+                try? f.createDirectory(at: fooURL, withIntermediateDirectories: true)
+                try? Data("swapped during the attempt".utf8).write(to: fooURL.appendingPathComponent("content.txt"))
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            return try isolatedMover(url)
+        }
+        let r8 = AppEngine.uninstall(foo8, picked: r8in?.0 ?? [], trash: r8in?.1, adminStep: step, adminAllowed: allowAll)
+        AppCleanup.trashMover = isolatedMover
+        check("an app that changed before the fallback doesn't go to the password step, and no leftover moved",
+              stepCalls.count == before7 + 0 && !r8.appRemoved && r8.errors.first?.contains("changed after you reviewed") == true
+              && fm.fileExists(atPath: fooSupport.path) && log(fooSupport).isEmpty)
+        let foo8b = app("Foo", fooURL, [leftover(fooSupport)])
+        let r8bin = MainActor.assumeIsolated { confirmed(foo8b) }
+        let protectPath = fooURL.path, protectedList = savedProtected
+        AppCleanup.trashMover = { url in
+            if url.path.hasSuffix("/Foo-\(runID).app") {
+                ProtectedPaths.set(protectedList + [protectPath])   // protected between the refusal and the decision
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            return try isolatedMover(url)
+        }
+        let r8b = AppEngine.uninstall(foo8b, picked: r8bin?.0 ?? [], trash: r8bin?.1, adminStep: step, adminAllowed: allowAll)
+        AppCleanup.trashMover = isolatedMover
+        ProtectedPaths.set(savedProtected)
+        check("an app protected between the permission refusal and the decision doesn't go to the password step, and no leftover moved",
+              stepCalls.count == before7 && !r8b.appRemoved && fm.fileExists(atPath: fooSupport.path) && log(fooSupport).isEmpty)
+
+        // A leftover's launch job is stopped only after its own file went to the Trash.
+        let jobs = PathList()
+        let stopJob: @Sendable (String) -> Void = { jobs.add($0) }
+        let agentA = plain(base.appendingPathComponent("Agents/com.example.foo.a-\(runID).plist"), "a")
+        let agentB = plain(base.appendingPathComponent("Agents/com.example.foo.b-\(runID).plist"), "b")
+        var la = leftover(agentA); la.launchLabel = "com.example.foo.a"
+        var lb = leftover(agentB); lb.launchLabel = "com.example.foo.b"
+        let foo9 = app("Foo", fooURL, [la, lb])
+        let r9in = MainActor.assumeIsolated { confirmed(foo9) }
+        try? fm.removeItem(at: agentB); _ = plain(agentB, "replaced after review")
+        _ = AppEngine.uninstall(foo9, picked: r9in?.0 ?? [], trash: r9in?.1, adminStep: step, adminAllowed: allowNone, stopUserJob: stopJob)
+        check("only the moved leftover's launch job is stopped; a replaced one's job isn't touched",
+              jobs.all == ["com.example.foo.a"] && fm.fileExists(atPath: agentB.path) && !fm.fileExists(atPath: agentA.path))
+        _ = putBack(fooURL); _ = putBack(agentA)
+
+        check("the fallback decision: only a permission refusal, allowed folder, no protection and an unchanged item qualify",
+              AppEngine.adminFallbackRefusal(outcome: .permissionDenied("x"), reviewed: foo8.identity, current: foo8.identity,
+                                             protection: nil, adminAllowed: true) == nil
+              && AppEngine.adminFallbackRefusal(outcome: .failed("x"), reviewed: foo8.identity, current: foo8.identity,
+                                                protection: nil, adminAllowed: true) != nil
+              && AppEngine.adminFallbackRefusal(outcome: .skipped(.protected("p")), reviewed: foo8.identity, current: foo8.identity,
+                                                protection: nil, adminAllowed: true) != nil
+              && AppEngine.adminFallbackRefusal(outcome: .skipped(.changed(.replaced)), reviewed: foo8.identity, current: foo8.identity,
+                                                protection: nil, adminAllowed: true) != nil
+              && AppEngine.adminFallbackRefusal(outcome: .permissionDenied("x"), reviewed: foo8.identity, current: foo8.identity,
+                                                protection: "Protected", adminAllowed: true) != nil
+              && AppEngine.adminFallbackRefusal(outcome: .permissionDenied("x"), reviewed: foo8.identity, current: nil,
+                                                protection: nil, adminAllowed: true) != nil)
+
+        // 9. The privileged move itself checks the reviewed identity (run as you on throwaway files).
+        let sys = base.appendingPathComponent("sys")
+        try? fm.createDirectory(at: sys, withIntermediateDirectories: true)
+        func privileged(_ items: [AppLeftover]) -> (report: AdminStep.Report, staging: URL?) {
+            let script = AdminStep.script(items, uid: getuid(), allowed: { _ in true }, parentOwner: getuid(), chown: "/usr/bin/true")
+            let r = Shell.run("/bin/sh", ["-c", script])
+            let staging = AdminStep.parseStaging(r.output)
+            return (AdminStep.Report.parse(r.output), staging)
+        }
+        let same = plain(sys.appendingPathComponent("same.plist"), "same")
+        let swapped = plain(sys.appendingPathComponent("swapped.plist"), "reviewed")
+        let unknown = plain(sys.appendingPathComponent("unknown.plist"), "?")
+        let reviewedItems = [leftover(same, admin: true), leftover(swapped, admin: true), {
+            var l = leftover(unknown, admin: true); l.identity = nil; return l }()]
+        try? fm.removeItem(at: swapped); _ = plain(swapped, "replaced during the password dialog")
+        let p9 = privileged(reviewedItems)
+        let staged = p9.staging.flatMap { try? fm.contentsOfDirectory(atPath: $0.path) }?.sorted() ?? []
+        // Launch jobs and receipts: only after their item was verified and moved.
+        let calls = base.appendingPathComponent("tools.log")
+        func recorder(_ name: String) -> String {
+            let t = base.appendingPathComponent("fake-\(name)")
+            try? "#!/bin/sh\nprintf '\(name) %s\\n' \"$*\" >> \(AdminStep.q(calls.path))\n".write(to: t, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: t.path)
+            return t.path
+        }
+        let fakeLaunchctl = recorder("launchctl"), fakePkgutil = recorder("pkgutil")
+        func privilegedWithTools(_ items: [AppLeftover]) -> (lines: [String], staging: URL?) {
+            try? fm.removeItem(at: calls)
+            let script = AdminStep.script(items, uid: getuid(), allowed: { _ in true }, parentOwner: getuid(), chown: "/usr/bin/true",
+                                          launchctl: fakeLaunchctl, pkgutil: fakePkgutil)
+            let r = Shell.run("/bin/sh", ["-c", script])
+            let lines = ((try? String(contentsOf: calls, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+            return (lines, AdminStep.parseStaging(r.output))
+        }
+        let jobOK = plain(sys.appendingPathComponent("job-ok.plist"), "ok"), jobStale = plain(sys.appendingPathComponent("job-stale.plist"), "old")
+        var okItem = leftover(jobOK, admin: true); okItem.launchLabel = "com.example.ok"; okItem.launchSystem = true
+        var staleItem = leftover(jobStale, admin: true); staleItem.launchLabel = "com.example.stale"; staleItem.launchSystem = true
+        var receipt = AppLeftover(id: "receipt:com.example.pkg", url: URL(fileURLWithPath: "/"), label: "Receipt", size: 0, include: true,
+                                  note: nil, needsAdmin: true)
+        receipt.receipt = "com.example.pkg"
+        try? fm.removeItem(at: jobStale); _ = plain(jobStale, "replaced during the dialog")
+        let mixed = privilegedWithTools([okItem, staleItem, receipt])
+        check("the privileged step stops a job only after verifying and moving its file; a replaced item stops nothing",
+              mixed.lines == ["launchctl bootout system/com.example.ok"] && fm.fileExists(atPath: jobStale.path))
+        check("installer receipts aren't forgotten when any item wasn't verified", !mixed.lines.contains { $0.hasPrefix("pkgutil") })
+        if let st = mixed.staging { try? fm.removeItem(at: st) }
+        let jobOK2 = plain(sys.appendingPathComponent("job-ok2.plist"), "ok")
+        var ok2 = leftover(jobOK2, admin: true); ok2.launchLabel = "com.example.ok2"; ok2.launchSystem = true
+        let clean = privilegedWithTools([ok2, receipt])
+        check("…and are forgotten once every item was verified and moved",
+              clean.lines == ["launchctl bootout system/com.example.ok2", "pkgutil --forget com.example.pkg"])
+        if let st = clean.staging { try? fm.removeItem(at: st) }
+
+        check("the privileged move moves the unchanged item, puts back a replaced one and refuses an unidentified one",
+              staged == ["0-same.plist"] && p9.report.changed == [1] && p9.report.unidentified == [2]
+              && (try? String(contentsOf: swapped, encoding: .utf8)) == "replaced during the password dialog"
+              && fm.fileExists(atPath: unknown.path))
+        if let st = p9.staging { try? fm.removeItem(at: st) }
+
+        // Only verified moves count: never inferred from the original being gone.
+        let asYou: AppEngine.AdminStepRunner = { items, uid in
+            let script = AdminStep.script(items, uid: uid, allowed: { _ in true }, parentOwner: uid, chown: "/usr/bin/true")
+            let out = Shell.run("/bin/sh", ["-c", script]).output
+            guard let st = AdminStep.parseStaging(out), AdminStep.isTrustedStaging(st, uid: uid) else { return .failed("no staging") }
+            return .ok(staging: st, report: .parse(out))
+        }
+        let vOK = plain(sys.appendingPathComponent("v-ok.plist"), "ok")
+        let vGone = plain(sys.appendingPathComponent("v-gone.plist"), "gone")
+        let vLocked = plain(sys.appendingPathComponent("v-locked.plist"), "locked")
+        let vSwapped = plain(sys.appendingPathComponent("v-swapped.plist"), "reviewed")
+        let vItems = [leftover(vOK, admin: true), leftover(vGone, admin: true), leftover(vLocked, admin: true), leftover(vSwapped, admin: true)]
+        try? fm.removeItem(at: vGone)                                         // gone before the privileged step
+        chflags(vLocked.path, UInt32(UF_IMMUTABLE))                           // its move will fail
+        try? fm.removeItem(at: vSwapped); _ = plain(vSwapped, "replaced")     // replaced
+        let mixed2 = AppEngine.removeSystemItems(vItems, adminStep: asYou)
+        chflags(vLocked.path, 0)
+        check("only the verified item counts as removed: not one that vanished, failed to move or was replaced",
+              mixed2.removed == [vOK] && mixed2.inTrash && !fm.fileExists(atPath: vOK.path)
+              && fm.fileExists(atPath: vLocked.path) && fm.fileExists(atPath: vSwapped.path))
+        check("each item that wasn't moved says why",
+              mixed2.errors.contains { $0.hasPrefix("v-gone.plist:") && $0.contains("gone before the password step") }
+              && mixed2.errors.contains { $0.hasPrefix("v-locked.plist:") && $0.contains("couldn't be moved") }
+              && mixed2.errors.contains { $0.hasPrefix("v-swapped.plist:") && $0.contains("changed after you reviewed") })
+        check("an item the privileged step didn't report on is never assumed moved",
+              AdminStep.Report().notMovedReason(0)?.contains("can't confirm") == true
+              && AdminStep.Report.parse("MACCLEANER-MOVED 0\nMACCLEANER-MISSING 1").notMovedReason(0) == nil
+              && AdminStep.Report.parse("MACCLEANER-MOVED 0\nMACCLEANER-MISSING 1").notMovedReason(1) != nil)
+        // Moved out of place, but the staging folder can't reach the Trash: reported as staged, not as in the Trash.
+        let vStaged = plain(sys.appendingPathComponent("v-staged.plist"), "staged")
+        let vItem = [leftover(vStaged, admin: true)]
+        AppCleanup.trashMover = { url in
+            if url.path.contains("/MacCleaner-uninstall.") { throw CocoaError(.fileWriteUnknown) }
+            return try isolatedMover(url)
+        }
+        let stagedOnly = AppEngine.removeSystemItems(vItem, adminStep: asYou)
+        AppCleanup.trashMover = isolatedMover
+        check("items moved into staging whose folder can't reach the Trash are reported as staged, not in the Trash",
+              stagedOnly.removed == [vStaged] && !stagedOnly.inTrash
+              && stagedOnly.errors.contains { $0.contains("couldn't be sent to the Trash") })
+        if let st = stagedOnly.errors.first.flatMap({ e -> URL? in
+            guard let r = e.range(of: "MacCleaner-uninstall.") else { return nil }
+            let tail = e[r.lowerBound...].prefix { $0 != "," && $0 != " " }
+            return URL(fileURLWithPath: AdminStep.stagingParent + "/" + tail)
+        }) { try? fm.removeItem(at: st) }
+        // The staging folder itself: a listing or removal failure is reported, never treated as done (injected operations).
+        struct Refused: Error {}
+        let stDir = base.appendingPathComponent("staging-check-\(runID)")
+        try? fm.createDirectory(at: stDir, withIntermediateDirectories: true)
+        let movedOne = AdminStep.Report.parse("MACCLEANER-MOVED 0"), movedNone = AdminStep.Report()
+        let unlistable = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                      list: { _ in throw Refused() }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
+        check("a staging folder that can't be listed is not reported as in the Trash, and stays",
+              !unlistable.inTrash && unlistable.error?.contains("couldn't be checked") == true && fm.fileExists(atPath: stDir.path))
+        let unremovable = AppEngine.sendStagingToTrash(stDir, movedNone, source: "Self-test",
+                                                       list: { _ in [] }, removeEmpty: { _ in throw Refused() }, moveToTrash: { _, _ in nil })
+        check("an empty staging folder that can't be removed is reported, not cleaned up silently",
+              unremovable.error?.contains("couldn't be removed") == true && fm.fileExists(atPath: stDir.path))
+        let movedButEmpty = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                         list: { _ in [] }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
+        check("verified items missing from the staging folder are never reported as in the Trash",
+              !movedButEmpty.inTrash && movedButEmpty.error?.contains("weren't found") == true)
+        let trashRefused = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                        list: { _ in ["0-item"] }, removeEmpty: { _ in }, moveToTrash: { _, _ in "refused" })
+        let trashOK = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                   list: { _ in ["0-item"] }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
+        check("verified items stay 'not in the Trash' until their staging folder actually moved there",
+              !trashRefused.inTrash && trashRefused.error?.contains("couldn't be sent to the Trash") == true
+              && trashOK.inTrash && trashOK.error == nil)
+        // A really unreadable staging folder, with the default (real) operations.
+        try? Data("x".utf8).write(to: stDir.appendingPathComponent("0-item"))
+        chmod(stDir.path, 0)
+        let unreadable = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test")
+        chmod(stDir.path, 0o755)
+        check("a staging folder the system won't list is reported and left alone",
+              !unreadable.inTrash && unreadable.error?.contains("couldn't be checked") == true
+              && fm.fileExists(atPath: stDir.appendingPathComponent("0-item").path))
+        try? fm.removeItem(at: stDir)
+
+        // The same rule in an uninstall: a leftover that vanished isn't counted, and the note says what happened.
+        let fooSys = plain(sys.appendingPathComponent("com.example.foo-gone-\(runID).plist"), "daemon")
+        // (The review blocks system leftovers outside the folders the password step may touch, and this one is in the
+        // sandbox, so it is passed to the engine directly next to what the review approved.)
+        let sysLeftover = leftover(fooSys, admin: true)
+        let fooA = app("Foo", fooURL, [leftover(fooSupport)])
+        let rAin = MainActor.assumeIsolated { confirmed(fooA) }
+        try? fm.removeItem(at: fooSys)
+        let rA = AppEngine.uninstall(fooA, picked: (rAin?.0 ?? []) + [sysLeftover], trash: rAin?.1, adminStep: asYou, adminAllowed: allowNone)
+        check("an uninstall doesn't count a system leftover that vanished, and says no system item was moved",
+              rA.appRemoved && rA.bytes == 15 && rA.adminNote.contains("No system item was moved")
+              && rA.errors.contains { $0.contains("gone before the password step") })
+        _ = putBack(fooURL); _ = putBack(fooSupport)
+
+        // 10. MCP uninstall_app, on a fake app in this home folder only.
+        let mcpApp = folder(SafetyGuard.home.appendingPathComponent("Applications/SelfTestUninstall\(runID).app/Contents"), "x")
+            .deletingLastPathComponent()
+        (["CFBundleIdentifier": "com.example.selftest.uninstall\(runID)", "CFBundleName": "SelfTestUninstall\(runID)"] as NSDictionary)
+            .write(to: mcpApp.appendingPathComponent("Contents/Info.plist"), atomically: true)
+        approvals.asked = []; approvals.answer = true
+        let mcpBundleID = "com.example.selftest.uninstall\(runID)"   // unique: only this fake app can match it
+        let up = (try? MCPServer.call("uninstall_app", ["app": mcpBundleID])) as? [String: Any]
+        let uc = (try? MCPServer.call("uninstall_app", ["app": mcpBundleID, "confirm": true,
+                                                        "preview_id": up?["preview_id"] as? String ?? ""])) as? [String: Any]
+        check("MCP uninstall_app removes the previewed app through the executor after the window, logged with who confirmed",
+              uc?["app_removed"] as? Bool == true && !fm.fileExists(atPath: mcpApp.path) && approvals.asked.count == 1
+              && log(mcpApp).first?.source == "Uninstall SelfTestUninstall\(runID) · AI assistant")
+        check("the MCP-uninstalled app can be put back", putBack(mcpApp))
+        try? fm.removeItem(at: mcpApp)
+
+        // 11. Remove alerts (Extensions, Startup items).
+        let extURL = folder(base.appendingPathComponent("Ext-\(runID).plugin"), "ext")
+        func ext() -> ExtItem {
+            ExtItem(id: extURL.path, url: extURL, name: "Ext", kind: "Plug-in", symbol: "puzzlepiece", allUsers: false, size: 3,
+                    identity: AppCleanup.snapshot(extURL))
+        }
+        @MainActor func alert(_ m: ExtensionsModel, _ x: ExtItem, beforeConfirm: () -> Void = {}) {
+            m.ask(x)
+            beforeConfirm()
+            let done = Slot<Bool>()
+            AlertConfirmation.confirm(id: x.id, name: x.name, shown: m.pendingShown, module: "extensions") { trash, refusal in
+                Task { @MainActor in await m.remove(x, trash: trash, refusal: refusal); done.value = true }
+            }
+            let end = Date().addingTimeInterval(60)
+            while done.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        }
+        let extOK: Bool = MainActor.assumeIsolated {
+            let m = ExtensionsModel()
+            alert(m, ext())
+            return m.message?.1 == false
+        }
+        check("an extension confirmed in its Remove alert goes to the Trash through the executor",
+              extOK && !fm.fileExists(atPath: extURL.path) && log(extURL).first?.source == "Extensions" && putBack(extURL))
+        let extStale: Bool = MainActor.assumeIsolated {
+            let m = ExtensionsModel()
+            let x = ext()
+            alert(m, x, beforeConfirm: { try? fm.removeItem(at: extURL); _ = folder(extURL, "replaced while the alert was open") })
+            return m.message?.1 == true && m.message?.0.contains("changed after you reviewed") == true
+        }
+        check("an extension replaced while its alert was open is left alone and reported", extStale && fm.fileExists(atPath: extURL.path))
+        let extRescan: Bool = MainActor.assumeIsolated {
+            let m = ExtensionsModel()
+            let x = ext()
+            try? fm.removeItem(at: extURL); _ = folder(extURL, "replaced before the alert")
+            alert(m, x)
+            return m.message?.0.contains("changed since the scan") == true
+        }
+        check("an extension replaced between the scan and its alert is refused (rescan)", extRescan && fm.fileExists(atPath: extURL.path))
+
+        // All-users extension and system startup item: the alert's refusal stops them before the password prompt.
+        let sysExt = folder(base.appendingPathComponent("AllUsersExt-\(runID).plugin"), "x")
+        func allUsersExt(_ identity: FileIdentity?) -> ExtItem {
+            ExtItem(id: sysExt.path, url: sysExt, name: "AllUsersExt", kind: "Plug-in", symbol: "puzzlepiece", allUsers: true, size: 1,
+                    identity: identity)
+        }
+        let promptsBefore = stepCalls.count
+        let staleAllUsers: String? = MainActor.assumeIsolated {
+            let m = ExtensionsModel()
+            let x = allUsersExt(AppCleanup.snapshot(sysExt))
+            try? fm.removeItem(at: sysExt); _ = folder(sysExt, "replaced before the alert")
+            m.ask(x)
+            let refusal = m.pendingShown.refusal
+            _ = wait { await m.remove(x, trash: nil, refusal: refusal, adminStep: step); return true }
+            return m.message?.0
+        }
+        let unidentifiedAllUsers: String? = MainActor.assumeIsolated {
+            let m = ExtensionsModel()
+            let x = allUsersExt(nil)
+            m.ask(x)
+            let refusal = m.pendingShown.refusal
+            _ = wait { await m.remove(x, trash: nil, refusal: refusal, adminStep: step); return true }
+            return m.message?.0
+        }
+        check("an all-users extension that changed or wasn't identified is refused before the password prompt",
+              stepCalls.count == promptsBefore && staleAllUsers?.contains("changed since the scan") == true
+              && unidentifiedAllUsers?.contains("wasn't identified") == true && fm.fileExists(atPath: sysExt.path))
+        let freshAllUsers: Bool = MainActor.assumeIsolated {
+            let m = ExtensionsModel()
+            let x = allUsersExt(AppCleanup.snapshot(sysExt))
+            m.ask(x)
+            let refusal = m.pendingShown.refusal
+            _ = wait { await m.remove(x, trash: nil, refusal: refusal, adminStep: step); return true }
+            return refusal == nil
+        }
+        check("an unchanged all-users extension goes to the password step with its scanned identity",
+              freshAllUsers && stepCalls.count == promptsBefore + 1 && stepCalls.all.last?.hasPrefix(sysExt.path + "|") == true)
+        let sysAgent = plain(base.appendingPathComponent("com.example.system-\(runID).plist"), "daemon")
+        let staleSystem: String? = MainActor.assumeIsolated {
+            let m = StartupModel()
+            let st = StartupItem(id: sysAgent.path, url: sysAgent, label: "com.example.system-\(runID)", program: "/bin/true",
+                                 owner: "SystemJob", scope: .system, running: true, runAtLoad: true, identity: AppCleanup.snapshot(sysAgent))
+            try? fm.removeItem(at: sysAgent); _ = plain(sysAgent, "replaced before the alert")
+            m.ask(st)
+            let refusal = m.pendingShown.refusal
+            _ = wait { await m.remove(st, trash: nil, refusal: refusal, adminStep: step, stopJob: stopJob); return true }
+            return m.message?.0
+        }
+        check("a system startup item that changed is refused before the password prompt",
+              stepCalls.count == promptsBefore + 1 && staleSystem?.contains("changed since the scan") == true && fm.fileExists(atPath: sysAgent.path))
+
+        // A refused Trash approval (or a changed file) for your startup item stops nothing and moves nothing.
+        let myAgent = plain(base.appendingPathComponent("com.example.mine-\(runID).plist"), "mine")
+        let jobsBefore = jobs.count
+        let refusedStartup: String? = MainActor.assumeIsolated {
+            let m = StartupModel()
+            let st = StartupItem(id: myAgent.path, url: myAgent, label: "com.example.mine-\(runID)", program: "/bin/true",
+                                 owner: "Mine", scope: .user, running: true, runAtLoad: true, identity: AppCleanup.snapshot(myAgent))
+            m.ask(st)
+            guard let plan = AppCleanup.trashPlan([(st.id, st.owner, m.pendingShown.identity!, 0, "")], module: "startup") else { return nil }
+            _ = wait { await m.remove(st, trash: .refused(plan: plan, reason: "No approval was issued (test)"), refusal: nil,
+                                      adminStep: step, stopJob: stopJob); return true }
+            return m.message?.0
+        }
+        check("a refused approval for a startup item runs no launchctl and leaves the file untouched",
+              jobs.count == jobsBefore && refusedStartup?.contains("No approval was issued") == true
+              && (try? String(contentsOf: myAgent, encoding: .utf8)) == "mine")
+        let staleStartup: Bool = MainActor.assumeIsolated {
+            let m = StartupModel()
+            let st = StartupItem(id: myAgent.path, url: myAgent, label: "com.example.mine-\(runID)", program: "/bin/true",
+                                 owner: "Mine", scope: .user, running: true, runAtLoad: true, identity: AppCleanup.snapshot(myAgent))
+            m.ask(st)
+            try? fm.removeItem(at: myAgent); _ = plain(myAgent, "replaced while the alert was open")
+            let done = Slot<Bool>()
+            AlertConfirmation.confirm(id: st.id, name: st.owner, shown: m.pendingShown, module: "startup") { trash, refusal in
+                Task { @MainActor in await m.remove(st, trash: trash, refusal: refusal, adminStep: step, stopJob: stopJob); done.value = true }
+            }
+            let end = Date().addingTimeInterval(60)
+            while done.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return m.message?.0.contains("changed after you reviewed") == true
+        }
+        check("a startup item replaced while its alert was open stops nothing and stays",
+              staleStartup && jobs.count == jobsBefore && fm.fileExists(atPath: myAgent.path))
+
+        let agent = plain(base.appendingPathComponent("com.example.selftest-\(runID).plist"), "agent")
+        let startupOK: Bool = MainActor.assumeIsolated {
+            let m = StartupModel()
+            let s = StartupItem(id: agent.path, url: agent, label: "com.example.selftest-\(runID)", program: "/bin/true",
+                                owner: "SelfTest", scope: .user, running: false, runAtLoad: false, identity: AppCleanup.snapshot(agent))
+            m.ask(s)
+            let done = Slot<Bool>()
+            AlertConfirmation.confirm(id: s.id, name: s.owner, shown: m.pendingShown, module: "startup") { trash, refusal in
+                Task { @MainActor in await m.remove(s, trash: trash, refusal: refusal, adminStep: step, stopJob: stopJob); done.value = true }
+            }
+            let end = Date().addingTimeInterval(60)
+            while done.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return m.message?.1 == false
+        }
+        check("a startup item confirmed in its alert is moved through the executor, then stopped, and can be put back",
+              startupOK && !fm.fileExists(atPath: agent.path) && log(agent).first?.source == "Startup items"
+              && jobs.all.last == "com.example.selftest-\(runID)" && putBack(agent))
     }
 
     // MARK: Trash isolation

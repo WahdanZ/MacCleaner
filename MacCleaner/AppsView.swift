@@ -227,7 +227,7 @@ private struct AppDetail: View {
                     .disabled(a.cacheSize == 0 || apps.phase == .working)
 
                     Button {
-                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { picked in Task { await apps.uninstall(a, picked: picked) } }) }
+                        if let a = apps.selected { review.present(ReviewBuild.uninstall(a, running: apps.isRunning(a)) { picked, trash in Task { await apps.uninstall(a, picked: picked, trash: trash) } }) }
                     } label: {
                         Label("Uninstall…", systemImage: "trash")
                     }

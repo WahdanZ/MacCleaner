@@ -355,3 +355,30 @@ struct LocalStagingTests {
         #expect(try String(contentsOfFile: path, encoding: .utf8) == "someone else's")
     }
 }
+
+@Suite("LocalFileSystem: permission refusals")
+struct LocalPermissionTests {
+    @Test func classifiesOnlyPermissionErrors() {
+        #expect(LocalFileSystem.isPermissionError(CocoaError(.fileWriteNoPermission)))
+        #expect(LocalFileSystem.isPermissionError(NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))))
+        #expect(LocalFileSystem.isPermissionError(NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))))
+        #expect(LocalFileSystem.isPermissionError(NSError(domain: NSCocoaErrorDomain, code: 1,
+                                                          userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))])))
+        #expect(!LocalFileSystem.isPermissionError(CocoaError(.fileNoSuchFile)))
+        #expect(!LocalFileSystem.isPermissionError(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))))
+    }
+
+    @Test func aTrashMoveRefusedForPermissionIsReportedAsSuch() throws {
+        let box = try Sandbox()
+        try box.file("f")
+        let fs = LocalFileSystem(trashMover: { _ in throw CocoaError(.fileWriteNoPermission) }, beforeMove: nil)
+        #expect(throws: FileSystemRefusal.self) { try fs.moveToTrash(try box.capture("f")) }
+        do { _ = try fs.moveToTrash(try box.capture("f")) } catch let r as FileSystemRefusal {
+            if case .permissionDenied = r {} else { Issue.record("expected permissionDenied, got \(r)") }
+        }
+        let other = LocalFileSystem(trashMover: { _ in throw CocoaError(.fileWriteOutOfSpace) }, beforeMove: nil)
+        #expect(throws: CocoaError.self) { try other.moveToTrash(try box.capture("f")) }
+        #expect(box.exists("f"))
+    }
+}
+

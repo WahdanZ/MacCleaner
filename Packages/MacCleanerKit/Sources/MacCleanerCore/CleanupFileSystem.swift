@@ -10,6 +10,9 @@ public enum FileSystemRefusal: Error, Sendable, Hashable {
     case changed(IdentityMismatch)
     /// Protected by the time it was reached (re-checked after it was moved out of reach, before deleting).
     case protected(String)
+    /// The system refused the operation for lack of permission (e.g. an app owned by root). Not a safety refusal:
+    /// a caller may offer an administrator step for it, under its own checks.
+    case permissionDenied(String)
 }
 
 /// The protection rules for one removal, asked again for every entry right before it is deleted: nil when the path

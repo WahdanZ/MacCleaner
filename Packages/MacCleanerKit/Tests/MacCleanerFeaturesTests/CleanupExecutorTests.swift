@@ -16,6 +16,7 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
     private var _ops: [Op] = []
     private var partial: [String: RemovalResult] = [:]
     private var failing: Set<String> = []
+    private var denied: Set<String> = []
     /// Runs inside an operation, after the executor's own check and before the fake's last-moment check.
     private var hook: (@Sendable (String) -> Void)?
 
@@ -28,6 +29,7 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
     func delete(_ path: String) { locked { items[path] = nil } }
     func partially(_ path: String, _ r: RemovalResult) { locked { partial[path] = r } }
     func fail(_ path: String) { locked { _ = failing.insert(path) } }
+    func denyPermission(_ path: String) { locked { _ = denied.insert(path) } }
     func onAct(_ f: @escaping @Sendable (String) -> Void) { locked { hook = f } }
 
     func identity(at path: String) throws -> FileIdentity? { locked { items[path] } }
@@ -46,6 +48,7 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
             guard let now = items[item.path] else { throw FileSystemRefusal.missing }
             if let m = item.mismatch(against: now) { throw FileSystemRefusal.changed(m) }
             if failing.contains(item.path) { throw PlatformError(message: "\(item.path): Operation not permitted") }
+            if denied.contains(item.path) { throw FileSystemRefusal.permissionDenied("\(item.path): owned by root") }
             _ops.append(op)
             if partial[item.path] == nil { items = items.filter { !PathRules.isInside($0.key, item.path) } }
         }
@@ -181,6 +184,15 @@ struct ExecutorRevalidationTests {
         #expect(results(report)[file.path] == .skipped(.preconditionFailed("no copy left")))
         let left = await exec.outstandingApprovals
         #expect(fs.ops == [.trash(other.path)] && left == 0)
+    }
+
+    @Test func aPermissionRefusalIsDistinctFromOtherOutcomes() async throws {
+        let fs = FakeFS([file])
+        fs.denyPermission(file.path)
+        let p = try plan([.init(candidate("f", [.file(file)]), .trash)])
+        let (report, _) = try await run(CleanupExecutor(fileSystem: fs, protection: Protected()), p)
+        #expect(results(report)[file.path] == .permissionDenied("\(file.path): owned by root"))
+        #expect(fs.ops.isEmpty && !report.allSucceeded)
     }
 
     @Test func alreadyDeletedIsReportedAsMissing() async throws {

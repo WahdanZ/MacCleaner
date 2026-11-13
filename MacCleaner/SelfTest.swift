@@ -1392,7 +1392,7 @@ extension SelfTest {
     static func confirmTrashReview(_ urls: [URL]) -> TrashApproval?? {
         let got = Slot<TrashApproval?>()
         let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
-                                             urls.map { ($0, 1, nil) }) { approval in got.value = .some(approval) }
+                                             urls.map { ($0, 1, nil) }) { _, approval in got.value = .some(approval) }
         ReviewConfirmation.confirm(request)
         let end = Date().addingTimeInterval(30)
         while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
@@ -1427,7 +1427,7 @@ extension SelfTest {
         let declined = file("declined")
         let before = outstanding()
         _ = MainActor.assumeIsolated {
-            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(declined, 1, nil)]) { _ in }
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(declined, 1, nil)]) { _, _ in }
         }
         check("a cancelled review issues no approval and moves nothing",
               outstanding() == before && fm.fileExists(atPath: declined.path))
@@ -1453,7 +1453,7 @@ extension SelfTest {
         let staleReview = MainActor.assumeIsolated { () -> TrashApproval?? in
             let got = Slot<TrashApproval?>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(stale, 1, nil)]) {
-                got.value = .some($0)
+                got.value = .some($1)
             }
             try? Data("written after review".utf8).write(to: stale)   // between the sheet opening and the click
             ReviewConfirmation.confirm(request)
@@ -1471,7 +1471,7 @@ extension SelfTest {
         let replacedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
             let got = Slot<TrashApproval?>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(replaced, 1, nil)]) {
-                got.value = .some($0)
+                got.value = .some($1)
             }
             try? fm.removeItem(at: replaced)
             try? Data("a different file".utf8).write(to: replaced)
@@ -1490,7 +1490,7 @@ extension SelfTest {
         let guardedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
             let got = Slot<TrashApproval?>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(guarded, 1, nil)]) {
-                got.value = .some($0)
+                got.value = .some($1)
             }
             ProtectedPaths.set(savedProtected + [guarded.path])
             ReviewConfirmation.confirm(request)
@@ -1523,9 +1523,24 @@ extension SelfTest {
         check("an item added after the review isn't moved", shownRun?.moved.keys.sorted() == [shown.path]
               && fm.fileExists(atPath: later.path))
         _ = putBack(shown)
+        let allowedOne = file("allowed"), blockedOne = file("blocked")
+        ProtectedPaths.set(savedProtected + [blockedOne.path])
+        let mixed = MainActor.assumeIsolated { () -> ([URL], TrashApproval?)? in
+            let got = Slot<([URL], TrashApproval?)>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
+                                                 [(allowedOne, 1, nil), (blockedOne, 1, nil)]) { got.value = ($0, $1) }
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        ProtectedPaths.set(savedProtected)
+        let mixedPlan: [String]? = { if case .approved(let a)? = mixed?.1 { return a.plan.candidates.map(\.id) }; return nil }()
+        check("a blocked item is neither approved nor handed to the screen",
+              mixed?.0 == [allowedOne] && mixedPlan == [allowedOne.path])
         let gone = dir.appendingPathComponent("never-there-\(runID).txt")
         let goneRequest = MainActor.assumeIsolated {
-            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(gone, 1, nil)]) { _ in }
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(gone, 1, nil)]) { _, _ in }
         }
         check("an item missing when the sheet opens is blocked and not in the plan",
               goneRequest.items.first?.blocked != nil && goneRequest.trashPlan == nil)

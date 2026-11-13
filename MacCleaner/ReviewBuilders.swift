@@ -45,16 +45,19 @@ enum ReviewBuild {
                              perform: { _ in },
                              trashPlan: AppCleanup.trashPlan(dl, module: "downloads"),
                              performApproved: { ok, approval in
-                                 perform(targets.filter { ok.contains("cache:\($0.id)") }, downloads, approval)
+                                 perform(targets.filter { ok.contains("cache:\($0.id)") },
+                                         downloads.filter { ok.contains("dl:\($0.id)") }, approval)
                              })
     }
 
     // MARK: Files that go to the Trash
 
     /// Items going to the Trash on the approved path (row id = path). Each item's identity is captured now, when the
-    /// sheet opens; the plan is built from exactly these snapshots and `perform` gets the approval for it.
+    /// sheet opens; the plan is built from exactly these snapshots. `perform` gets the reviewed, allowed URLs (the
+    /// ones in the plan; blocked items are left out, as before) and the approval for them.
     static func trashFiles(title: String, explanation: String, module: String, _ files: [(URL, Int64, String?)],
-                           perform: @escaping (TrashApproval?) -> Void) -> ReviewRequest {
+                           perform: @escaping ([URL], TrashApproval?) -> Void) -> ReviewRequest {
+        let urls = files.map(\.0)
         let items = files.map { u, size, note -> ReviewItem in
             let snap = AppCleanup.snapshot(u)
             return ReviewItem(id: u.path, name: u.lastPathComponent, location: u.path, size: size, action: .trash,
@@ -63,7 +66,7 @@ enum ReviewBuild {
         }
         return ReviewRequest(title: title, explanation: explanation, items: items, verb: "Move", perform: { _ in },
                              trashPlan: AppCleanup.trashPlan(items, module: module),
-                             performApproved: { _, approval in perform(approval) })
+                             performApproved: { ok, approval in perform(urls.filter { ok.contains($0.path) }, approval) })
     }
 
     static func diskMap(_ m: DiskMapModel, perform: @escaping ([DiskNode], TrashApproval?) -> Void) -> ReviewRequest {
@@ -72,7 +75,9 @@ enum ReviewBuild {
                           explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
                           module: "storage",
                           nodes.map { ($0.url, $0.size, $0.isDirectory ? "folder" : nil) },
-                          perform: { approval in perform(nodes, approval) })
+                          perform: { urls, approval in
+                              let ok = Set(urls.map(\.path)); perform(nodes.filter { ok.contains($0.url.path) }, approval)
+                          })
     }
 
     static func largeFiles(_ m: LargeFilesModel, perform: @escaping ([BigFile], TrashApproval?) -> Void) -> ReviewRequest {
@@ -81,7 +86,9 @@ enum ReviewBuild {
                           explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
                           module: "large-files",
                           files.map { ($0.url, $0.size, $0.lastOpened.map { "last opened " + $0.formatted(date: .abbreviated, time: .omitted) }) },
-                          perform: { approval in perform(files, approval) })
+                          perform: { urls, approval in
+                              let ok = Set(urls.map(\.path)); perform(files.filter { ok.contains($0.url.path) }, approval)
+                          })
     }
 
     static func duplicates(_ m: DupFinder, perform: @escaping ([URL], TrashApproval?) -> Void) -> ReviewRequest {
@@ -94,7 +101,7 @@ enum ReviewBuild {
         }
         return trashFiles(title: "Move Duplicates to Trash",
                           explanation: "At least one copy of every file stays (shown in Status). The copies below go to the Trash and can be put back.",
-                          module: "duplicates", files, perform: { approval in perform(files.map(\.0), approval) })
+                          module: "duplicates", files, perform: perform)
     }
 
     // MARK: Apps

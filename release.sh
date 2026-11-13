@@ -42,7 +42,8 @@ scripts/make-dmg.sh "$APP" "$DMG" "$IDENTITY"
 xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$DMG"
 
-echo "--- Gatekeeper check"
-spctl --assess --type execute --verbose "$APP"
-spctl --assess --type open --context context:primary-signature --verbose "$DMG"
+echo "--- verify"
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+(cd build && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
+scripts/verify-release.sh "$DMG" --version "$VERSION" --team "$TEAM_ID" --no-sig
 echo "Done: $DMG"

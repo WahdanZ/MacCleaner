@@ -55,6 +55,16 @@ jobs:
             | "$APP/Contents/MacOS/Mac Cleaner" --mcp \
             | python3 -c 'import json,sys; r=[json.loads(l) for l in sys.stdin]; n=len(r[1]["result"]["tools"]); print(n, "tools"); assert n >= 21'
 
+      # Release checks that need no credentials: hardened runtime, exact entitlements, bundle ID, version,
+      # deep code signature, checksum. Developer ID, notarization and Gatekeeper need the release secrets
+      # and are checked by the Release workflow and scripts/sign-release.sh.
+      - name: Release verification (dev mode, no credentials)
+        run: |
+          V=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          scripts/make-dmg.sh "$APP" "build/MacCleaner-$V.dmg"
+          (cd build && shasum -a 256 "MacCleaner-$V.dmg" > "MacCleaner-$V.dmg.sha256")
+          scripts/verify-release.sh "build/MacCleaner-$V.dmg" --version "$V" --dev --no-sig
+
       - name: Package app
         run: ditto -c -k --keepParent "$APP" MacCleaner-unsigned.zip
 

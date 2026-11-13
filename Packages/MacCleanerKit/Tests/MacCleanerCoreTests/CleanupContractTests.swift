@@ -19,6 +19,14 @@ private func plan(_ entries: [CleanupPlan.Entry]) -> CleanupPlan {
     do { return try CleanupPlan(entries) } catch { fatalError("plan refused: \(error)") }
 }
 
+private func entry(_ name: String, inode: UInt64 = 200) -> FileIdentity {
+    ident(ident().path + "/" + name, inode: inode + UInt64(name.unicodeScalars.first!.value), kind: .file)
+}
+
+private func contents(_ names: [String] = ["a"]) -> CleanupTarget {
+    .directoryContents(folder: ident(), entries: names.map { entry($0) })
+}
+
 private let simctl = ToolCommand(executable: "/usr/bin/xcrun", arguments: ["simctl", "runtime", "delete", "X"],
                                  consequence: "The iOS 17.2 simulator runtime")
 
@@ -98,13 +106,13 @@ struct CleanupPlanTests {
         #expect(a.digest != relinked.digest)
     }
 
+
     @Test func digestCoversDispositionTargetFormAndOrder() {
         let x = candidate("x"), y = candidate("y", targets: [.file(ident(inode: 7))])
         let base = plan([.init(x, .permanentDelete), .init(y, .permanentDelete)])
         #expect(base.digest != plan([.init(x, .trash), .init(y, .permanentDelete)]).digest)
         #expect(base.digest != plan([.init(y, .permanentDelete), .init(x, .permanentDelete)]).digest)
-        let contents = plan([.init(candidate("x", targets: [.directoryContents(ident())]), .permanentDelete),
-                             .init(y, .permanentDelete)])
+        let contents = plan([.init(candidate("x", targets: [contents()]), .permanentDelete), .init(y, .permanentDelete)])
         #expect(base.digest != contents.digest)
     }
 
@@ -112,6 +120,16 @@ struct CleanupPlanTests {
         let a = plan([.init(candidate(title: "Caches", bytes: 10), .trash)])
         let b = plan([.init(candidate(title: "App caches", bytes: 99), .trash)])
         #expect(a.digest == b.digest)
+    }
+
+    @Test func digestCoversWhatThePersonWasWarnedAbout() {
+        let safe = plan([.init(candidate(risk: .safeRegenerable), .trash)])
+        #expect(safe.digest != plan([.init(candidate(risk: .potentialUserData), .trash)]).digest)
+        func cmd(_ consequence: String) -> CleanupPlan {
+            plan([.init(candidate(targets: [.command(ToolCommand(executable: simctl.executable, arguments: simctl.arguments,
+                                                                 consequence: consequence))]), .command)])
+        }
+        #expect(cmd("The iOS 17.2 runtime; Xcode downloads it again").digest != cmd("Nothing").digest)
     }
 
     @Test func commandArgumentsAreLengthPrefixed() {
@@ -133,35 +151,118 @@ struct CleanupPlanTests {
     }
 }
 
-@Suite("CleanupApproval")
-struct CleanupApprovalTests {
+@Suite("Folder contents")
+struct DirectoryContentsTests {
+    @Test func directChildrenOnTheSameVolumeOnly() {
+        let folder = ident()
+        #expect(entry("a").isDirectChild(of: folder))
+        #expect(!ident(folder.path + "/a/b", inode: 5).isDirectChild(of: folder))       // nested
+        #expect(!ident(folder.path + "x/a", inode: 5).isDirectChild(of: folder))        // sibling prefix
+        #expect(!ident(folder.path + "/m", device: 9, inode: 5).isDirectChild(of: folder))  // mount point
+        #expect(!ident(folder.path, inode: 5).isDirectChild(of: folder))                 // itself
+        #expect(!entry("a").isDirectChild(of: ident(kind: .file)))                       // not a folder
+    }
+
+    @Test func planRefusesUnreviewedOrForeignEntries() {
+        let folder = ident()
+        #expect(throws: CleanupPlan.Problem.emptyContents("c1")) {
+            try CleanupPlan([.init(candidate(targets: [.directoryContents(folder: folder, entries: [])]), .permanentDelete)])
+        }
+        #expect(throws: CleanupPlan.Problem.entryOutsideFolder("c1")) {
+            try CleanupPlan([.init(candidate(targets: [.directoryContents(folder: folder, entries: [
+                entry("a"), ident("/Users/tester/Documents/x", inode: 6)])]), .permanentDelete)])
+        }
+        #expect(throws: CleanupPlan.Problem.entryOutsideFolder("c1")) {
+            try CleanupPlan([.init(candidate(targets: [.directoryContents(folder: folder, entries: [
+                ident(folder.path + "/m", device: 9, inode: 5)])]), .permanentDelete)])
+        }
+    }
+
+    @Test func anEntryAddedAfterReviewChangesTheDigest() {
+        let reviewed = plan([.init(candidate(targets: [contents(["a", "b"])]), .permanentDelete)])
+        let grown = plan([.init(candidate(targets: [contents(["a", "b", "c"])]), .permanentDelete)])
+        let swapped = plan([.init(candidate(targets: [.directoryContents(folder: ident(), entries: [
+            entry("a"), ident(ident().path + "/b", inode: 999)])]), .permanentDelete)])
+        #expect(reviewed.digest != grown.digest)
+        #expect(reviewed.digest != swapped.digest)
+    }
+
+    @Test func theExecutorReportsNewEntriesAsSkipped() {
+        let added = ItemOutcome(candidateID: "c1", target: .file(entry("new")), result: .skipped(.addedAfterReview))
+        #expect(!added.succeeded)
+    }
+}
+
+@Suite("Approval ledger")
+struct ApprovalLedgerTests {
     let p = plan([.init(candidate(), .permanentDelete)])
     let t0 = Date(timeIntervalSince1970: 1_000_000)
 
-    @Test func authorizesTheApprovedPlanWithinItsLifetime() {
-        let a = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 60)
+    @Test func anIssuedApprovalWorksOnceForItsPlan() {
+        var ledger = ApprovalLedger()
+        let a = ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 60)
+        #expect(a.planDigest == p.digest && a.expires == t0 + 60)
+        #expect(ledger.redeem(a, for: p, at: t0 + 59) == nil)
+        #expect(ledger.redeem(a, for: p, at: t0 + 59) == .alreadyUsed)
+        #expect(ledger.outstandingCount == 0)
+    }
+
+    @Test func anApprovalNotIssuedHereIsRefused() {
+        var mine = ApprovalLedger(), other = ApprovalLedger()
+        let foreign = other.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 60)
+        #expect(mine.redeem(foreign, for: p, at: t0) == .notIssued)
+        // Made outside a ledger (only possible inside Core; the initializer isn't public).
+        let forged = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 60, nonce: UUID())
+        #expect(mine.redeem(forged, for: p, at: t0) == .notIssued)
+    }
+
+    @Test func aTamperedCopyIsRefused() {
+        var ledger = ApprovalLedger()
+        let a = ledger.issue(for: p, approvedBy: .userViaMCPPrompt, at: t0, lifetime: 60)
+        let copy = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 600, nonce: a.nonce)
+        #expect(ledger.redeem(copy, for: p, at: t0) == .notIssued)
+    }
+
+    @Test func aChangedPlanOrLateUseIsRefusedAndUsesItUp() {
+        var ledger = ApprovalLedger()
+        let swapped = plan([.init(candidate(targets: [.file(ident(inode: 101))]), .permanentDelete)])
+        let a = ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
+        #expect(ledger.redeem(a, for: swapped, at: t0) == .planChanged)
+        #expect(ledger.redeem(a, for: p, at: t0) == .alreadyUsed)       // fail closed: approve again
+
+        let b = ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
+        #expect(ledger.redeem(b, for: p, at: t0 + 60) == .expired)
+        #expect(ledger.redeem(b, for: p, at: t0 + 60) == .notIssued)    // used up and past expiry: forgotten
+
+        let c = ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
+        ledger.prune(at: t0 + 61)
+        #expect(ledger.redeem(c, for: p, at: t0 + 61) == .notIssued)    // expired unused approvals are dropped
+    }
+
+    @Test func zeroLifetimeNeverAuthorizes() {
+        var ledger = ApprovalLedger()
+        let a = ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 0)
+        #expect(ledger.redeem(a, for: p, at: t0) != nil)
+        let b = ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: -5)
+        #expect(ledger.redeem(b, for: p, at: t0) != nil)
+    }
+
+    @Test func validityWindowIsHalfOpen() {
+        let a = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 60, nonce: UUID())
         #expect(a.refusal(for: p, at: t0) == nil)
-        #expect(a.refusal(for: p, at: t0 + 59) == nil)
         #expect(a.refusal(for: p, at: t0 + 60) == .expired)
         #expect(a.refusal(for: p, at: t0 - 1) == .expired)
     }
 
-    @Test func aChangedPlanIsRefused() {
-        let a = CleanupApproval(plan: p, approvedBy: .userInTerminal, issued: t0, lifetime: 60)
-        let swapped = plan([.init(candidate(targets: [.file(ident(inode: 101))]), .permanentDelete)])
-        #expect(a.refusal(for: swapped, at: t0) == .planChanged)
-    }
-
-    @Test func zeroLifetimeNeverAuthorizes() {
-        #expect(CleanupApproval(plan: p, approvedBy: .userViaMCPPrompt, issued: t0, lifetime: 0).refusal(for: p, at: t0) == .expired)
-        #expect(CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: -5).refusal(for: p, at: t0) == .expired)
-    }
-
-    @Test func eachApprovalHasItsOwnNonce() {
-        let a = CleanupApproval(plan: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), issued: t0, lifetime: 60)
-        let b = CleanupApproval(plan: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), issued: t0, lifetime: 60)
+    @Test func eachApprovalHasItsOwnNonceAndApprover() {
+        var ledger = ApprovalLedger()
+        let a = ledger.issue(for: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), at: t0, lifetime: 60)
+        let b = ledger.issue(for: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), at: t0, lifetime: 60)
         #expect(a.nonce != b.nonce)
-        #expect(a.approvedBy != CleanupApproval.Approver.standingPolicy(id: "safe-clean", version: 2))
+        #expect(a.approvedBy != .standingPolicy(id: "safe-clean", version: 2))
+        #expect(ledger.outstandingCount == 2)
+        ledger.prune(at: t0 + 60)
+        #expect(ledger.outstandingCount == 0)
     }
 }
 

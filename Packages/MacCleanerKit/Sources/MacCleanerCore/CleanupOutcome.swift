@@ -55,6 +55,8 @@ public enum SkipReason: Sendable, Hashable {
     /// It isn't the item that was reviewed any more.
     case changed(IdentityMismatch)
     case missing
+    /// An entry that appeared in a reviewed folder after review. Left alone: the person never saw it.
+    case addedAfterReview
     /// The person cancelled before this item.
     case cancelled
 }

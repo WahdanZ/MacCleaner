@@ -45,12 +45,13 @@ All types are `Sendable` value types.
 |---|---|
 | `FileIdentity` | `path`, `device`, `inode`, `type` (file/dir/link), `size`, `mtime`, `linkCount`, `flags`. Captured at scan, re-captured before execution. |
 | `CleanupCandidate` | `id`, `module`, `title`, `targets: [Target]`, `estimatedBytes`, `allocatedBytes`, `risk`, `recommended`, `explanation`. |
-| `Target` | `.file(FileIdentity)`, `.directoryContents(FileIdentity)`, `.command(ToolCommand)` (simctl, docker, tmutil) with a human description of what is lost. |
+| `CleanupTarget` | `.file(FileIdentity)` (a folder here means its whole subtree: folder identity revalidated, protection re-checked over the subtree), `.directoryContents(folder:, entries:)` (only the reviewed direct entries, each revalidated; an entry added after review is skipped as `addedAfterReview`), `.command(ToolCommand)` (simctl, docker, tmutil) with a human description of what is lost. |
 | `CleanupRisk` | `safeRegenerable`, `reviewRequired`, `potentialUserData`, `privileged`, `protected`. |
 | `Disposition` | `.trash`, `.permanentDelete`, `.overwriteThenDelete`, `.quarantine`, `.command` — separate from risk. |
 | `ScanOutcome<Item>` | `items`, `inaccessible: [AccessProblem]`, `partialErrors`, `wasCancelled`, `isComplete`, `warnings`. |
-| `CleanupPlan` | ordered candidates + dispositions + a `planDigest` over *identities*, not just paths. |
+| `CleanupPlan` | ordered candidates + dispositions + a `digest` (SHA-256) over ids, module, **risk**, disposition and target *identities* (every reviewed folder entry; a command's executable, arguments and **consequence**), not just paths. Display text (title, explanation, sizes) is left out. |
 | `CleanupApproval` | `planDigest`, `approvedBy: .userInApp / .userInTerminal / .userViaMCPPrompt / .standingPolicy(AutomationPolicy.id, version)`, `expires`, single-use nonce. An agent cannot mint one. |
+| `ApprovalLedger` | The only maker of `CleanupApproval` (its initializer is internal to Core) and the only place one is accepted. Owned by the executor; `issue` is reachable only from the trusted flows (review sheet, terminal prompt on a TTY, `HumanApproval` window for MCP, an enabled `AutomationPolicy`). `redeem` checks issued here, unused, same plan digest, inside `[issued, expires)`, and consumes the approval whatever the result (fail closed). |
 | `AutomationPolicy` | A standing, opt-in authorization for unattended runs (scheduled safe clean). See §3a. |
 | `CleanupReport` / `ItemOutcome` | per-target `.removed(bytes)`, `.trashed(recoveryURL)`, `.skipped(reason)`, `.failed(error)`, `.partiallyDone(done, kept, damaged)`; totals split into *freed* vs *moved to Trash*. A report never rounds a partial outcome up to success or down to "nothing happened". |
 | `ProtectionPolicy` | merges hard-coded structural/sensitive roots, user protection, scan exclusions, module exclusions; one case-insensitive comparison; documented precedence: **hard-coded > user protected > module exclusion > scan exclusion**. |

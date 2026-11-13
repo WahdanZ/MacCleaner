@@ -2,8 +2,9 @@ import CryptoKit
 import Foundation
 
 // The plan the person reviews and the approval that authorizes exactly that plan. The approval names the plan by a
-// digest over the items' identities (device, inode, kind, size, time), not just their paths, so swapping an item
-// after review, or editing the plan after approval, makes the approval not match.
+// digest over the items' identities (device, inode, kind, size, time), not just their paths, and over what the
+// person was warned about (risk, what a command loses). Swapping an item after review, adding an entry to a folder
+// whose contents were reviewed, changing a warning, or editing the plan after approval makes the approval not match.
 
 /// How risky an item is to remove. Separate from what is done with it (`Disposition`).
 public enum CleanupRisk: Int, Sendable, Hashable, Comparable, CaseIterable {
@@ -37,6 +38,7 @@ public struct ToolCommand: Sendable, Hashable {
     public let executable: String
     public let arguments: [String]
     /// What the person loses, in plain words ("The iOS 17.2 simulator runtime; Xcode downloads it again").
+    /// Part of the plan digest: it is the warning the person approved.
     public let consequence: String
 
     public init(executable: String, arguments: [String], consequence: String) {
@@ -48,10 +50,14 @@ public struct ToolCommand: Sendable, Hashable {
 
 /// One thing a candidate removes.
 public enum CleanupTarget: Sendable, Hashable {
-    /// The item itself (a file, a folder with everything in it, or a symlink as a link).
+    /// The item itself: a file, a symlink as a link, or a folder with its whole subtree. For a folder the executor
+    /// revalidates the folder's identity and re-checks protection over the subtree (a protected item inside blocks
+    /// it), but does not snapshot every nested file; use `directoryContents` where entries come and go.
     case file(FileIdentity)
-    /// Everything inside the folder; the folder stays.
-    case directoryContents(FileIdentity)
+    /// The folder's direct entries as they were when reviewed; the folder itself stays. Only these entries are
+    /// removed, each revalidated against its identity. An entry that appeared after review is left alone and
+    /// reported as `SkipReason.addedAfterReview`.
+    case directoryContents(folder: FileIdentity, entries: [FileIdentity])
     case command(ToolCommand)
 }
 
@@ -66,6 +72,7 @@ public struct CleanupCandidate: Sendable, Hashable, Identifiable {
     public let estimatedBytes: Int64
     /// Space on disk measured at scan time, when known.
     public let allocatedBytes: Int64?
+    /// Part of the plan digest.
     public let risk: CleanupRisk
     public let recommended: Bool
     /// Why it's safe or what to check, and how it comes back.
@@ -105,10 +112,17 @@ public struct CleanupPlan: Sendable, Hashable {
         case protectedCandidate(String)
         /// A command target without the `.command` disposition, or the other way round.
         case dispositionMismatch(String)
+        /// A folder-contents target with no reviewed entries.
+        case emptyContents(String)
+        /// A reviewed entry that isn't a direct child of its folder on the same volume (a mount point inside the
+        /// folder is another volume and is never cleaned through it).
+        case entryOutsideFolder(String)
     }
 
     public let entries: [Entry]
-    /// Lower-case hex SHA-256 over the entries' ids, dispositions and target identities, in order.
+    /// Lower-case hex SHA-256 over, in order: each entry's id, module, risk and disposition, and each target's
+    /// identity (folder-contents targets: the folder and every reviewed entry; commands: executable, arguments and
+    /// consequence).
     public let digest: String
 
     public init(_ entries: [Entry]) throws(Problem) {
@@ -119,7 +133,16 @@ public struct CleanupPlan: Sendable, Hashable {
             guard seen.insert(c.id).inserted else { throw .duplicateCandidate(c.id) }
             guard !c.targets.isEmpty else { throw .noTargets(c.id) }
             guard c.risk != .protected else { throw .protectedCandidate(c.id) }
-            let commands = c.targets.filter { if case .command = $0 { return true }; return false }.count
+            var commands = 0
+            for t in c.targets {
+                switch t {
+                case .command: commands += 1
+                case .file: break
+                case .directoryContents(let folder, let kids):
+                    guard !kids.isEmpty else { throw .emptyContents(c.id) }
+                    guard kids.allSatisfy({ $0.isDirectChild(of: folder) }) else { throw .entryOutsideFolder(c.id) }
+                }
+            }
             let ok = e.disposition == .command ? commands == c.targets.count : commands == 0
             guard ok else { throw .dispositionMismatch(c.id) }
         }
@@ -139,17 +162,23 @@ public struct CleanupPlan: Sendable, Hashable {
         for e in entries {
             w.string(e.candidate.id)
             w.string(e.candidate.module)
+            w.int(UInt64(e.candidate.risk.rawValue))
             w.string(e.disposition.rawValue)
             w.int(UInt64(e.candidate.targets.count))
             for t in e.candidate.targets {
                 switch t {
                 case .file(let f): w.string("file"); w.identity(f)
-                case .directoryContents(let f): w.string("contents"); w.identity(f)
+                case .directoryContents(let folder, let kids):
+                    w.string("contents")
+                    w.identity(folder)
+                    w.int(UInt64(kids.count))
+                    kids.forEach { w.identity($0) }
                 case .command(let c):
                     w.string("command")
                     w.string(c.executable)
                     w.int(UInt64(c.arguments.count))
                     c.arguments.forEach { w.string($0) }
+                    w.string(c.consequence)
                 }
             }
         }
@@ -178,14 +207,17 @@ private struct DigestWriter {
     }
 }
 
-/// The person's go-ahead for one exact plan. Made only where a person actually approves: the app's review sheet,
-/// the terminal prompt, Mac Cleaner's own MCP confirmation window, or an enabled automation policy. An AI client's
-/// `confirm: true` is a request, never one of these. The executor also checks the nonce is used only once.
+/// The person's go-ahead for one exact plan. Only an `ApprovalLedger` can make one (the initializer is internal to
+/// Core), and only that ledger accepts it, once. See `ApprovalLedger` for who may ask the ledger to issue one.
 public struct CleanupApproval: Sendable, Hashable {
     public enum Approver: Sendable, Hashable {
+        /// The person pressed the button in the app's review sheet showing this plan.
         case userInApp
+        /// The person typed yes at the CLI prompt on a terminal (no TTY: preview only).
         case userInTerminal
+        /// The person confirmed in Mac Cleaner's own window (HumanApproval), never the AI client's `confirm`.
         case userViaMCPPrompt
+        /// An enabled, versioned automation policy whose scope covers every entry of the plan.
         case standingPolicy(id: String, version: Int)
     }
 
@@ -193,6 +225,10 @@ public struct CleanupApproval: Sendable, Hashable {
         /// The plan isn't the one that was approved.
         case planChanged
         case expired
+        /// Not issued by this ledger (made elsewhere, or by another ledger).
+        case notIssued
+        /// Already presented once.
+        case alreadyUsed
     }
 
     public let planDigest: String
@@ -201,7 +237,7 @@ public struct CleanupApproval: Sendable, Hashable {
     public let expires: Date
     public let nonce: UUID
 
-    public init(plan: CleanupPlan, approvedBy: Approver, issued: Date, lifetime: TimeInterval, nonce: UUID = UUID()) {
+    init(plan: CleanupPlan, approvedBy: Approver, issued: Date, lifetime: TimeInterval, nonce: UUID) {
         self.planDigest = plan.digest
         self.approvedBy = approvedBy
         self.issued = issued
@@ -209,11 +245,52 @@ public struct CleanupApproval: Sendable, Hashable {
         self.nonce = nonce
     }
 
-    /// nil when this approval authorizes `plan` at `now`. Valid from `issued` up to, not including, `expires`; a
-    /// lifetime of zero or less never authorizes anything.
-    public func refusal(for plan: CleanupPlan, at now: Date) -> Refusal? {
+    /// nil when this approval matches `plan` and is in its validity window `[issued, expires)` at `now`. A lifetime
+    /// of zero or less never authorizes anything. The ledger adds the issued and single-use checks.
+    func refusal(for plan: CleanupPlan, at now: Date) -> Refusal? {
         guard plan.digest == planDigest else { return .planChanged }
         guard now >= issued, now < expires else { return .expired }
         return nil
+    }
+}
+
+/// Issues approvals and accepts each one exactly once. The cleanup executor owns the only ledger (M01-04) and
+/// exposes `issue` only to the trusted approval flows named by `CleanupApproval.Approver`, each of which calls it
+/// after a person (or an enabled policy) approved the very plan it showed. An AI client's `confirm: true` reaches
+/// none of them. Redeeming consumes the approval whatever the result: an approval presented with a changed plan
+/// or too late is gone, and the person must approve again (fail closed).
+public struct ApprovalLedger: Sendable {
+    private var outstanding: [UUID: CleanupApproval] = [:]
+    /// Consumed nonces, kept until their approval would have expired so a replay says `alreadyUsed`.
+    private var consumed: [UUID: Date] = [:]
+
+    public init() {}
+
+    public mutating func issue(for plan: CleanupPlan, approvedBy: Approver, at now: Date,
+                               lifetime: TimeInterval) -> CleanupApproval {
+        let a = CleanupApproval(plan: plan, approvedBy: approvedBy, issued: now, lifetime: lifetime, nonce: UUID())
+        outstanding[a.nonce] = a
+        return a
+    }
+
+    public typealias Approver = CleanupApproval.Approver
+
+    /// nil when `approval` authorizes `plan` now; it is then used up. Any result consumes an issued approval.
+    public mutating func redeem(_ approval: CleanupApproval, for plan: CleanupPlan, at now: Date) -> CleanupApproval.Refusal? {
+        defer { prune(at: now) }
+        if consumed[approval.nonce] != nil { return .alreadyUsed }
+        guard let issued = outstanding[approval.nonce], issued == approval else { return .notIssued }
+        outstanding[approval.nonce] = nil
+        consumed[approval.nonce] = issued.expires
+        return issued.refusal(for: plan, at: now)
+    }
+
+    /// Approvals issued and not yet presented.
+    public var outstandingCount: Int { outstanding.count }
+
+    /// Forgets expired approvals and the used nonces whose approval has expired.
+    public mutating func prune(at now: Date) {
+        outstanding = outstanding.filter { $0.value.expires > now }
+        consumed = consumed.filter { $0.value > now }
     }
 }

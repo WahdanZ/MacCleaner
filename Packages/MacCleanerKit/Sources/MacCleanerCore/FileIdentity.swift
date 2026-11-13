@@ -44,6 +44,16 @@ public struct FileIdentity: Sendable, Hashable {
         if kind == .file, current.size != size || current.modificationNanos != modificationNanos { return .contentChanged }
         return nil
     }
+
+    /// Directly inside `folder` ("/a/b/c" in "/a/b", not "/a/b/c/d") and on the same volume: a mount point inside a
+    /// folder is another volume and never counts as one of its entries.
+    public func isDirectChild(of folder: FileIdentity) -> Bool {
+        guard device == folder.device, folder.kind == .directory else { return false }
+        let prefix = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
+        guard path.hasPrefix(prefix) else { return false }
+        let name = path.dropFirst(prefix.count)
+        return !name.isEmpty && !name.contains("/") && name != "." && name != ".."
+    }
 }
 
 /// Why a re-captured item no longer matches the plan. Each one means: skip it and say so.

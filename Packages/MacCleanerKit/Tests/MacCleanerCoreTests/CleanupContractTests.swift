@@ -278,6 +278,13 @@ struct ApprovalLedgerTests {
         for (q, _) in refused { _ = try ledger.issue(for: q, approvedBy: .userInApp, at: t0, lifetime: 60) }
     }
 
+    @Test func aNonInteractiveOverrideIsRecordedAsSuch() throws {
+        var ledger = ApprovalLedger()
+        let a = try ledger.issue(for: p, approvedBy: .nonInteractiveOverride, at: t0, lifetime: 60)
+        #expect(a.approvedBy == .nonInteractiveOverride && a.approvedBy != .userInTerminal)
+        #expect(ledger.redeem(a, for: p, at: t0) == nil && ledger.redeem(a, for: p, at: t0) == .alreadyUsed)
+    }
+
     @Test func validityWindowIsHalfOpen() {
         let a = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 60, nonce: UUID())
         #expect(a.refusal(for: p, at: t0) == nil)

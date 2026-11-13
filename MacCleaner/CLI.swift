@@ -172,15 +172,15 @@ enum CLI {
             }
             a["confirm"] = true
             a["preview_id"] = (preview as? [String: Any])?["preview_id"]
-            return output(try MCPServer.call(cmd.tool, a, approval: .terminal), json: json)
+            return output(try MCPServer.call(cmd.tool, a, approval: yes ? .yesFlag : .terminal), json: json)
         } catch {
             err("\(error)"); return 1
         }
     }
 
-    /// A confirm reaching here was approved by the person at the terminal (typed yes, or --yes).
+    /// A confirm reaching here came with --yes (`tool` refuses confirm without it): a non-interactive override.
     private static func call(_ tool: String, _ a: [String: Any], json: Bool) -> Int32 {
-        let approval: ToolApproval? = (a["confirm"] as? Bool) == true ? .terminal : nil
+        let approval: ToolApproval? = (a["confirm"] as? Bool) == true ? .yesFlag : nil
         do { return output(try MCPServer.call(tool, a, approval: approval), json: json) } catch { err("\(error)"); return 1 }
     }
 

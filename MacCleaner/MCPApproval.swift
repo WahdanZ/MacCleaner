@@ -3,8 +3,10 @@ import CoreGraphics
 
 /// Who approved a destructive tool call that didn't come through the MCP connection.
 enum ToolApproval: Sendable {
-    /// The person at the terminal: typed "yes" at the CLI prompt, or passed --yes.
+    /// The person at the terminal typed "yes" at the CLI prompt (interactive, on a TTY).
     case terminal
+    /// `--yes` on the command line: no prompt was shown. A non-interactive override, not a person's confirmation.
+    case yesFlag
 }
 
 /// What Mac Cleaner itself shows the person before an MCP tool deletes or moves anything. Built from the

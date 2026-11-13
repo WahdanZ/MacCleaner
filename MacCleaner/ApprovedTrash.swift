@@ -33,11 +33,19 @@ enum AppCleanup {
 
     /// A Trash plan from exactly the reviewed items that have a snapshot and aren't blocked. nil when there are none.
     static func trashPlan(_ items: [ReviewItem], module: String) -> CleanupPlan? {
-        let entries = items.compactMap { i -> CleanupPlan.Entry? in
+        trashPlan(items.compactMap { i in
             guard i.blocked == nil, let s = i.snapshot else { return nil }
-            return .init(CleanupCandidate(id: i.id, module: module, title: i.name, targets: [.file(s)],
-                                          estimatedBytes: i.size ?? 0, risk: .reviewRequired, recommended: false,
-                                          explanation: i.note ?? ""), .trash)
+            return (i.id, i.name, s, i.size ?? 0)
+        }, module: module)
+    }
+
+    /// A Trash plan from exactly these snapshots (id, title, identity, size). nil when there are none.
+    static func trashPlan(_ snapshots: [(id: String, title: String, item: FileIdentity, size: Int64)],
+                          module: String) -> CleanupPlan? {
+        let entries = snapshots.map { s in
+            CleanupPlan.Entry(CleanupCandidate(id: s.id, module: module, title: s.title, targets: [.file(s.item)],
+                                               estimatedBytes: s.size, risk: .reviewRequired, recommended: false,
+                                               explanation: ""), .trash)
         }
         return entries.isEmpty ? nil : try? CleanupPlan(entries)
     }
@@ -150,7 +158,7 @@ enum TrashApproval: Sendable {
 }
 
 /// What an approved Trash run did, by review-item id.
-struct TrashRun {
+struct TrashRun: Sendable {
     /// Moved to the Trash, with the reviewed size.
     var moved: [String: Int64] = [:]
     /// Not moved, with why.

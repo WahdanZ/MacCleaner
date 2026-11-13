@@ -1525,6 +1525,7 @@ extension SelfTest {
         _ = putBack(shown)
         trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
         sharedFileLocking(dir: dir)
+        mcpAndCLITrash(dir: dir, runID: runID)
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
@@ -1655,6 +1656,122 @@ extension SelfTest {
             }
         }
         check("concurrent checked and unchecked writers lose no entry", count(busy) == 300 && failures.value == 0)
+    }
+
+    // MARK: MCP and CLI Trash through the executor (M01-04b-2)
+
+    static func mcpAndCLITrash(dir: URL, runID: String) {
+        print("MCP and CLI Trash: preview snapshot → verified confirm → executor (M01-04b-2)")
+        let fm = FileManager.default
+        func file(_ name: String, _ text: String = "x") -> URL {
+            let u = dir.appendingPathComponent("\(name)-\(runID).txt")
+            try? Data(text.utf8).write(to: u)
+            return u
+        }
+        func log(_ u: URL) -> [TrashedItem] { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) } }
+        func putBack(_ u: URL) -> Bool { log(u).first.map { TrashOps.restore($0) == nil } ?? false }
+        func previewID(_ paths: [URL]) -> String {
+            ((try? MCPServer.call("move_to_trash", ["paths": paths.map(\.path)])) as? [String: Any])?["preview_id"] as? String ?? ""
+        }
+        func confirm(_ paths: [URL], _ id: String, _ approval: ToolApproval? = nil) -> [String: Any]? {
+            (try? MCPServer.call("move_to_trash", ["paths": paths.map(\.path), "confirm": true, "preview_id": id],
+                                 approval: approval)) as? [String: Any]
+        }
+        let outstanding = { wait { await AppCleanup.executor.outstandingApprovals } ?? -1 }
+        defer { installTestApprover() }
+
+        check("who confirmed is mapped exactly: window → MCP prompt, typed yes → terminal, --yes → override",
+              ToolConfirmation.approver(for: nil) == .userViaMCPPrompt
+              && ToolConfirmation.approver(for: .terminal) == .userInTerminal
+              && ToolConfirmation.approver(for: .yesFlag) == .nonInteractiveOverride)
+
+        // Approved in Mac Cleaner's window: moved through the executor, logged as the AI assistant, put back.
+        let a = file("mcp-ok", "ok")
+        approvals.asked = []; approvals.answer = true
+        let ok = confirm([a], previewID([a]))
+        check("an MCP confirm the person approves moves the file and answers as before",
+              (ok?["moved_to_trash"] as? [String]) == [Scanner.tilde(a)] && (ok?["errors"] as? [String])?.isEmpty == true
+              && !fm.fileExists(atPath: a.path) && approvals.asked.count == 1)
+        check("it is logged once, as the AI assistant, and Put Back restores it",
+              log(a).count == 1 && log(a).first?.source == "AI assistant" && putBack(a)
+              && (try? String(contentsOf: a, encoding: .utf8)) == "ok")
+
+        // Declined in the window: no executor approval, nothing moved.
+        let d = file("mcp-declined")
+        let before = outstanding()
+        approvals.answer = false
+        check("a declined MCP confirm issues no approval and moves nothing",
+              confirm([d], previewID([d])) == nil && fm.fileExists(atPath: d.path) && outstanding() == before)
+
+        // Replayed: the preview (and so its approval) can be used once.
+        approvals.answer = true
+        let r = file("mcp-replay")
+        let rID = previewID([r])
+        _ = confirm([r], rID)
+        _ = putBack(r)
+        check("a replayed MCP confirm is refused and moves nothing", confirm([r], rID) == nil && fm.fileExists(atPath: r.path))
+
+        // Changed or replaced while the person was looking at the window (after the digest check).
+        let s = file("mcp-stale")
+        HumanApproval.ask = { _ in try? Data("written while asking".utf8).write(to: s); return true }
+        let stale = confirm([s], previewID([s]))
+        check("a file changed during the confirmation is left alone and reported",
+              (stale?["moved_to_trash"] as? [String])?.isEmpty == true
+              && (stale?["errors"] as? [String])?.first?.contains("changed after you reviewed") == true
+              && (try? String(contentsOf: s, encoding: .utf8)) == "written while asking")
+        let p = file("mcp-replaced", "v1")
+        HumanApproval.ask = { _ in try? fm.removeItem(at: p); try? Data("v2".utf8).write(to: p); return true }
+        let replaced = confirm([p], previewID([p]))
+        installTestApprover(); approvals.answer = true
+        check("a file replaced during the confirmation is left alone and reported",
+              (replaced?["moved_to_trash"] as? [String])?.isEmpty == true && (replaced?["errors"] as? [String])?.count == 1
+              && (try? String(contentsOf: p, encoding: .utf8)) == "v2")
+
+        // Partial failure: one moves, one can't.
+        let free = file("mcp-free"), locked = file("mcp-locked")
+        chflags(locked.path, UInt32(UF_IMMUTABLE))
+        let partial = confirm([free, locked], previewID([free, locked]))
+        chflags(locked.path, 0)
+        check("an MCP partial failure moves what it can and reports the rest",
+              (partial?["moved_to_trash"] as? [String]) == [Scanner.tilde(free)] && (partial?["errors"] as? [String])?.count == 1
+              && fm.fileExists(atPath: locked.path) && log(locked).isEmpty)
+        check("the moved one can be put back", putBack(free))
+
+        // Terminal: typed yes vs --yes are recorded differently.
+        let t = file("cli-typed"), y = file("cli-yes-flag")
+        approvals.asked = []
+        _ = confirm([t], previewID([t]), .terminal)
+        _ = confirm([y], previewID([y]), .yesFlag)
+        check("a typed yes is logged as the command line", log(t).first?.source == "Command line")
+        check("--yes is logged as a non-interactive override, not as a person",
+              log(y).first?.source == "Command line (--yes, not confirmed by a person)")
+        check("terminal confirms open no confirmation window", approvals.asked.isEmpty)
+        _ = putBack(t); _ = putBack(y)
+
+        // The real command line, in a separate process (same throwaway home).
+        func cli(_ args: [String]) -> (code: Int32, out: String) {
+            let p = Process()
+            p.executableURL = Bundle.main.executableURL
+            p.arguments = ["--cli"] + args
+            p.standardInput = FileHandle.nullDevice
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return (-1, "") }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+        }
+        let c = file("cli-real", "cli")
+        let noYes = cli(["trash-files", c.path])
+        check("the CLI without --yes and without a keyboard changes nothing and exits 2",
+              noYes.code == 2 && fm.fileExists(atPath: c.path))
+        let withYes = cli(["trash-files", c.path, "--yes", "--json"])
+        check("the CLI with --yes moves the file, exits 0, and answers as before",
+              withYes.code == 0 && !fm.fileExists(atPath: c.path) && withYes.out.contains("moved_to_trash"))
+        check("the CLI's --yes move is logged as an override and Put Back restores it",
+              log(c).first?.source == "Command line (--yes, not confirmed by a person)" && putBack(c)
+              && (try? String(contentsOf: c, encoding: .utf8)) == "cli")
     }
 
     #if MACCLEANER_TEST_HOOKS

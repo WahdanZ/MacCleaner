@@ -42,8 +42,22 @@ enum AppCleanup {
         return entries.isEmpty ? nil : try? CleanupPlan(entries)
     }
 
-    /// Moves an approved Trash plan's items to the Trash and records each one in the Trash log (for Put Back), as
-    /// AppEngine.trash does. `precondition` can refuse single items right before they move.
+    /// Records one Trash move for Put Back; true when it reached the disk. Replaced only by the self-test (to make
+    /// the write fail).
+    nonisolated(unsafe) static var recordMove: @Sendable (_ original: String, _ trashed: String, _ size: Int64,
+                                                          _ source: String) -> Bool = { original, trashed, size, source in
+        TrashLog.shared.record(original: original, trashed: trashed, size: size, source: source, restorable: true)
+    }
+    /// Test-only: runs after a move was recorded and before the next item is touched (the self-test interrupts or
+    /// kills the process here). nil in the app.
+    nonisolated(unsafe) static var afterRecording: (@Sendable (String) -> Void)?
+
+    static let unrecordedStop = "An earlier item was moved to the Trash but couldn't be recorded for Put Back, so the rest were left alone"
+
+    /// Moves an approved Trash plan's items to the Trash. Each move is recorded in the Trash log (for Put Back) as
+    /// soon as it happens, before the executor touches the next item, so an interruption or crash never loses the
+    /// record of a move that was made. If a record can't be written, the run stops there and says so. `precondition`
+    /// can refuse single items right before they move.
     static func moveToTrash(_ decision: TrashApproval, source: String,
                             precondition: CleanupExecutor.Precondition? = nil) async -> TrashRun {
         let approved: ApprovedTrash
@@ -53,15 +67,29 @@ enum AppCleanup {
         }
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         let sizes = Dictionary(approved.plan.candidates.map { ($0.id, $0.estimatedBytes) }, uniquingKeysWith: { a, _ in a })
+        let record = recordMove, after = afterRecording
+        let unrecorded = IDSet()
         var run = TrashRun()
         do {
-            let report = try await executor.execute(approved.plan, approval: approved.approval, precondition: precondition)
+            let report = try await executor.execute(
+                approved.plan, approval: approved.approval, precondition: precondition,
+                onItemFinished: { o in
+                    guard case .file(let item) = o.target, case .trashed(_, let recovery) = o.result else { return nil }
+                    guard record(item.path, recovery, sizes[o.candidateID] ?? 0, source) else {
+                        unrecorded.insert(o.candidateID)
+                        return unrecordedStop
+                    }
+                    after?(o.candidateID)
+                    return nil
+                })
             for o in report.outcomes {
-                guard case .file(let item) = o.target else { continue }
+                guard case .file = o.target else { continue }
                 if case .trashed(_, let recovery) = o.result {
-                    let size = sizes[o.candidateID] ?? 0
-                    TrashLog.shared.record(original: item.path, trashed: recovery, size: size, source: source, restorable: true)
-                    run.moved[o.candidateID] = size
+                    run.moved[o.candidateID] = sizes[o.candidateID] ?? 0
+                    if unrecorded.contains(o.candidateID) {
+                        run.problems.append((o.candidateID, "moved to the Trash (\(recovery)), but it couldn't be recorded "
+                                             + "for Put Back; drag it out of the Trash in Finder to restore it"))
+                    }
                 } else {
                     run.problems.append((o.candidateID, Self.text(o.result)))
                 }
@@ -104,6 +132,14 @@ enum AppCleanup {
 struct ApprovedTrash: Sendable {
     let plan: CleanupPlan
     let approval: CleanupApproval
+}
+
+/// A thread-safe set of review-item ids (written from the executor's per-item callback).
+final class IDSet: @unchecked Sendable {   // `ids` behind `lock`
+    private let lock = NSLock()
+    private var ids: Set<String> = []
+    func insert(_ id: String) { lock.lock(); ids.insert(id); lock.unlock() }
+    func contains(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ids.contains(id) }
 }
 
 /// The outcome of a confirmation for the Trash part of a review.

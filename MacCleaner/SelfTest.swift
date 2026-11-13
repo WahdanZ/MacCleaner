@@ -1523,6 +1523,8 @@ extension SelfTest {
         check("an item added after the review isn't moved", shownRun?.moved.keys.sorted() == [shown.path]
               && fm.fileExists(atPath: later.path))
         _ = putBack(shown)
+        trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
+
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
         let mixed = MainActor.assumeIsolated { () -> ([URL], TrashApproval?)? in
@@ -1545,5 +1547,84 @@ extension SelfTest {
         check("an item missing when the sheet opens is blocked and not in the plan",
               goneRequest.items.first?.blocked != nil && goneRequest.trashPlan == nil)
     }
-}
 
+    // MARK: Trash log per move (crash safety)
+
+    static func trashLogDurability(dir: URL, runID: String, file: (String, String) -> URL,
+                                   run: (TrashApproval??, String) -> TrashRun?, putBack: (URL) -> Bool) {
+        let fm = FileManager.default
+        func entries(_ u: URL) -> Int { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) }.count }
+
+        // Several moves, each recorded once.
+        let m1 = file("multi-1", "one"), m2 = file("multi-2", "two")
+        let both = run(MainActor.assumeIsolated { confirmTrashReview([m1, m2]) }, "Self-test")
+        check("several moves are each recorded once in the Trash log",
+              both?.moved.count == 2 && entries(m1) == 1 && entries(m2) == 1)
+        check("each of them can be put back", putBack(m1) && putBack(m2)
+              && (try? String(contentsOf: m2, encoding: .utf8)) == "two")
+
+        // Interrupted after the first move: the first is recorded, the second untouched.
+        let i1 = file("interrupt-1", "first"), i2 = file("interrupt-2", "second")
+        AppCleanup.afterRecording = { _ in withUnsafeCurrentTask { $0?.cancel() } }
+        let interrupted = run(MainActor.assumeIsolated { confirmTrashReview([i1, i2]) }, "Self-test")
+        AppCleanup.afterRecording = nil
+        check("an interruption after the first move keeps its record and leaves the second alone",
+              interrupted?.moved.keys.sorted() == [i1.path] && entries(i1) == 1 && fm.fileExists(atPath: i2.path)
+              && interrupted?.report?.wasCancelled == true)
+        check("the interrupted batch's moved item can be put back",
+              putBack(i1) && (try? String(contentsOf: i1, encoding: .utf8)) == "first")
+
+        // Killed (SIGKILL) right after the first move was recorded, in a separate process.
+        let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
+        let child = Process()
+        child.executableURL = Bundle.main.executableURL
+        child.arguments = ["--selftest-child", "trash-then-die", k1.path, k2.path]
+        child.environment = ProcessInfo.processInfo.environment.merging(["MACCLEANER_SELFTEST_CHILD": "1"]) { _, new in new }
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        var started = true
+        do { try child.run(); child.waitUntilExit() } catch { started = false }
+        check("a process killed mid-batch dies after its first move (simulated crash)",
+              started && child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
+        check("the killed process's first move is in the Trash log, the second item untouched",
+              !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
+        check("Put Back restores the first move after the crash",
+              putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+
+        // A record that can't be written stops the run and is reported, never shown as a recoverable success.
+        let f1 = file("unrecorded-1", "reviewed"), f2 = file("unrecorded-2", "reviewed")
+        let saved = AppCleanup.recordMove
+        AppCleanup.recordMove = { _, _, _, _ in false }
+        let failed = run(MainActor.assumeIsolated { confirmTrashReview([f1, f2]) }, "Self-test")
+        AppCleanup.recordMove = saved
+        let f1Message = failed?.problems.first { $0.id == f1.path }?.message ?? ""
+        check("a move whose record can't be written is reported as not restorable from Mac Cleaner",
+              failed?.moved[f1.path] != nil && f1Message.contains("couldn't be recorded for Put Back") && entries(f1) == 0)
+        check("after a failed record, the rest are left alone and say why",
+              fm.fileExists(atPath: f2.path)
+              && failed?.problems.first { $0.id == f2.path }?.message == AppCleanup.unrecordedStop)
+        // Put the unrecorded file back by hand (the report says where it went).
+        if case .trashed(_, let where_)? = failed?.report?.outcomes.first(where: { $0.candidateID == f1.path })?.result {
+            try? fm.moveItem(atPath: where_, toPath: f1.path)
+        }
+        check("the unrecorded file was where the report said", fm.fileExists(atPath: f1.path))
+    }
+
+    /// `--selftest-child <task> ...`: work the self-test runs in a separate process. Refuses unless started by the
+    /// self-test (MACCLEANER_SELFTEST_CHILD=1) in a throwaway home folder.
+    static func child(_ args: [String]) -> Int32 {
+        guard ProcessInfo.processInfo.environment["MACCLEANER_SELFTEST_CHILD"] == "1",
+              SafetyGuard.home.path != accountHome?.path else {
+            print("This mode is only for the self-test.")
+            return 2
+        }
+        guard args.count == 3, args[0] == "trash-then-die" else { return 2 }
+        let urls = [URL(fileURLWithPath: args[1]), URL(fileURLWithPath: args[2])]
+        // Kill this process the moment the first move has been recorded: no cleanup, no flushing.
+        AppCleanup.afterRecording = { _ in kill(getpid(), SIGKILL) }
+        let approval = MainActor.assumeIsolated { confirmTrashReview(urls) }
+        guard case .some(.some(let a)) = approval else { return 3 }
+        _ = wait { await AppCleanup.moveToTrash(a, source: "Self-test") }
+        return 4   // not reached when the first move succeeds
+    }
+}

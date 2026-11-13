@@ -33,8 +33,11 @@ final class TrashLog: @unchecked Sendable {
         }()
     }
 
-    func record(original: String, trashed: String, size: Int64, source: String, restorable: Bool) {
-        SharedFile.update(file) { (items: inout [TrashedItem]) in
+    /// Adds a moved item. Returns false when the log couldn't be written (the item can then only be restored from
+    /// Finder); the legacy path ignores that.
+    @discardableResult
+    func record(original: String, trashed: String, size: Int64, source: String, restorable: Bool) -> Bool {
+        SharedFile.commit(file) { (items: inout [TrashedItem]) in
             items.insert(TrashedItem(original: original, trashed: trashed, size: size, date: Date(),
                                      source: source, restorable: restorable), at: 0)
             if items.count > 2000 { items.removeLast(items.count - 2000) }

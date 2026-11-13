@@ -29,51 +29,62 @@ enum ReviewBuild {
                              perform: { ok in perform(targets.filter { ok.contains("cache:\($0.id)") }) })
     }
 
+    /// Caches stay on the legacy path; old downloads are approved-Trash items (snapshots taken now).
     static func overview(_ m: CleanerModel, downloads: [BigFile],
-                         perform: @escaping ([CleanTarget], [BigFile]) -> Void) -> ReviewRequest {
+                         perform: @escaping ([CleanTarget], [BigFile], TrashApproval?) -> Void) -> ReviewRequest {
         let targets = m.chosen
-        let dl = downloads.map {
-            ReviewItem(id: "dl:\($0.id)", name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size, action: .trash,
-                       risk: .review, note: "not opened in 90+ days", blocked: TrashGuard.reason($0.url))
+        let dl = downloads.map { f -> ReviewItem in
+            let snap = AppCleanup.snapshot(f.url)
+            return ReviewItem(id: "dl:\(f.id)", name: f.url.lastPathComponent, location: f.url.path, size: f.size, action: .trash,
+                              risk: .review, note: "not opened in 90+ days",
+                              blocked: TrashGuard.reason(f.url) ?? (snap == nil ? "It's no longer there" : nil), snapshot: snap)
         }
         return ReviewRequest(title: "Review Recommended Cleanup",
                              explanation: "Caches and logs are deleted permanently and rebuild on their own. Old downloads go to the Trash, so you can put them back until you empty it.",
                              items: cacheItems(targets) + dl, verb: "Clean",
-                             perform: { ok in perform(targets.filter { ok.contains("cache:\($0.id)") },
-                                                      downloads.filter { ok.contains("dl:\($0.id)") }) })
+                             perform: { _ in },
+                             trashPlan: AppCleanup.trashPlan(dl, module: "downloads"),
+                             performApproved: { ok, approval in
+                                 perform(targets.filter { ok.contains("cache:\($0.id)") }, downloads, approval)
+                             })
     }
 
     // MARK: Files that go to the Trash
 
-    /// Items going to the Trash; `perform` gets the reviewed, allowed URLs (row id = path).
-    static func trashFiles(title: String, explanation: String, _ files: [(URL, Int64, String?)],
-                           perform: @escaping ([URL]) -> Void) -> ReviewRequest {
-        let urls = files.map(\.0)
-        return ReviewRequest(title: title, explanation: explanation,
-                      items: files.map { u, size, note in
-                          ReviewItem(id: u.path, name: u.lastPathComponent, location: u.path, size: size, action: .trash,
-                                     note: note, blocked: TrashGuard.reason(u))
-                      },
-                      verb: "Move", perform: { ok in perform(urls.filter { ok.contains($0.path) }) })
+    /// Items going to the Trash on the approved path (row id = path). Each item's identity is captured now, when the
+    /// sheet opens; the plan is built from exactly these snapshots and `perform` gets the approval for it.
+    static func trashFiles(title: String, explanation: String, module: String, _ files: [(URL, Int64, String?)],
+                           perform: @escaping (TrashApproval?) -> Void) -> ReviewRequest {
+        let items = files.map { u, size, note -> ReviewItem in
+            let snap = AppCleanup.snapshot(u)
+            return ReviewItem(id: u.path, name: u.lastPathComponent, location: u.path, size: size, action: .trash,
+                              note: note, blocked: TrashGuard.reason(u) ?? (snap == nil ? "It's no longer there" : nil),
+                              snapshot: snap)
+        }
+        return ReviewRequest(title: title, explanation: explanation, items: items, verb: "Move", perform: { _ in },
+                             trashPlan: AppCleanup.trashPlan(items, module: module),
+                             performApproved: { _, approval in perform(approval) })
     }
 
-    static func diskMap(_ m: DiskMapModel, perform: @escaping ([DiskNode]) -> Void) -> ReviewRequest {
+    static func diskMap(_ m: DiskMapModel, perform: @escaping ([DiskNode], TrashApproval?) -> Void) -> ReviewRequest {
         let nodes = m.topLevelMarked
         return trashFiles(title: "Move to Trash",
                           explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
+                          module: "storage",
                           nodes.map { ($0.url, $0.size, $0.isDirectory ? "folder" : nil) },
-                          perform: { urls in let ok = Set(urls.map(\.path)); perform(nodes.filter { ok.contains($0.url.path) }) })
+                          perform: { approval in perform(nodes, approval) })
     }
 
-    static func largeFiles(_ m: LargeFilesModel, perform: @escaping ([BigFile]) -> Void) -> ReviewRequest {
+    static func largeFiles(_ m: LargeFilesModel, perform: @escaping ([BigFile], TrashApproval?) -> Void) -> ReviewRequest {
         let files = m.markedFiles
         return trashFiles(title: "Move Large & Old Files to Trash",
                           explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
+                          module: "large-files",
                           files.map { ($0.url, $0.size, $0.lastOpened.map { "last opened " + $0.formatted(date: .abbreviated, time: .omitted) }) },
-                          perform: { urls in let ok = Set(urls.map(\.path)); perform(files.filter { ok.contains($0.url.path) }) })
+                          perform: { approval in perform(files, approval) })
     }
 
-    static func duplicates(_ m: DupFinder, perform: @escaping ([URL]) -> Void) -> ReviewRequest {
+    static func duplicates(_ m: DupFinder, perform: @escaping ([URL], TrashApproval?) -> Void) -> ReviewRequest {
         var files: [(URL, Int64, String?)] = []
         for g in m.groups {
             let marked = g.files.filter { m.marked.contains($0) }
@@ -83,7 +94,7 @@ enum ReviewBuild {
         }
         return trashFiles(title: "Move Duplicates to Trash",
                           explanation: "At least one copy of every file stays (shown in Status). The copies below go to the Trash and can be put back.",
-                          files, perform: perform)
+                          module: "duplicates", files, perform: { approval in perform(files.map(\.0), approval) })
     }
 
     // MARK: Apps

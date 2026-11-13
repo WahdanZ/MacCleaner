@@ -96,3 +96,12 @@ confirmation window must approve inside the process that executes (they already 
 **Not guaranteed:** the ledger does not verify that a person or an enabled policy approved. `approve(plan, by:)`
 trusts its caller's `Approver` label; the ledger is a record of a claim, not proof of human authorization. Only
 calling it from the trusted flows makes the label true, and that is an open requirement for M01-04b.
+
+### D-016 Trash moves are approved at the review sheet, from the identities it shows (2026-11-13)
+**Decision:** migrated screens build their review with `ReviewBuild.trashFiles` (or the downloads part of
+`overview`), which captures each item's `FileIdentity` when the sheet opens and builds the `CleanupPlan` from exactly
+those snapshots. The sheet's confirm button calls `ReviewConfirmation.confirm`, the only place in the app that issues
+an approval (`.userInApp`); the plan is approved as built, never rebuilt or extended. `AppCleanup.moveToTrash` runs it
+through the executor and records each move in the Trash log as `AppEngine.trash` does. `scripts/check-approval-sites.sh`
+(CI) fails on any other approval site; it only finds call sites, so the self-test checks the confirmation behaviour.
+**Consequence:** until M01-04b-3 the legacy `AppEngine.trash` stays for unmigrated callers; it is removed then.

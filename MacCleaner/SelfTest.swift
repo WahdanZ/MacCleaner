@@ -153,6 +153,8 @@ enum SelfTest {
         check("protected file is refused by trash()", AppEngine.trash(rt, source: "Self-test") != nil && fm.fileExists(atPath: rt.path))
         ProtectedPaths.set(savedProtected)
 
+        approvedTrash(sandbox: sandbox, runID: String(runID), savedProtected: savedProtected)
+
         print("Projects (build files)")
         let proj = sandbox.appendingPathComponent("proj")
         for d in ["node_modules/pkg", "src", "dist", "build"] {
@@ -1365,3 +1367,168 @@ enum SelfTest {
         return failed.isEmpty
     }
 }
+
+// MARK: - Approved Trash (M01-04b)
+
+/// Holds a value produced on the main actor while the self-test spins the run loop.
+private final class Slot<T>: @unchecked Sendable {   // written once on the main actor, read after on the main thread
+    var value: T?
+}
+
+extension SelfTest {
+    /// Runs main-actor async work and spins the main run loop until it is done. The self-test runs on the main
+    /// thread before the app starts, so this is how it awaits the executor and the review confirmation.
+    static func wait<T>(_ seconds: TimeInterval = 30, _ work: @escaping @MainActor () async -> T) -> T? {
+        let box = Slot<T>()
+        Task { @MainActor in box.value = await work() }
+        let end = Date().addingTimeInterval(seconds)
+        while box.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        return box.value
+    }
+
+    /// Opens a review for `urls`, confirms it through the review sheet's own confirmation, and returns what the
+    /// sheet handed to the screen.
+    @MainActor
+    static func confirmTrashReview(_ urls: [URL]) -> TrashApproval?? {
+        let got = Slot<TrashApproval?>()
+        let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
+                                             urls.map { ($0, 1, nil) }) { approval in got.value = .some(approval) }
+        ReviewConfirmation.confirm(request)
+        let end = Date().addingTimeInterval(30)
+        while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        return got.value
+    }
+
+    static func approvedTrash(sandbox: URL, runID: String, savedProtected: [String]) {
+        print("Approved Trash: review sheet → approval → executor (M01-04b)")
+        let fm = FileManager.default
+        let dir = sandbox.appendingPathComponent("approved-trash")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        func file(_ name: String, _ text: String = "reviewed") -> URL {
+            let u = dir.appendingPathComponent("\(name)-\(runID).txt")
+            try? Data(text.utf8).write(to: u)
+            return u
+        }
+        func run(_ a: TrashApproval??, _ source: String = "Self-test") -> TrashRun? {
+            guard case .some(.some(let approval)) = a else { return nil }
+            return wait { await AppCleanup.moveToTrash(approval, source: source) }
+        }
+        func approved(_ a: TrashApproval??) -> ApprovedTrash? {
+            if case .some(.some(.approved(let x))) = a { return x }
+            return nil
+        }
+        func putBack(_ u: URL) -> Bool {
+            guard let e = TrashLog.shared.present().first(where: { $0.original == AppCleanup.physicalPath(u) }) else { return false }
+            return TrashOps.restore(e) == nil
+        }
+        let outstanding = { wait { await AppCleanup.executor.outstandingApprovals } ?? -1 }
+
+        // Declined: the sheet was cancelled, so confirm never ran. Nothing is approved or moved.
+        let declined = file("declined")
+        let before = outstanding()
+        _ = MainActor.assumeIsolated {
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(declined, 1, nil)]) { _ in }
+        }
+        check("a cancelled review issues no approval and moves nothing",
+              outstanding() == before && fm.fileExists(atPath: declined.path))
+
+        // Confirmed, moved, logged, and put back.
+        let ok = file("ok", "roundtrip")
+        let okReview = MainActor.assumeIsolated { confirmTrashReview([ok]) }
+        let okRun = run(okReview)
+        check("a confirmed review moves exactly the reviewed item to the Trash",
+              okRun?.moved[ok.path] != nil && okRun?.problems.isEmpty == true && !fm.fileExists(atPath: ok.path))
+        check("the approval was used up by the move", outstanding() == before)
+        check("the approved move is in the Trash log and Put Back restores it",
+              putBack(ok) && (try? String(contentsOf: ok, encoding: .utf8)) == "roundtrip")
+
+        // Replayed: the same approval presented again does nothing.
+        let replay = run(okReview)
+        check("a replayed approval is refused and moves nothing",
+              replay?.moved.isEmpty == true && replay?.problems.first?.message.contains("already used") == true
+              && fm.fileExists(atPath: ok.path))
+
+        // Stale identity: the file was written to after the sheet opened.
+        let stale = file("stale")
+        let staleReview = MainActor.assumeIsolated { () -> TrashApproval?? in
+            let got = Slot<TrashApproval?>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(stale, 1, nil)]) {
+                got.value = .some($0)
+            }
+            try? Data("written after review".utf8).write(to: stale)   // between the sheet opening and the click
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        let staleRun = run(staleReview)
+        check("a file changed after review is left alone and reported",
+              staleRun?.moved.isEmpty == true && staleRun?.problems.first?.message.contains("changed after you reviewed") == true
+              && (try? String(contentsOf: stale, encoding: .utf8)) == "written after review")
+
+        // Replaced: same name, different file.
+        let replaced = file("replaced")
+        let replacedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
+            let got = Slot<TrashApproval?>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(replaced, 1, nil)]) {
+                got.value = .some($0)
+            }
+            try? fm.removeItem(at: replaced)
+            try? Data("a different file".utf8).write(to: replaced)
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        let replacedRun = run(replacedReview)
+        check("a file replaced after review is left alone and reported",
+              replacedRun?.moved.isEmpty == true && replacedRun?.problems.count == 1
+              && (try? String(contentsOf: replaced, encoding: .utf8)) == "a different file")
+
+        // Protected after review.
+        let guarded = file("guarded")
+        let guardedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
+            let got = Slot<TrashApproval?>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(guarded, 1, nil)]) {
+                got.value = .some($0)
+            }
+            ProtectedPaths.set(savedProtected + [guarded.path])
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        let guardedRun = run(guardedReview)
+        ProtectedPaths.set(savedProtected)
+        check("an item protected after review is left alone and reported",
+              guardedRun?.moved.isEmpty == true && guardedRun?.problems.count == 1 && fm.fileExists(atPath: guarded.path))
+
+        // Partial failure: one of two can't be moved.
+        let free = file("free"), locked = file("locked")
+        chflags(locked.path, UInt32(UF_IMMUTABLE))
+        let partial = run(MainActor.assumeIsolated { confirmTrashReview([free, locked]) })
+        chflags(locked.path, 0)
+        check("a partial failure moves what it can and reports the rest",
+              partial?.moved[free.path] != nil && partial?.moved[locked.path] == nil
+              && partial?.problems.map(\.id) == [locked.path] && fm.fileExists(atPath: locked.path))
+        check("the partly moved item can be put back", putBack(free) && fm.fileExists(atPath: free.path))
+
+        // The approved list is what the sheet showed: nothing added later, nothing missing at open.
+        let shown = file("shown")
+        let shownReview = MainActor.assumeIsolated { confirmTrashReview([shown]) }
+        let later = file("added-later")
+        check("the approval covers exactly the items the sheet showed",
+              approved(shownReview)?.plan.candidates.map(\.id) == [shown.path])
+        let shownRun = run(shownReview)
+        check("an item added after the review isn't moved", shownRun?.moved.keys.sorted() == [shown.path]
+              && fm.fileExists(atPath: later.path))
+        _ = putBack(shown)
+        let gone = dir.appendingPathComponent("never-there-\(runID).txt")
+        let goneRequest = MainActor.assumeIsolated {
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(gone, 1, nil)]) { _ in }
+        }
+        check("an item missing when the sheet opens is blocked and not in the plan",
+              goneRequest.items.first?.blocked != nil && goneRequest.trashPlan == nil)
+    }
+}
+

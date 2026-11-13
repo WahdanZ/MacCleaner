@@ -591,7 +591,7 @@ struct BottomBar: View {
                     Button("Clear marks") { map.marked = [:] }.buttonStyle(.bordered)
                 }
                 Button {
-                    review.present(ReviewBuild.diskMap(map) { nodes in Task { await map.trashMarked(nodes) } })
+                    review.present(ReviewBuild.diskMap(map) { nodes, approval in Task { await map.trashMarked(nodes, approval) } })
                 } label: {
                     Label(map.markedCount == 0 ? "Move to Trash" : "Move \(ByteText.string(map.markedBytes)) to Trash",
                           systemImage: "trash")
@@ -601,7 +601,7 @@ struct BottomBar: View {
                 .disabled(map.markedCount == 0 || map.phase != .done)
             case .duplicates:
                 Button {
-                    review.present(ReviewBuild.duplicates(dup) { urls in Task { await dup.trashMarked(urls) } })
+                    review.present(ReviewBuild.duplicates(dup) { urls, approval in Task { await dup.trashMarked(urls, approval) } })
                 } label: {
                     Label(dup.marked.isEmpty ? "Move to Trash" : "Move \(ByteText.string(dup.markedBytes)) to Trash",
                           systemImage: "trash")

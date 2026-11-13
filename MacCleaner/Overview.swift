@@ -100,17 +100,23 @@ final class OverviewModel {
         downloadsScanned = true
     }
 
-    /// Moves exactly the reviewed old downloads to the Trash.
-    func trashDownloads(_ files: [BigFile]) async -> Int64 {
+    /// Items from the last downloads cleanup that weren't moved, with why (this screen has no place to show them
+    /// yet; they are logged).
+    var downloadProblems: [String] = []
+
+    /// Moves exactly the reviewed old downloads to the Trash (approved path: each one is re-checked against what
+    /// the review sheet showed, and left alone if it changed).
+    func trashDownloads(_ files: [BigFile], _ approval: TrashApproval) async -> Int64 {
+        let run = await AppCleanup.moveToTrash(approval, source: "Old Downloads")
         var bytes: Int64 = 0
         var moved: Set<String> = []
-        for f in files where TrashGuard.canTrash(f.url) {
-            let u = f.url
-            if await Task.detached(operation: { AppEngine.trash(u, size: f.size, source: "Old Downloads") }).value == nil {
-                bytes += f.size
-                moved.insert(f.id)
-            }
+        for f in files where run.moved["dl:\(f.id)"] != nil {
+            bytes += f.size
+            moved.insert(f.id)
         }
+        let names = Dictionary(files.map { ("dl:\($0.id)", $0.url.lastPathComponent) }, uniquingKeysWith: { a, _ in a })
+        downloadProblems = run.problems.map { "\(names[$0.id] ?? $0.id): \($0.message)" }
+        for p in downloadProblems { NSLog("Mac Cleaner: old download not moved to the Trash: \(p)") }
         HistoryStore.shared.add("Old Downloads Moved to Trash", bytes: bytes, symbol: "arrow.down.circle", outcome: .trashed)
         oldDownloads.removeAll { moved.contains($0.id) }
         downloadsSelected = false
@@ -487,11 +493,11 @@ private struct RecommendedCard: View {
 
     private func presentReview() {
         let downloads = ov.downloadsSelected ? ov.oldDownloads : []
-        review.present(ReviewBuild.overview(cleaner, downloads: downloads) { targets, files in
+        review.present(ReviewBuild.overview(cleaner, downloads: downloads) { targets, files, approval in
             Task {
                 ov.cleaning = true
                 if !targets.isEmpty { await cleaner.clean(targets) }
-                if !files.isEmpty { _ = await ov.trashDownloads(files) }
+                if let approval { _ = await ov.trashDownloads(files, approval) }
                 ov.cleaning = false
                 await ov.measure()
             }

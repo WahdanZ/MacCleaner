@@ -321,30 +321,29 @@ final class DupFinder {
         }
     }
 
-    /// Moves exactly the reviewed copies to the Trash. Right before each one it checks that a copy that stays
-    /// still exists and still has the same content, so editing or deleting the kept copy after the scan never
-    /// leaves you without one.
-    func trashMarked(_ urls: [URL]) async {
+    /// Moves exactly the reviewed copies to the Trash (approved path: each one is re-checked against what the review
+    /// sheet showed, and left alone if it changed). Right before each one it checks that a copy that stays still
+    /// exists and still has the same content, so editing or deleting the kept copy after the scan never leaves you
+    /// without one.
+    func trashMarked(_ urls: [URL], _ approval: TrashApproval?) async {
         let chosen = Set(urls)
-        guard !chosen.isEmpty else { return }
+        guard let approval, !chosen.isEmpty else { return }
         phase = .trashing
-        var errors: [String] = []
+        // Review-item id (the path) → the copies that stay and the group's file size.
+        var keepers: [String: ([URL], Int64)] = [:]
+        for g in groups { for f in g.files where chosen.contains(f) { keepers[f.path] = (g.files.filter { !chosen.contains($0) }, g.size) } }
+        let check = keepers
+        let run = await AppCleanup.moveToTrash(approval, source: "Duplicates", precondition: { id, _ in
+            guard let (keep, size) = check[id] else { return "it wasn't in the reviewed list" }
+            let f = URL(fileURLWithPath: id)
+            return keep.contains { DupEngine.identical(f, $0, size: size) } ? nil
+                : "no identical copy is left anymore, so it was kept"
+        })
+        let errors = run.problems.map { "\(URL(fileURLWithPath: $0.id).lastPathComponent): \($0.message)" }
         var bytes: Int64 = 0
         var count = 0
         for gi in groups.indices {
-            for f in groups[gi].files where chosen.contains(f) {
-                let size = groups[gi].size
-                let keepers = groups[gi].files.filter { !chosen.contains($0) }
-                let still = await Task.detached { keepers.contains { DupEngine.identical(f, $0, size: size) } }.value
-                guard still else {
-                    errors.append("\(f.lastPathComponent): no identical copy is left anymore, so it was kept")
-                    continue
-                }
-                if let why = TrashGuard.reason(f) { errors.append("\(f.lastPathComponent): \(why)"); continue }
-                let r: String? = await Task.detached {
-                    AppEngine.trash(f, size: size, source: "Duplicates")
-                }.value
-                if let r { errors.append("\(f.lastPathComponent): \(r)"); continue }
+            for f in groups[gi].files where chosen.contains(f) && run.moved[f.path] != nil {
                 groups[gi].files.removeAll { $0 == f }
                 bytes += groups[gi].size
                 count += 1

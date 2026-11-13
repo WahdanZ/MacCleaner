@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		AA0000000000000000000010 /* MacCleanerCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000011 /* MacCleanerCore */; };
+		AA0000000000000000000013 /* MacCleanerPlatform in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000014 /* MacCleanerPlatform */; };
+		AA0000000000000000000015 /* MacCleanerFeatures in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000016 /* MacCleanerFeatures */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +26,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA0000000000000000000010 /* MacCleanerCore in Frameworks */,
+				AA0000000000000000000013 /* MacCleanerPlatform in Frameworks */,
+				AA0000000000000000000015 /* MacCleanerFeatures in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -67,6 +71,8 @@
 			name = MacCleaner;
 			packageProductDependencies = (
 				AA0000000000000000000011 /* MacCleanerCore */,
+				AA0000000000000000000014 /* MacCleanerPlatform */,
+				AA0000000000000000000016 /* MacCleanerFeatures */,
 			);
 			productName = MacCleaner;
 			productReference = AA0000000000000000000001 /* Mac Cleaner.app */;
@@ -239,6 +245,14 @@
 		AA0000000000000000000011 /* MacCleanerCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MacCleanerCore;
+		};
+		AA0000000000000000000014 /* MacCleanerPlatform */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MacCleanerPlatform;
+		};
+		AA0000000000000000000016 /* MacCleanerFeatures */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MacCleanerFeatures;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

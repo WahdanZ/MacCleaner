@@ -1,4 +1,5 @@
 import AppKit
+import MacCleanerCore
 import Observation
 import SwiftUI
 
@@ -40,6 +41,8 @@ struct ReviewItem: Identifiable, Hashable {
     var note: String? = nil
     /// Set when a safety guard refuses the item. It is shown and skipped.
     var blocked: String? = nil
+    /// What the item was when the sheet opened (approved-Trash flows only). The approval covers exactly this.
+    var snapshot: FileIdentity? = nil
 }
 
 struct ReviewRequest: Identifiable {
@@ -53,6 +56,11 @@ struct ReviewRequest: Identifiable {
     /// exact objects they listed (captured when the review opened), so what runs is what was reviewed, even if a
     /// rescan changes the screen's live selection while the sheet is open.
     let perform: (Set<String>) -> Void
+    /// Approved-Trash flows (M01-04b): the Trash plan built when the sheet opened from the snapshots it shows.
+    var trashPlan: CleanupPlan? = nil
+    /// Approved-Trash flows: runs instead of `perform` with the shown, allowed ids and the approval for `trashPlan`
+    /// (nil when there is nothing to move to the Trash).
+    var performApproved: ((Set<String>, TrashApproval?) -> Void)? = nil
 
     var allowed: [ReviewItem] { items.filter { $0.blocked == nil } }
     var total: Int64 { allowed.reduce(0) { $0 + ($1.size ?? 0) } }
@@ -229,7 +237,7 @@ struct CleanupReviewSheet: View {
                     .controlSize(.large)
                 Button(role: .destructive) {
                     dismiss()
-                    request.perform(Set(request.allowed.map(\.id)))
+                    ReviewConfirmation.confirm(request)
                 } label: {
                     Text(confirmTitle).padding(.horizontal, Space.s)
                 }

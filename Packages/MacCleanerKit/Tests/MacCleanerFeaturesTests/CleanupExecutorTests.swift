@@ -170,6 +170,19 @@ struct ExecutorRevalidationTests {
             freedBytes: 0, kept: [KeptEntry(path: folder.path + "/nested", reason: .protected("Protected in Settings"))], damaged: []))
     }
 
+    @Test func aCallersPreconditionCanRefuseSingleItems() async throws {
+        let other = item("Library/Caches/b.log", inode: 9)
+        let fs = FakeFS([file, other])
+        let p = try plan([.init(candidate("f", [.file(file)]), .trash), .init(candidate("o", [.file(other)]), .trash)])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let approval = try await exec.approve(p, by: .userInApp)
+        #expect(await exec.outstandingApprovals == 1)
+        let report = try await exec.execute(p, approval: approval, precondition: { id, _ in id == "f" ? "no copy left" : nil })
+        #expect(results(report)[file.path] == .skipped(.preconditionFailed("no copy left")))
+        let left = await exec.outstandingApprovals
+        #expect(fs.ops == [.trash(other.path)] && left == 0)
+    }
+
     @Test func alreadyDeletedIsReportedAsMissing() async throws {
         let fs = FakeFS([file])
         let p = try plan([.init(candidate("f", [.file(file)]), .permanentDelete)])

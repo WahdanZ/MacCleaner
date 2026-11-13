@@ -30,6 +30,10 @@ jobs:
       - name: Core tests (Swift 6 package)
         run: swift test --package-path Packages/MacCleanerKit
 
+      # Finds unexpected places that could issue a cleanup approval; the self-test checks the confirmation itself.
+      - name: Approval call sites
+        run: scripts/check-approval-sites.sh
+
       # A fresh checkout: nothing built or resolved before this step (the check below proves it).
       - name: Build (Release, ad-hoc signed, from a clean checkout)
         run: |

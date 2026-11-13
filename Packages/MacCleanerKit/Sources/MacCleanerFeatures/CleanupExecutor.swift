@@ -39,9 +39,17 @@ public actor CleanupExecutor {
         try ledger.issue(for: plan, approvedBy: approver, at: now(), lifetime: lifetime)
     }
 
+    /// A caller's own check for one item, run right before it is handled (after protection, before the identity
+    /// check): nil to go ahead, otherwise why not. Gets the candidate's id and the item's identity.
+    public typealias Precondition = @Sendable (_ candidateID: String, _ item: FileIdentity) -> String?
+
+    /// Approvals issued and not yet used (for tests and diagnostics).
+    public var outstandingApprovals: Int { ledger.outstandingCount }
+
     /// Carries out `plan`. Throws, changing nothing, unless `approval` was issued by this executor for this exact
-    /// plan, hasn't expired and hasn't been used. `progress` receives every event and is finished at the end.
-    public func execute(_ plan: CleanupPlan, approval: CleanupApproval,
+    /// plan, hasn't expired and hasn't been used. `precondition`, when given, can refuse single items right before
+    /// they are handled. `progress` receives every event and is finished at the end.
+    public func execute(_ plan: CleanupPlan, approval: CleanupApproval, precondition: Precondition? = nil,
                         progress: AsyncStream<ProgressEvent>.Continuation? = nil) throws(CleanupApproval.Refusal) -> CleanupReport {
         if let refusal = ledger.redeem(approval, for: plan, at: now()) {
             progress?.finish()
@@ -60,7 +68,7 @@ public actor CleanupExecutor {
                 if cancelled {
                     results = [ItemOutcome(candidateID: id, target: target, result: .skipped(.cancelled))]
                 } else {
-                    results = perform(target, entry.disposition, candidate: id)
+                    results = perform(target, entry.disposition, candidate: id, precondition: precondition)
                 }
                 for r in results {
                     outcomes.append(r)
@@ -78,12 +86,13 @@ public actor CleanupExecutor {
 
     // MARK: - Targets
 
-    private func perform(_ target: CleanupTarget, _ disposition: Disposition, candidate: String) -> [ItemOutcome] {
+    private func perform(_ target: CleanupTarget, _ disposition: Disposition, candidate: String,
+                         precondition: Precondition?) -> [ItemOutcome] {
         switch target {
         case .file(let item):
-            return [handle(item, disposition, candidate: candidate)]
+            return [handle(item, disposition, candidate: candidate, precondition: precondition)]
         case .directoryContents(let folder, let reviewed):
-            return contents(folder, reviewed, disposition, candidate: candidate)
+            return contents(folder, reviewed, disposition, candidate: candidate, precondition: precondition)
         case .command:
             return [ItemOutcome(candidateID: candidate, target: target,
                                 result: .failed("Tool commands don't run through the cleanup executor yet; nothing was run"))]
@@ -92,7 +101,7 @@ public actor CleanupExecutor {
 
     /// The reviewed entries of a folder, each revalidated on its own; entries added since review are left alone.
     private func contents(_ folder: FileIdentity, _ reviewed: [FileIdentity], _ disposition: Disposition,
-                          candidate: String) -> [ItemOutcome] {
+                          candidate: String, precondition: Precondition?) -> [ItemOutcome] {
         func skipAll(_ reason: SkipReason) -> [ItemOutcome] {
             reviewed.map { ItemOutcome(candidateID: candidate, target: .file($0), result: .skipped(reason)) }
         }
@@ -116,13 +125,14 @@ public actor CleanupExecutor {
             if Task.isCancelled {
                 out.append(ItemOutcome(candidateID: candidate, target: .file(item), result: .skipped(.cancelled)))
             } else {
-                out.append(handle(item, disposition, candidate: candidate))
+                out.append(handle(item, disposition, candidate: candidate, precondition: precondition))
             }
         }
         return out
     }
 
-    private func handle(_ item: FileIdentity, _ disposition: Disposition, candidate: String) -> ItemOutcome {
+    private func handle(_ item: FileIdentity, _ disposition: Disposition, candidate: String,
+                        precondition: Precondition?) -> ItemOutcome {
         func outcome(_ r: ItemOutcome.Result) -> ItemOutcome { ItemOutcome(candidateID: candidate, target: .file(item), result: r) }
         switch disposition {
         case .trash, .permanentDelete: break
@@ -130,6 +140,7 @@ public actor CleanupExecutor {
             return outcome(.failed("\(disposition.rawValue) isn't done by the cleanup executor yet; nothing was changed"))
         }
         if let why = protection.refusal(path: item.path, disposition: disposition) { return outcome(.skipped(.protected(why))) }
+        if let why = precondition?(candidate, item) { return outcome(.skipped(.preconditionFailed(why))) }
         do {
             guard let current = try fileSystem.identity(at: item.path) else { return outcome(.skipped(.missing)) }
             if let m = item.mismatch(against: current) { return outcome(.skipped(.changed(m))) }

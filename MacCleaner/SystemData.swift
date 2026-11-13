@@ -155,7 +155,10 @@ enum SystemDataEngine {
 
     /// Snapshots need one password prompt (tmutil runs as admin); everything else goes to the Trash.
     /// `bytes` = total; `freed` = the free-space change after deleting snapshots (they have no size up front).
-    static func remove(_ items: [SysItem]) -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
+    /// Trash items move only through `trash`, the approval given at the review sheet or the MCP/CLI confirm for
+    /// exactly the items it showed (never made here); without it they stay and say so.
+    static func remove(_ items: [SysItem], trash: TrashApproval? = nil, trashSource: String = "System Data")
+        -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, freed: Int64 = 0, errors: [String] = [], cancelled = false
         let snaps = items.compactMap { i -> String? in if case .snapshot(let d) = i.action, reason(i) == nil { return d }; return nil }
@@ -171,11 +174,10 @@ enum SystemDataEngine {
                 bytes += freed
             }
         }
-        for i in items {
-            guard case .trash(let u) = i.action else { continue }
-            if let why = reason(i) { errors.append("\(i.name): \(why)"); continue }
-            if let e = AppEngine.trash(u, size: i.size, source: "System Data") { errors.append("\(i.name): \(e)") } else { bytes += i.size ?? 0 }
-        }
+        let trashItems = items.filter { if case .trash = $0.action { return true }; return false }
+        let t = AppCleanup.engineTrash(trashItems.map { ($0.id, $0.name) }, trash, source: trashSource)
+        for i in trashItems where t.moved[i.id] != nil { bytes += i.size ?? 0 }
+        errors += t.errors
         return (bytes, freed, errors, cancelled)
     }
 }
@@ -206,10 +208,10 @@ final class SystemDataModel {
     }
 
     /// Removes exactly the reviewed items.
-    func remove(_ list: [SysItem]) async {
+    func remove(_ list: [SysItem], _ trash: TrashApproval?) async {
         guard !list.isEmpty else { return }
         busy = true
-        let r = await Task.detached { SystemDataEngine.remove(list) }.value
+        let r = await Task.detached { SystemDataEngine.remove(list, trash: trash) }.value
         HistoryStore.shared.add("Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
                                 outcome: .deleted, measuredFreeChange: r.freed)
         HistoryStore.shared.add("System Data Moved to Trash", bytes: r.bytes - r.freed, symbol: "internaldrive", outcome: .trashed)
@@ -276,7 +278,7 @@ struct SystemDataView: View {
                 Spacer()
                 Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.bordered).disabled(m.busy)
-                Button { review.present(ReviewBuild.systemData(m) { items in Task { await m.remove(items) } }) } label: {
+                Button { review.present(ReviewBuild.systemData(m) { items, trash in Task { await m.remove(items, trash) } }) } label: {
                     Label(m.selected.isEmpty ? "Remove" : "Remove \(ByteText.string(m.selectedBytes))", systemImage: "trash")
                         .contentTransition(.numericText())
                 }

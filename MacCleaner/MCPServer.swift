@@ -422,11 +422,20 @@ enum MCPServer {
                                       "allowed": SDKEngine.reason($0) == nil, "reason": SDKEngine.reason($0) ?? NSNull()] as [String: Any] }
             let digest = plan(list.map { i in "\(i.id)|" + sdkPaths(i.action).map(identity).joined(separator: ",") })
             if !confirm {
+                // Archives (Trash) are captured now; the confirm can only approve exactly these.
+                var archives: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] = []
+                for i in list where SDKEngine.reason(i) == nil {
+                    if case .trash(let u) = i.action, let snap = AppCleanup.snapshot(u) {
+                        archives.append((i.id, i.name, snap, i.size, "Requested through Mac Cleaner's AI connection or command line"))
+                    }
+                }
                 return withPreview(name, digest, ["preview": true, "items": preview, "total": size(list.reduce(0) { $0 + $1.size }),
-                        "next": "Show this to the user, point out in_use and review items. Only after an explicit yes, call remove_sdks again with confirm: true and the preview_id."])
+                        "next": "Show this to the user, point out in_use and review items. Only after an explicit yes, call remove_sdks again with confirm: true and the preview_id."],
+                        trashPlan: AppCleanup.trashPlan(archives, module: "sdks"))
             }
-            try approve(name, digest, a, approval)
-            let r = SDKEngine.remove(list)
+            let confirmed = try approve(name, digest, a, approval)
+            let r = SDKEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
+                                     trashSource: ToolConfirmation.trashSource("Developer SDKs", for: approval))
             HistoryStore.add(title: "Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
             HistoryStore.add(title: "Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)
             sdkScan = SDKScan()
@@ -453,13 +462,22 @@ enum MCPServer {
             guard !list.isEmpty else { throw ToolError(description: "No matching items. Pass ids from system_data.") }
             let digest = plan(list.map { i -> String in if case .trash(let u) = i.action { return "\(i.id)|\(identity(u.path))" }; return i.id })
             if !confirm {
+                // Trash items are captured now; the confirm can only approve exactly these.
+                var trashItems: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] = []
+                for i in list where SystemDataEngine.reason(i) == nil {
+                    if case .trash(let u) = i.action, let snap = AppCleanup.snapshot(u) {
+                        trashItems.append((i.id, i.name, snap, i.size ?? 0, "Requested through Mac Cleaner's AI connection or command line"))
+                    }
+                }
                 return withPreview(name, digest, ["preview": true,
                         "items": list.map { ["name": $0.section.rawValue + ": " + $0.name, "size": $0.size.map(size) ?? "unknown",
                                              "allowed": SystemDataEngine.reason($0) == nil, "reason": SystemDataEngine.reason($0) ?? NSNull()] as [String: Any] },
-                        "next": "Show this to the user (backups and attachments can't be recreated). Only after an explicit yes, call again with confirm: true and the preview_id."])
+                        "next": "Show this to the user (backups and attachments can't be recreated). Only after an explicit yes, call again with confirm: true and the preview_id."],
+                        trashPlan: AppCleanup.trashPlan(trashItems, module: "system-data"))
             }
-            try approve(name, digest, a, approval)
-            let r = SystemDataEngine.remove(list)
+            let confirmed = try approve(name, digest, a, approval)
+            let r = SystemDataEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
+                                            trashSource: ToolConfirmation.trashSource("System Data", for: approval))
             HistoryStore.add(title: "Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
                              outcome: .deleted, measuredFreeChange: r.freed)
             HistoryStore.add(title: "System Data Moved to Trash", bytes: r.bytes - r.freed, symbol: "internaldrive", outcome: .trashed)

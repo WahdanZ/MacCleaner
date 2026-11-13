@@ -391,11 +391,17 @@ enum SDKEngine {
     }
 
     /// `bytes` = everything removed; `trashed` = the part that went to the Trash (archives).
-    static func remove(_ items: [SDKItem], progress: (String) -> Void = { _ in }) -> (bytes: Int64, trashed: Int64, errors: [String]) {
+    /// Removes the reviewed items. Archives (`.trash`) move only through `trash`, the approval given at the review sheet
+    /// or the MCP/CLI confirm for exactly the archives it showed (never made here); without it they stay and say so.
+    /// Everything else runs as before.
+    static func remove(_ items: [SDKItem], trash: TrashApproval? = nil, trashSource: String = "Developer SDKs",
+                       progress: (String) -> Void = { _ in }) -> (bytes: Int64, trashed: Int64, errors: [String]) {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, trashed: Int64 = 0
         var errors: [String] = []
+        var archives: [SDKItem] = []
         for item in items {
+            if case .trash = item.action { archives.append(item); continue }
             progress(item.name)
             if let why = reason(item) { errors.append("\(item.name): \(why)"); continue }
             var ok = true
@@ -416,8 +422,8 @@ enum SDKEngine {
                         p = p.deletingLastPathComponent()
                     }
                 }
-            case .trash(let u):
-                if let e = AppEngine.trash(u, size: item.size, source: "Developer SDKs") { ok = false; errors.append("\(item.name): \(e)") }
+            case .trash:
+                ok = false   // handled below, through the approved plan
             case .docker(let k):
                 let r = Shell.run(dockerPath!, dockerPrune[k]!, timeout: 600)
                 if r.status != 0 { ok = false; errors.append("\(item.name): \(r.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "docker failed")") }
@@ -431,11 +437,15 @@ enum SDKEngine {
                     errors.append("\(item.name): \(msg)")
                 }
             }
-            if ok {
-                bytes += item.size
-                if case .trash = item.action { trashed += item.size }
-            }
+            if ok { bytes += item.size }
         }
+        if let first = archives.first { progress(first.name) }
+        let t = AppCleanup.engineTrash(archives.map { ($0.id, $0.name) }, trash, source: trashSource)
+        for a in archives where t.moved[a.id] != nil {
+            bytes += a.size
+            trashed += a.size
+        }
+        errors += t.errors
         return (bytes, trashed, errors)
     }
 
@@ -506,11 +516,11 @@ final class SDKModel {
     func selectUnused() { selected.formUnion(items.filter(\.isUnused).map(\.id)) }
 
     /// Removes exactly the reviewed items.
-    func remove(_ list: [SDKItem]) async {
+    func remove(_ list: [SDKItem], _ trash: TrashApproval?) async {
         guard !list.isEmpty else { return }
         phase = .removing
         let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, trashed: Int64, errors: [String]) in
-            SDKEngine.remove(list) { name in Task { @MainActor [weak self] in self?.current = name } }
+            SDKEngine.remove(list, trash: trash) { name in Task { @MainActor [weak self] in self?.current = name } }
         }.value
         HistoryStore.shared.add("Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
         HistoryStore.shared.add("Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)

@@ -1531,6 +1531,7 @@ extension SelfTest {
         trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
         sharedFileLocking(dir: dir)
         mcpAndCLITrash(dir: dir, runID: runID)
+        engineTrash(dir: dir, runID: runID)
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
@@ -1821,6 +1822,148 @@ extension SelfTest {
               fm.fileExists(atPath: k2.path) && kErrors.contains("\(Scanner.tilde(k2)): \(AppCleanup.unrecordedStop)"))
         if let where_ = recovery(k1Error) { try? fm.moveItem(atPath: where_, toPath: k1.path) }
         check("the unrecorded CLI move was where the answer said", fm.fileExists(atPath: k1.path))
+    }
+
+    // MARK: SDK archives and System Data through the executor (M01-04b-3a)
+
+    static func engineTrash(dir: URL, runID: String) {
+        print("SDK archives and System Data: review / preview snapshot → approval → engine → executor (M01-04b-3a)")
+        let fm = FileManager.default
+        let home = SafetyGuard.home
+        func folder(_ u: URL, _ text: String = "x") -> URL {
+            try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: u.appendingPathComponent("content.txt"))
+            return u
+        }
+        func log(_ u: URL) -> [TrashedItem] { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) } }
+        func putBack(_ u: URL) -> Bool { log(u).first.map { TrashOps.restore($0) == nil } ?? false }
+        func archive(_ name: String, _ u: URL) -> SDKItem {
+            SDKItem(id: u.path, group: .xcode, kind: "Archives", name: name, detail: "", size: 10, reveal: u,
+                    action: .trash(u), review: true, regen: "can't be rebuilt exactly")
+        }
+        /// Opens the review the screen opens, confirms it through the review sheet's confirmation, returns what the
+        /// screen gets.
+        @MainActor func confirmed<I>(_ build: (@escaping ([I], TrashApproval?) -> Void) -> ReviewRequest,
+                                     beforeConfirm: () -> Void = {}) -> ([I], TrashApproval?)? {
+            let got = Slot<([I], TrashApproval?)>()
+            let request = build { got.value = ($0, $1) }
+            beforeConfirm()
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+
+        // A review mixing an archive (Trash) and Device Support (deleted permanently, its own flow).
+        let arch = folder(dir.appendingPathComponent("A-\(runID).xcarchive"), "archive")
+        let devDir = folder(home.appendingPathComponent("Library/Developer/Xcode/iOS DeviceSupport/selftest-\(runID)"))
+        let dev = SDKItem(id: devDir.path, group: .xcode, kind: "Device support", name: "DS", detail: "", size: 5, reveal: devDir,
+                          action: .delete([devDir]), regen: "copied again")
+        let mixed = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("A", arch), dev], perform: $0) } }
+        let plannedIDs: [String]? = { if case .approved(let a)? = mixed?.1 { return a.plan.candidates.map(\.id) }; return nil }()
+        check("the SDK review's Trash approval covers only the archive, not the permanent delete",
+              plannedIDs == [arch.path] && SDKEngine.reason(dev) == nil)
+        let r1 = SDKEngine.remove(mixed?.0 ?? [], trash: mixed?.1)
+        check("the archive goes to the Trash through the executor and the Device Support folder is deleted as before",
+              r1.errors.isEmpty && r1.trashed == 10 && r1.bytes == 15 && !fm.fileExists(atPath: arch.path) && !fm.fileExists(atPath: devDir.path))
+        check("the archive is logged as Developer SDKs and Put Back restores it",
+              log(arch).first?.source == "Developer SDKs" && putBack(arch) && fm.fileExists(atPath: arch.appendingPathComponent("content.txt").path))
+
+        // Replaced after the sheet opened.
+        let stale = MainActor.assumeIsolated {
+            confirmed({ ReviewBuild.sdks([archive("A", arch)], perform: $0) }, beforeConfirm: {
+                try? fm.removeItem(at: arch); _ = folder(arch, "someone else's")
+            })
+        }
+        let r2 = SDKEngine.remove(stale?.0 ?? [], trash: stale?.1)
+        check("an archive replaced after review is left alone and reported",
+              r2.trashed == 0 && r2.errors.first?.contains("changed after you reviewed") == true
+              && (try? String(contentsOf: arch.appendingPathComponent("content.txt"), encoding: .utf8)) == "someone else's")
+
+        // No approval, a refused one, and an approval that doesn't match the items: nothing moves.
+        let none = SDKEngine.remove([archive("A", arch)], trash: nil)
+        check("an archive without an approval stays and says so",
+              none.trashed == 0 && none.errors.first?.contains("wasn't approved") == true && fm.fileExists(atPath: arch.path))
+        let other = folder(dir.appendingPathComponent("B-\(runID).xcarchive"))
+        let forOther = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("B", other)], perform: $0) } }
+        if case .approved(let a)? = forOther?.1 {
+            let refused = SDKEngine.remove([archive("B", other)], trash: .refused(plan: a.plan, reason: "No approval was issued (test)"))
+            check("a refused approval moves nothing and says why",
+                  refused.trashed == 0 && refused.errors.first?.contains("No approval was issued") == true && fm.fileExists(atPath: other.path))
+            let mismatch = SDKEngine.remove([archive("A", arch)], trash: forOther?.1)
+            check("an approval for different items moves nothing at all",
+                  mismatch.trashed == 0 && mismatch.errors.first?.contains("doesn't match") == true
+                  && fm.fileExists(atPath: arch.path) && fm.fileExists(atPath: other.path))
+        } else { check("an approval was issued for the second archive", false) }
+
+        // Partial failure: one archive can't move.
+        let free = folder(dir.appendingPathComponent("C-\(runID).xcarchive")), locked = folder(dir.appendingPathComponent("D-\(runID).xcarchive"))
+        chflags(locked.path, UInt32(UF_IMMUTABLE))
+        let both = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("C", free), archive("D", locked)], perform: $0) } }
+        let r3 = SDKEngine.remove(both?.0 ?? [], trash: both?.1)
+        chflags(locked.path, 0)
+        check("an archive that can't move is reported, the other moves",
+              r3.trashed == 10 && r3.errors.count == 1 && r3.errors.first?.hasPrefix("D:") == true
+              && !fm.fileExists(atPath: free.path) && fm.fileExists(atPath: locked.path) && log(locked).isEmpty)
+        check("the moved archive can be put back", putBack(free))
+
+        // System Data review: a backup folder.
+        let backup = folder(dir.appendingPathComponent("backup-\(runID)"), "backup")
+        let sys = SysItem(id: backup.path, section: .backups, name: "Phone", detail: "", size: 7, reveal: backup, action: .trash(backup), review: true)
+        let sysOK = MainActor.assumeIsolated { confirmed { ReviewBuild.systemData([sys], perform: $0) } }
+        let s1 = SystemDataEngine.remove(sysOK?.0 ?? [], trash: sysOK?.1)
+        check("a reviewed backup goes to the Trash through the executor, logged as System Data, and can be put back",
+              s1.errors.isEmpty && s1.bytes == 7 && log(backup).first?.source == "System Data" && putBack(backup))
+        let sysStale = MainActor.assumeIsolated {
+            confirmed({ ReviewBuild.systemData([sys], perform: $0) }, beforeConfirm: { try? fm.removeItem(at: backup); _ = folder(backup, "new") })
+        }
+        let s2 = SystemDataEngine.remove(sysStale?.0 ?? [], trash: sysStale?.1)
+        check("a backup replaced after review is left alone and reported",
+              s2.bytes == 0 && s2.errors.first?.contains("changed after you reviewed") == true && fm.fileExists(atPath: backup.path))
+
+        // MCP, with the real scans finding items in this home folder.
+        let day = home.appendingPathComponent("Library/Developer/Xcode/Archives/2026-01-01")
+        let mcpArch = folder(day.appendingPathComponent("SelfTest-\(runID).xcarchive"), "mcp archive")
+        (["Name": "SelfTest"] as NSDictionary).write(to: mcpArch.appendingPathComponent("Info.plist"), atomically: true)
+        approvals.asked = []; approvals.answer = true
+        /// The id the tool itself reports for the item (as an AI client would use it).
+        func toolID(_ tool: String, _ args: [String: Any], endingWith tail: String) -> String {
+            let items = ((try? MCPServer.call(tool, args)) as? [String: Any])?["items"] as? [[String: Any]] ?? []
+            return items.compactMap { $0["id"] as? String }.first { $0.hasSuffix(tail) } ?? "missing"
+        }
+        let archTail = "/Archives/2026-01-01/SelfTest-\(runID).xcarchive"
+        func sdkConfirm(_ approval: ToolApproval?) -> [String: Any]? {
+            let sdkID = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
+            let pv = (try? MCPServer.call("remove_sdks", ["ids": [sdkID]])) as? [String: Any]
+            let id = pv?["preview_id"] as? String ?? ""
+            return (try? MCPServer.call("remove_sdks", ["ids": [sdkID], "confirm": true, "preview_id": id], approval: approval)) as? [String: Any]
+        }
+        let m1 = sdkConfirm(nil)
+        check("MCP remove_sdks moves the archive through the executor after the window, logged as the AI assistant",
+              (m1?["errors"] as? [String])?.isEmpty == true && !fm.fileExists(atPath: mcpArch.path) && approvals.asked.count == 1
+              && log(mcpArch).first?.source == "Developer SDKs · AI assistant")
+        check("the MCP archive can be put back", putBack(mcpArch))
+        let m2 = sdkConfirm(.yesFlag)
+        check("remove_sdks with --yes is logged as the non-interactive override",
+              (m2?["errors"] as? [String])?.isEmpty == true
+              && log(mcpArch).first?.source == "Developer SDKs · Command line (--yes, not confirmed by a person)")
+        _ = putBack(mcpArch)
+        HumanApproval.ask = { _ in try? fm.removeItem(at: mcpArch); _ = folder(mcpArch, "replaced while asking"); return true }
+        let m3 = sdkConfirm(nil)
+        installTestApprover(); approvals.answer = true
+        check("an archive replaced during the confirmation window is left alone and reported",
+              (m3?["errors"] as? [String])?.first?.contains("changed after you reviewed") == true && fm.fileExists(atPath: mcpArch.path))
+
+        let mcpBackup = folder(home.appendingPathComponent("Library/Application Support/MobileSync/Backup/selftest-\(runID)"), "mcp backup")
+        let backupID = toolID("system_data", [:], endingWith: "/MobileSync/Backup/selftest-\(runID)")
+        let spv = (try? MCPServer.call("remove_system_data", ["ids": [backupID]])) as? [String: Any]
+        let sm = (try? MCPServer.call("remove_system_data", ["ids": [backupID], "confirm": true,
+                                                             "preview_id": spv?["preview_id"] as? String ?? ""], approval: .terminal)) as? [String: Any]
+        check("MCP remove_system_data moves the backup through the executor, logged with who confirmed",
+              (sm?["errors"] as? [String])?.isEmpty == true && !fm.fileExists(atPath: mcpBackup.path)
+              && log(mcpBackup).first?.source == "System Data · Command line")
+        check("the MCP backup can be put back", putBack(mcpBackup))
+        try? fm.removeItem(at: mcpArch); try? fm.removeItem(at: mcpBackup)
     }
 
     #if MACCLEANER_TEST_HOOKS

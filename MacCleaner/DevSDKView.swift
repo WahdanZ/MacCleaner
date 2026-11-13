@@ -80,7 +80,7 @@ struct DevSDKView: View {
                 Text("Runtimes, images and SDK parts are deleted permanently: they can be downloaded again. Xcode archives go to the Trash.")
                     .font(.system(size: 11)).foregroundStyle(Palette.faint)
                 Spacer()
-                Button { review.present(ReviewBuild.sdks(m) { items in Task { await m.remove(items) } }) } label: {
+                Button { review.present(ReviewBuild.sdks(m) { items, trash in Task { await m.remove(items, trash) } }) } label: {
                     Label(m.selected.isEmpty ? "Remove" : "Remove \(ByteText.string(m.selectedBytes))", systemImage: "trash")
                         .contentTransition(.numericText())
                 }

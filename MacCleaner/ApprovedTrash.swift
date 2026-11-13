@@ -110,6 +110,45 @@ enum AppCleanup {
         return run
     }
 
+    /// `moveToTrash` for synchronous code (the engines, the MCP server, the CLI): waits for it. Nothing on this path
+    /// needs the main thread, so it may be called on it.
+    static func moveToTrashBlocking(_ decision: TrashApproval, source: String,
+                                    precondition: CleanupExecutor.Precondition? = nil) -> TrashRun {
+        let slot = RunSlot()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            slot.run = await moveToTrash(decision, source: source, precondition: precondition)
+            done.signal()
+        }
+        done.wait()
+        return slot.run ?? TrashRun()
+    }
+
+    /// The Trash part of an engine's run (SDK archives, System Data): moves exactly the approved items among the
+    /// engine's reviewed Trash items `items` (id, display name). It never makes an approval; it uses the one given.
+    /// Nothing moves (every item says why) when there is no approval, or the approved plan holds anything that isn't
+    /// one of `items`. A reviewed Trash item missing from the plan is reported and left alone.
+    static func engineTrash(_ items: [(id: String, name: String)], _ decision: TrashApproval?,
+                            source: String) -> (moved: [String: Int64], errors: [String]) {
+        guard !items.isEmpty else { return ([:], []) }
+        guard let decision else {
+            return ([:], items.map { "\($0.name): it wasn't approved for the Trash, so it was left alone" })
+        }
+        let plan: CleanupPlan
+        switch decision { case .approved(let a): plan = a.plan; case .refused(let p, _): plan = p }
+        let ids = Set(items.map(\.id)), planned = Set(plan.candidates.map(\.id))
+        guard planned.isSubset(of: ids) else {
+            return ([:], items.map { "\($0.name): the approved list doesn't match the items, so nothing was moved" })
+        }
+        var errors = items.filter { !planned.contains($0.id) }.map {
+            "\($0.name): it wasn't in the reviewed list for the Trash, so it was left alone"
+        }
+        let run = moveToTrashBlocking(decision, source: source)
+        let names = Dictionary(items.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        for p in run.problems { errors.append("\(names[p.id] ?? p.id): \(p.message)") }
+        return (run.moved, errors)
+    }
+
     static func text(_ r: ItemOutcome.Result) -> String {
         switch r {
         case .trashed, .removed: return "done"
@@ -180,4 +219,9 @@ struct AppProtection: ProtectionChecking {
             return "Not handled by the cleanup executor yet"
         }
     }
+}
+
+/// Carries a run's result out of a detached task (written once before the semaphore is signalled).
+final class RunSlot: @unchecked Sendable {
+    var run: TrashRun?
 }

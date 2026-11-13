@@ -73,41 +73,50 @@ enum AdminStep {
     /// `parentOwner` and `chown`, to run the script as you on throwaway files.
     static func script(_ items: [AppLeftover], uid: uid_t,
                        allowed: (URL) -> Bool = AdminGuard.isAllowed,
-                       parentOwner: uid_t = 0, chown: String = "/usr/sbin/chown") -> String {
+                       parentOwner: uid_t = 0, chown: String = "/usr/sbin/chown",
+                       launchctl: String = "/bin/launchctl", pkgutil: String = "/usr/sbin/pkgutil") -> String {
         let safeName = "^[A-Za-z0-9._-]+$"
-        var lines = ["set -u",
+        // R is set when any file item wasn't verified and moved; then installer receipts are not forgotten (the uninstall
+        // didn't fully happen). A launch job is stopped, and audio restarted for a HAL plug-in, only right after that
+        // item's own file was verified and moved, so a stale or replaced item never stops or restarts anything.
+        var lines = ["set -u", "R=", "A=",
                      "D=$(/usr/bin/mktemp -d \(q(stagingTemplate))) || exit 1"]
+        var receipts: [String] = []
         for (i, l) in items.enumerated() {
+            if let pkg = l.receipt {
+                if pkg.range(of: safeName, options: .regularExpression) != nil {
+                    receipts.append("\(q(pkgutil)) --forget \(pkg) >/dev/null 2>&1 || true")
+                }
+                continue
+            }
+            guard allowed(l.url) else { lines.append("R=1"); continue }
+            guard let reviewed = l.identity, let expected = expectedStat(reviewed) else {
+                lines.append("echo MACCLEANER-UNIDENTIFIED \(i); R=1")
+                continue
+            }
+            var onVerified = ""
             if let label = l.launchLabel, label.range(of: safeName, options: .regularExpression) != nil {
                 let domain = l.launchSystem ? "system" : "gui/\(uid)"
-                lines.append("/bin/launchctl bootout \(domain)/\(label) 2>/dev/null || true")
+                onVerified += " \(q(launchctl)) bootout \(domain)/\(label) 2>/dev/null || true;"
             }
-            if let pkg = l.receipt {
-                guard pkg.range(of: safeName, options: .regularExpression) != nil else { continue }
-                lines.append("/usr/sbin/pkgutil --forget \(pkg) >/dev/null 2>&1 || true")
-                continue
-            }
-            guard allowed(l.url) else { continue }
-            guard let reviewed = l.identity, let expected = expectedStat(reviewed) else {
-                lines.append("echo MACCLEANER-UNIDENTIFIED \(i)")
-                continue
-            }
+            if l.url.path.hasPrefix("/Library/Audio/Plug-Ins/HAL/") { onVerified += " A=1;" }
             let item = l.url.standardizedFileURL
             let src = q(item.path), dir = q(item.deletingLastPathComponent().path)
             let staged = "\"$D\"" + q("/\(i)-" + item.lastPathComponent)
             let present = { (p: String) in "{ [ -e \(p) ] || [ -L \(p) ]; }" }
             lines.append("if [ -d \(dir) ] && [ ! -L \(dir) ] && [ \"$(/usr/bin/stat -f %u \(dir))\" = \(parentOwner) ]"
                          + " && \(present(src)); then"
-                         + " if [ \"$(/usr/bin/stat -f %d \(src))\" != \"$(/usr/bin/stat -f %d \"$D\")\" ]; then echo MACCLEANER-OTHER-VOLUME \(i);"
+                         + " if [ \"$(/usr/bin/stat -f %d \(src))\" != \"$(/usr/bin/stat -f %d \"$D\")\" ]; then echo MACCLEANER-OTHER-VOLUME \(i); R=1;"
                          + " else /bin/mv -n -- \(src) \(staged);"
-                         + " if \(present(staged)) && [ \"$(/usr/bin/stat -f \(q(expected.format)) \(staged))\" != \(q(expected.value)) ]; then"
-                         + " /bin/mv -n -- \(staged) \(src);"
+                         + " if ! \(present(staged)); then R=1;"
+                         + " elif [ \"$(/usr/bin/stat -f \(q(expected.format)) \(staged))\" != \(q(expected.value)) ]; then"
+                         + " /bin/mv -n -- \(staged) \(src); R=1;"
                          + " if \(present(staged)); then echo MACCLEANER-KEPT \(i); else echo MACCLEANER-CHANGED \(i); fi;"
-                         + " fi; fi; fi")
+                         + " else\(onVerified.isEmpty ? " :;" : onVerified)"
+                         + " fi; fi; else R=1; fi")
         }
-        if items.contains(where: { $0.url.path.hasPrefix("/Library/Audio/Plug-Ins/HAL/") }) {
-            lines.append("/usr/bin/killall coreaudiod 2>/dev/null || true")
-        }
+        if !receipts.isEmpty { lines.append("if [ -z \"$R\" ]; then \(receipts.joined(separator: "; ")); fi") }
+        lines.append("if [ -n \"$A\" ]; then /usr/bin/killall coreaudiod 2>/dev/null || true; fi")   // a verified HAL plug-in moved
         // Only the staging folder itself changes owner, never anything inside it.
         lines.append("\(q(chown)) \(uid) \"$D\" || exit 1")
         lines.append("echo \"$D\"")

@@ -32,45 +32,49 @@ extension AppEngine {
     /// qualifies (`adminFallbackRefusal`), it joins the leftovers outside your home folder in one macOS password
     /// step, which checks each item's reviewed identity at the privileged move. If the app can't be removed and
     /// doesn't qualify, its leftovers are kept.
+    /// Stops one of your launch jobs (launchctl bootout gui/<uid>/<label>). Callers pass it only in the self-test.
+    static let defaultStopUserJob: @Sendable (String) -> Void = { label in
+        _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"], timeout: 15)
+    }
+
     static func uninstall(_ a: AppInfo, picked: [AppLeftover], trash approval: TrashApproval?, source: String? = nil,
                           adminStep: AdminStepRunner = defaultAdminStep,
-                          adminAllowed: @escaping @Sendable (URL) -> Bool = { AdminGuard.isAllowed($0) }) -> UninstallResult {
+                          adminAllowed: @escaping @Sendable (URL) -> Bool = { AdminGuard.isAllowed($0) },
+                          stopUserJob: @Sendable (String) -> Void = defaultStopUserJob) -> UninstallResult {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var r = UninstallResult()
         let uid = getuid()
-        for l in picked where !l.needsAdmin {
-            if let label = l.launchLabel { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15) }
-        }
         var adminItems = picked.filter(\.needsAdmin)
         let home = picked.filter { !$0.needsAdmin && $0.receipt == nil }
         let bundleID = a.url.path, bundleURL = a.url
         let items: [AppCleanup.EngineTrashItem] = [(bundleID, "\(a.name).app", a.url, a.identity)]
             + home.map { ($0.id, $0.url.lastPathComponent, $0.url, $0.identity) }
-        let allowed = adminAllowed
-        // The app bundle comes first in the plan: unless it moved, or was refused only for permission in a folder the
-        // password step may touch, the leftovers are left alone.
+        // The app bundle comes first in the plan. The executor finishes it before touching any leftover, and this decides
+        // there and then, completely: it moved, or it qualifies for the password step (permission refusal, allowed
+        // folder, protection and identity checked now). Otherwise the leftovers are left alone.
+        let reviewed = a.identity
+        let decision = FallbackDecision()
         let t = AppCleanup.engineTrash(items, module: "uninstall", approval, source: source ?? "Uninstall \(a.name)",
                                        stopAfter: { o in
             guard o.candidateID == bundleID else { return nil }
-            switch o.result {
-            case .trashed: return nil
-            case .permissionDenied where allowed(bundleURL): return nil
-            default: return "\(a.name).app couldn't be removed, so its leftovers were kept"
-            }
+            if case .trashed = o.result { return nil }
+            let why = adminFallbackRefusal(outcome: o.result, reviewed: reviewed, current: AppCleanup.snapshot(bundleURL),
+                                           protection: AppProtection().refusal(path: AppCleanup.physicalPath(bundleURL), disposition: .trash),
+                                           adminAllowed: adminAllowed(bundleURL))
+            decision.set(why)
+            return why == nil ? nil : "\(a.name).app couldn't be removed, so its leftovers were kept"
         })
         let bundleOutcome = t.outcomes[bundleID]
         if t.moved[bundleID] != nil {
             r.appRemoved = true
             r.bytes += a.appSize
         } else {
-            let why = adminFallbackRefusal(outcome: bundleOutcome, reviewed: a.identity, current: AppCleanup.snapshot(a.url),
-                                           protection: AppProtection().refusal(path: AppCleanup.physicalPath(a.url), disposition: .trash),
-                                           adminAllowed: allowed(a.url))
-            if why == nil {
+            let why = decision.refusal ?? "it wasn't handled"   // decided above, before any leftover moved
+            if decision.decided && decision.refusal == nil {
                 var item = AppLeftover(id: bundleID, url: a.url, label: "App", size: a.appSize, include: true, note: nil, needsAdmin: true)
                 item.identity = a.identity
                 adminItems.insert(item, at: 0)
-            } else if case .permissionDenied? = bundleOutcome, let why {
+            } else if case .permissionDenied? = bundleOutcome {
                 r.errors.append("\(a.name).app: the system refused permission, and the password step can't be used: \(why)")
             }
         }
@@ -80,6 +84,8 @@ extension AppEngine {
         let bundleDenied: Bool = { if case .permissionDenied? = bundleOutcome { return true }; return false }()
         r.errors += t.errors.filter { !(bundleDenied && $0.id == bundleID) }.map(\.text)
         r.bytes += home.filter { t.moved[$0.id] != nil }.reduce(0) { $0 + $1.size }
+        // A leftover's launch job is stopped only after its own (reviewed, unchanged) file went to the Trash.
+        for l in home where t.moved[l.id] != nil { if let label = l.launchLabel { stopUserJob(label) } }
         guard !adminItems.isEmpty, r.appRemoved || bundleToAdmin else { return r }
         switch adminStep(adminItems, uid) {
         case .ok(let staging, let report):
@@ -154,4 +160,15 @@ extension AppEngine {
             return ([], [msg], false)
         }
     }
+}
+
+/// The app bundle's fallback decision, made inside the executor's per-item callback (before any leftover is touched)
+/// and read after the run.
+private final class FallbackDecision: @unchecked Sendable {   // written once, from the executor, behind `lock`
+    private let lock = NSLock()
+    private var made = false
+    private var why: String?
+    func set(_ refusal: String?) { lock.lock(); made = true; why = refusal; lock.unlock() }
+    var decided: Bool { lock.lock(); defer { lock.unlock() }; return made }
+    var refusal: String? { lock.lock(); defer { lock.unlock() }; return why }
 }

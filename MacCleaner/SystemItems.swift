@@ -76,20 +76,23 @@ final class ExtensionsModel {
 
     /// Removes the item the alert named: in your Library through `trash` (the alert's approval); installed for all
     /// users through the password step, which checks its scanned identity at the privileged move.
-    func remove(_ x: ExtItem, trash: TrashApproval?, refusal: String?) async {
+    /// `refusal` is what the alert found when it was shown (stale, replaced, missing or unidentified): then nothing
+    /// happens, no password prompt either. `adminStep` is passed only by the self-test.
+    func remove(_ x: ExtItem, trash: TrashApproval?, refusal: String?,
+                adminStep: @escaping AppEngine.AdminStepRunner = AppEngine.defaultAdminStep) async {
         busy = true
-        if x.allUsers {
+        if let refusal {
+            message = ("\(x.name): \(refusal)", true)
+        } else if x.allUsers {
             var item = AppLeftover(id: x.id, url: x.url, label: x.kind, size: x.size, include: true, note: nil, needsAdmin: true)
             item.identity = x.identity
-            let r = await Task.detached { AppEngine.removeSystemItems([item]) }.value
+            let r = await Task.detached { AppEngine.removeSystemItems([item], adminStep: adminStep) }.value
             if r.cancelled { message = ("Kept \(x.name) (password prompt cancelled).", false) }
             else if r.errors.isEmpty { message = ("\(x.name) moved to the Trash.", false) }
             else { message = ("\(x.name): \(r.errors.joined(separator: "; "))", true) }
             if x.url.path.hasPrefix("/Library/Audio/Plug-Ins/HAL/") && r.errors.isEmpty && !r.cancelled {
                 message = ("\(x.name) moved to the Trash. Audio restarted.", false)
             }
-        } else if let refusal {
-            message = ("\(x.name): \(refusal)", true)
         } else if let trash {
             let run = await AppCleanup.moveToTrash(trash, source: "Extensions")
             if run.moved[x.id] != nil && run.problems.isEmpty { message = ("\(x.name) moved to the Trash.", false) }
@@ -142,8 +145,9 @@ struct ExtensionsView: View {
         .alert("Remove \(m.pending?.name ?? "")?", isPresented: Binding(get: { m.pending != nil }, set: { if !$0 { m.pending = nil } })) {
             Button("Move to Trash", role: .destructive) {
                 if let x = m.pending {
-                    if x.allUsers {
-                        Task { await m.remove(x, trash: nil, refusal: nil) }   // the password step authorizes it
+                    if x.allUsers {   // the password step authorizes it, unless the alert found the item stale
+                        let refusal = m.pendingShown.refusal
+                        Task { await m.remove(x, trash: nil, refusal: refusal) }
                     } else {
                         AlertConfirmation.confirm(id: x.id, name: x.name, shown: m.pendingShown, module: "extensions") { trash, refusal in
                             Task { await m.remove(x, trash: trash, refusal: refusal) }
@@ -253,14 +257,24 @@ final class StartupModel {
 
     /// Removes the item the alert named: yours is stopped, then moved through `trash` (the alert's approval); others
     /// go through the password step, which checks the scanned identity at the privileged move.
-    func remove(_ s: StartupItem, trash: TrashApproval?, refusal: String?) async {
+    /// `refusal` is what the alert found when it was shown: then nothing happens (no launchctl, no password prompt).
+    /// Yours: its file goes to the Trash through `trash`, and only once it has moved is its job stopped, so a refused
+    /// approval or a changed file never stops anything. Others: the password step, which stops the job only after
+    /// verifying and moving its file. `adminStep` and `stopJob` are passed only by the self-test.
+    func remove(_ s: StartupItem, trash: TrashApproval?, refusal: String?,
+                adminStep: @escaping AppEngine.AdminStepRunner = AppEngine.defaultAdminStep,
+                stopJob: @escaping @Sendable (String) -> Void = AppEngine.defaultStopUserJob) async {
         busy = true
-        if s.scope == .user, let refusal {
+        if let refusal {
             message = ("\(s.owner): \(refusal)", true)
+        } else if s.scope == .user, case .refused(_, let reason)? = trash {
+            message = ("\(s.owner): \(reason)", true)
         } else if s.scope == .user, let trash {
-            let uid = getuid(), label = s.label
-            await Task.detached { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15) }.value
             let run = await AppCleanup.moveToTrash(trash, source: "Startup items")
+            if run.moved[s.id] != nil {
+                let label = s.label
+                await Task.detached { stopJob(label) }.value
+            }
             message = run.moved[s.id] != nil && run.problems.isEmpty
                 ? ("\(s.owner) removed from startup (moved to Trash).", false)
                 : ("\(s.owner): \(run.problems.first?.message ?? "not moved")", true)
@@ -271,7 +285,7 @@ final class StartupModel {
             item.identity = s.identity
             item.launchLabel = s.label
             item.launchSystem = s.scope == .system
-            let r = await Task.detached { AppEngine.removeSystemItems([item]) }.value
+            let r = await Task.detached { AppEngine.removeSystemItems([item], adminStep: adminStep) }.value
             message = r.cancelled ? ("Kept \(s.owner) (password prompt cancelled).", false)
                 : r.errors.isEmpty ? ("\(s.owner) removed from startup (moved to Trash).", false)
                 : ("\(s.owner): \(r.errors.joined(separator: "; "))", true)
@@ -337,8 +351,9 @@ struct StartupView: View {
                         AlertConfirmation.confirm(id: s.id, name: s.owner, shown: m.pendingShown, module: "startup") { trash, refusal in
                             Task { await m.remove(s, trash: trash, refusal: refusal) }
                         }
-                    } else {
-                        Task { await m.remove(s, trash: nil, refusal: nil) }   // the password step authorizes it
+                    } else {   // the password step authorizes it, unless the alert found the item stale
+                        let refusal = m.pendingShown.refusal
+                        Task { await m.remove(s, trash: nil, refusal: refusal) }
                     }
                 }
                 m.pending = nil

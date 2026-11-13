@@ -13,17 +13,7 @@ enum SelfTest {
         print((ok ? "  ✓ " : "  ✗ ") + name)
     }
 
-    /// Stands in for Mac Cleaner's confirmation window during the self-test, so no real window ever appears.
-    final class ApprovalRecorder {
-        var asked: [ApprovalRequest] = []
-        var answer = true
-    }
-
     static func run() -> Bool {
-        let approvals = ApprovalRecorder()
-        let realAsk = HumanApproval.ask
-        HumanApproval.ask = { r in approvals.asked.append(r); return approvals.answer }
-        defer { HumanApproval.ask = realAsk }
         let fm = FileManager.default
         let home = SafetyGuard.home
         let h = { (rel: String) in home.appendingPathComponent(rel) }

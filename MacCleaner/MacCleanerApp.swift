@@ -10,6 +10,7 @@ enum Entry {
             exit(CLI.run(Array(args.dropFirst(2))))
         }
         if CommandLine.arguments.contains("--selftest") {
+            SelfTest.installTestApprover()   // never show a real confirmation window during the self-test
             exit(SelfTest.run() ? 0 : 1)
         }
         if CommandLine.arguments.contains("--mcp") {

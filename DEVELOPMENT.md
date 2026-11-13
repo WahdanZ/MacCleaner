@@ -38,7 +38,7 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 "build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
 ```
 
-It runs 189 checks (the safety rules, the audit fixes, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs 199 checks (the safety rules, the audit fixes, the scheduled clean timing, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 
@@ -72,7 +72,8 @@ All four share the same engines and guards, so a rule enforced in one place appl
 | `AppsModel.swift`, `AppsView.swift` | Applications: scan, leftovers, uninstall, `AdminGuard` / `AdminStep` |
 | `SystemData.swift`, `SystemItems.swift`, `Shredder.swift` | System Data, Startup & Extensions, Shredder |
 | `Trash*.swift`, `History.swift` | Trash size, empty, Put Back log; cleanup history |
-| `Automation.swift` | Low-disk alert, weekly safe clean, open at login |
+| `Automation.swift` | Low-disk alert, scheduled safe clean (daily or weekly, catches up after sleep), open at login |
+| `MenuBarPopover.swift` | Menu bar panel: free space, Clean Now, last and next clean, recent cleanups; optional text next to the icon |
 | `Updates.swift` | In-app updates from GitHub Releases: daily check, Software Update window, download, checks, swap and relaunch |
 | `CLI.swift`, `MCPServer.swift`, `Integrations*.swift` | Command line, MCP server, AI app setup |
 | `Intro.swift` | Welcome tour |

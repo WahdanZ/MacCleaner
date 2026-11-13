@@ -1,10 +1,12 @@
 name: Release
 
-# Push a version tag to publish a release:   git tag v1.0.0 && git push origin v1.0.0
-# Or run it by hand (Actions › Release › Run workflow) to get a test DMG as an artifact, without publishing.
-#
-# Signing is optional. With these repository secrets the app and DMG are Developer ID–signed and
-# notarized; without them the DMG is ad-hoc signed (users have to allow it in System Settings once).
+# Push a version tag to build a release:   git tag v1.0.0 && git push origin v1.0.0
+#   → Developer ID–signed, notarized, verified DMG in a DRAFT GitHub release (not public).
+#   Then the maintainer runs scripts/sign-release.sh vX.Y.Z (verifies again, adds the Ed25519 .sig for
+#   in-app updates) and publishes with --publish. Nothing becomes public from this workflow alone.
+# A tag build FAILS when any signing or notarization secret below is missing: no unsigned releases.
+# Run it by hand (Actions › Release › Run workflow) for a test DMG artifact: signed if the secrets exist,
+# otherwise ad-hoc and marked TEST BUILD. A test build is never published.
 #   MACOS_CERT_P12        base64 of your "Developer ID Application" certificate exported as .p12
 #   MACOS_CERT_PASSWORD   password of that .p12
 #   APPLE_TEAM_ID         10-character team ID
@@ -22,8 +24,7 @@ on:
         required: true
 
 permissions:
-  contents: write
-  actions: write      # to start the website deploy after publishing
+  contents: write     # to create the draft release (publishing and the website deploy are done by the maintainer)
 
 jobs:
   release:
@@ -46,6 +47,14 @@ jobs:
           echo "VERSION=$V" >> "$GITHUB_ENV"
           echo "DMG=build/MacCleaner-$V.dmg" >> "$GITHUB_ENV"
           echo "Version $V · signing: $HAS_SIGNING · notarizing: $HAS_NOTARY"
+
+      - name: Require signing and notarization for a release
+        if: github.ref_type == 'tag'
+        run: |
+          if [[ "$HAS_SIGNING" != "true" || "$HAS_NOTARY" != "true" ]]; then
+            echo "::error::A release must be Developer ID-signed and notarized. Missing secrets: signing=$HAS_SIGNING notarization=$HAS_NOTARY. Nothing was built or published."
+            exit 1
+          fi
 
       - name: Import signing certificate
         if: env.HAS_SIGNING == 'true'
@@ -83,8 +92,8 @@ jobs:
           grep -q 'BUILD SUCCEEDED' build.log
           codesign --verify --strict --deep "$APP"
 
-      - name: Build (ad-hoc signed)
-        if: env.HAS_SIGNING != 'true'
+      - name: Build (ad-hoc signed, TEST BUILD only)
+        if: env.HAS_SIGNING != 'true' && github.ref_type != 'tag'
         run: |
           set -o pipefail
           xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Release \
@@ -125,6 +134,17 @@ jobs:
         run: |
           cd build && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" && cat "$(basename "$DMG").sha256"
 
+      # The .sig is added later by the maintainer (scripts/sign-release.sh), so it isn't checked here.
+      - name: Verify the release (signature, team, notarization, hardened runtime, version)
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ "$HAS_SIGNING" == "true" && "$HAS_NOTARY" == "true" ]]; then
+            scripts/verify-release.sh "$DMG" --version "$VERSION" --team "$APPLE_TEAM_ID" --no-sig
+          else
+            scripts/verify-release.sh "$DMG" --version "$VERSION" --dev --no-sig
+          fi
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: MacCleaner-${{ env.VERSION }}
@@ -133,27 +153,18 @@ jobs:
             ${{ env.DMG }}.sha256
           retention-days: 30
 
-      - name: Publish GitHub release
+      # A DRAFT: not public, not "latest", not offered by the in-app updater. scripts/sign-release.sh verifies
+      # it again, adds the .sig and (with --publish) publishes it and starts the website deploy.
+      - name: Create draft GitHub release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$HAS_SIGNING" == "true" && "$HAS_NOTARY" == "true" ]]; then
-            INSTALL="Open the DMG and drag **Mac Cleaner** to Applications. This build is signed and notarized by Apple."
-          else
-            INSTALL=$'Open the DMG and drag **Mac Cleaner** to Applications.\n\nThis build is not notarized, so macOS blocks it the first time. To allow it, open **System Settings › Privacy & Security** and click **Open Anyway**, or run:\n\n```\nxattr -dr com.apple.quarantine "/Applications/Mac Cleaner.app"\n```'
-          fi
+          INSTALL="Open the DMG and drag **Mac Cleaner** to Applications. This build is signed and notarized by Apple."
           printf '%s\n\nRequires macOS 14 or later. Check the download with `shasum -a 256 -c MacCleaner-%s.dmg.sha256`.\n' "$INSTALL" "$VERSION" > notes.md
-          gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" \
+          gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --draft \
             --title "Mac Cleaner $VERSION" --notes-file notes.md --generate-notes \
             $([[ "$VERSION" == *-* ]] && echo --prerelease)
-
-      # A release made with GITHUB_TOKEN doesn't trigger other workflows, so start the website deploy here.
-      - name: Update the website
-        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run pages.yml --ref main
 
       - name: Remove signing keychain
         if: always() && env.KEYCHAIN != ''

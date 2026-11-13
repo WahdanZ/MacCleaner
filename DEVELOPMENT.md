@@ -217,28 +217,55 @@ The product page lives in [`website/`](website/) (one `index.html`, one `style.c
 
 ### Publish a release
 
-Push a version tag. The [Release workflow](.github/workflows/release.yml) builds, self-tests, packs a DMG with a SHA-256 checksum and publishes a GitHub Release:
+Releases are always Developer ID–signed, notarized and verified; there is no unsigned release path.
 
-```bash
-git tag v1.1.0
-git push origin v1.1.0
-```
+1. **Tag.** Push a version tag. The [Release workflow](.github/workflows/release.yml) refuses to run without the five signing and notarization secrets below. With them it builds with hardened runtime, self-tests, notarizes and staples the app and the DMG, writes the SHA-256, runs [`scripts/verify-release.sh`](scripts/verify-release.sh), and creates a **draft** release. A draft is not public, not "latest" and not offered by the in-app updater.
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+2. **Sign for in-app updates.** On your Mac (the Ed25519 release key lives only in your keychain):
+   ```bash
+   TEAM_ID=YOUR_TEAM_ID scripts/sign-release.sh v1.1.0
+   ```
+   It downloads the draft's DMG, verifies it again (checksum, Developer ID team, notarization ticket, Gatekeeper, hardened runtime, entitlements, bundle ID, version), signs it, verifies the signature against the public key built into the app (`releasePublicKey` in `Updates.swift`), and uploads `MacCleaner-<version>.dmg.sig`. If any check fails, nothing is signed or uploaded.
+3. **Publish.** Check the draft on GitHub, then:
+   ```bash
+   TEAM_ID=YOUR_TEAM_ID scripts/sign-release.sh v1.1.0 --publish
+   ```
+   This publishes the draft and starts the website deploy (not for pre-releases).
 
-- **Version:** taken from the tag (`v1.1.0` becomes `1.1.0`). A tag with a suffix such as `v1.2.0-beta.1` becomes a pre-release.
+- **Version:** taken from the tag (`v1.1.0` becomes `1.1.0`); the verification checks the app inside has exactly that version. A tag with a suffix such as `v1.2.0-beta.1` becomes a pre-release.
 - **Release notes:** generated from the commits since the last tag, with install steps on top.
-- **Test build:** *Actions › Release › Run workflow* builds a DMG as a download on the run's page, without publishing.
-- **Sign each release for in-app updates:** after the Release workflow publishes, run `scripts/sign-release.sh vX.Y.Z`. It signs the DMG with the Ed25519 release key in your keychain (create it once with `swift scripts/release-key.swift init` and put the public key in `Updates.swift`, `releasePublicKey`) and uploads the `.sig`. The app offers a release only once it has a valid signature.
-- **In-app updates** read the latest non-pre-release from the GitHub API, so keep the asset names `MacCleaner-<version>.dmg` and `MacCleaner-<version>.dmg.sha256`; without the checksum file the app refuses to install. Before installing, the app checks:
-  - the SHA-256;
-  - that the app inside has the same app ID and the advertised version;
-  - `codesign --verify --strict`;
-  - once releases are Developer ID–signed, that the same team signed it.
+- **Test build:** *Actions › Release › Run workflow* builds a DMG as a download on the run's page and never publishes. Without the secrets it is ad-hoc signed and verified in `--dev` mode, which says plainly that it is not releasable.
+- **Release key:** create it once with `swift scripts/release-key.swift init`, put the printed public key in `Updates.swift` (`releasePublicKey`) and back the key up. `swift scripts/release-key.swift verify FILE` checks a `.sig` without the keychain.
+- **In-app updates** read the latest published non-pre-release from the GitHub API, so keep the asset names `MacCleaner-<version>.dmg`, `.dmg.sha256` and `.dmg.sig`. A release without a valid `.sig` is never offered. Before installing, the app checks:
+  - the Ed25519 signature, then the SHA-256;
+  - that the app inside has the same app ID and exactly the advertised version (no downgrades are offered);
+  - `codesign --verify --deep --strict`;
+  - the same Developer ID team as the running copy (or `pinnedTeamID`), and Gatekeeper when signed.
 
-  A small script then waits for the app to quit, swaps the bundle (putting the old one back on failure) and reopens it. If the app's folder isn't writable, or the app runs from a disk image, it offers the download page instead.
+  A small script then waits for the app to quit, swaps the bundle (putting the old one back if the swap fails) and reopens it. If the app's folder isn't writable, or the app runs from a disk image, it offers the download page instead. **Not covered:** if the new version installs but fails to start, it is not rolled back automatically.
 
-### Signing and notarization (optional)
+### What verify-release checks
 
-Without secrets the DMG is ad-hoc signed, and users allow it once in *System Settings › Privacy & Security*. To ship a signed and notarized DMG, add these repository secrets (*Settings › Secrets and variables › Actions*). This needs a paid Apple Developer account.
+| Check | CI (every PR, `--dev`) | Release workflow | `sign-release.sh` |
+|---|---|---|---|
+| SHA-256 matches `.sha256` | ✓ | ✓ | ✓ |
+| Ed25519 `.sig` by the release key | — (no key on CI) | — (added later) | ✓ |
+| Bundle ID and exact version | ✓ | ✓ | ✓ |
+| Deep, strict code signature | ✓ (ad-hoc) | ✓ | ✓ |
+| Hardened runtime on | ✓ | ✓ | ✓ |
+| Entitlements exactly `automation.apple-events` (no `get-task-allow`) | ✓ | ✓ | ✓ |
+| Developer ID team, secure timestamp | — | ✓ | ✓ |
+| Notarization ticket stapled (app and DMG) | — | ✓ | ✓ |
+| Gatekeeper accepts app and DMG | — | ✓ | ✓ |
+
+The Release build setting has hardened runtime on and doesn't inject `get-task-allow`. Debug builds and `./build.sh` stay ad-hoc for local development.
+
+### Signing and notarization secrets
+
+A release needs these repository secrets (*Settings › Secrets and variables › Actions*) and a paid Apple Developer account. Without them a tag build fails and nothing is published.
 
 | Secret | What it is |
 |---|---|
@@ -262,7 +289,7 @@ To get the certificate and add the secrets:
    ```
 4. Delete `cert.p12` from your disk.
 
-With all five secrets set, the workflow signs with hardened runtime, notarizes and staples the app and the DMG, and checks the DMG with Gatekeeper. The signing keychain is deleted at the end of each run.
+With all five secrets set, the workflow signs with hardened runtime and a secure timestamp, notarizes and staples the app and the DMG, and verifies the result. The signing keychain is deleted at the end of each run. The workflow's token can create releases (`contents: write`) but only as drafts; publishing happens from your Mac.
 
 ### Build a DMG on your Mac
 

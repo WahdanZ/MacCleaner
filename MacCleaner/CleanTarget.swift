@@ -8,8 +8,10 @@ enum CleanAction: Sendable {
     case removeItems([URL])
     /// Empty the folder but keep it.
     case removeContents(URL)
-    /// `xcrun simctl delete unavailable`
-    case deleteUnavailableSimulators
+    /// `xcrun simctl delete <udid>…` for exactly these unavailable simulators (filled in when measured, shown in
+    /// the review). Only those still unavailable when it runs are deleted. Never "delete unavailable", which would
+    /// also take simulators that became unavailable after the review.
+    case deleteUnavailableSimulators([SimDevice])
     /// `xcrun simctl runtime delete <uuid>`
     case deleteSimRuntime(String)
     /// Placeholder: discover browser/Electron cache folders under this app folder while measuring.
@@ -51,7 +53,7 @@ struct CleanTarget: Identifiable, Sendable {
     /// Display path, e.g. "~/.gradle/caches".
     let path: String
     /// One-line explanation of what it is / what happens after deleting.
-    let note: String
+    var note: String
     var action: CleanAction
     /// Safe to clear routinely (pure cache, re-downloads on its own).
     var recommended = true
@@ -88,4 +90,12 @@ enum ByteText {
     static func string(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
+}
+
+/// A simulator device as `simctl list devices` reports it.
+struct SimDevice: Sendable, Hashable {
+    let udid: String
+    let name: String
+    /// e.g. "iOS 17.2", from the runtime identifier.
+    let os: String
 }

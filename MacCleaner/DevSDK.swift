@@ -117,10 +117,13 @@ enum SDKEngine {
             let newest = Dictionary(grouping: rts, by: \.1).mapValues { $0.map(\.2).max(by: versionLess) ?? "" }
             for r in rts {
                 let sims = deviceCount[r.3] ?? 0
+                // Always reviewed: without its runtime a simulator can't start (its data stays until the
+                // simulator itself is deleted), and the runtime is a multi-GB download to get back.
                 items.append(SDKItem(id: "simrt.\(r.0)", group: .xcode, kind: "Simulator runtimes",
                                      name: "\(r.1) \(r.2)", detail: sims > 0 ? "\(sims) simulator(s) use it" : "No simulators use it",
                                      size: r.4, reveal: nil, action: .simRuntime(r.0),
-                                     inUse: nil, note: newest[r.1] == r.2 ? "Newest \(r.1)" : nil,
+                                     inUse: sims > 0 ? "\(sims) simulator(s) use it and would stop working" : nil,
+                                     note: newest[r.1] == r.2 ? "Newest \(r.1)" : nil, review: true,
                                      regen: "Xcode › Settings › Components"))
             }
         }

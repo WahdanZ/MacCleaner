@@ -43,10 +43,12 @@ enum Scanner {
         dir(.xcode, "xcode.simcaches", "Simulator caches", "Library/Developer/CoreSimulator/Caches",
             "Simulator dyld and runtime caches.", contents: true)
         dir(.xcode, "xcode.cache", "Xcode app cache", "Library/Caches/com.apple.dt.Xcode", "Xcode's own cache.")
+        // Review only: deleting a simulator deletes the apps, files and settings inside it, even when its
+        // OS version is gone and it can't start. Never recommended, never in the scheduled clean.
         p.append(CleanTarget(id: "xcode.sims", category: .xcode, name: "Unavailable simulators",
-                             path: "xcrun simctl delete unavailable",
-                             note: "Simulators whose iOS runtime is gone.",
-                             action: .deleteUnavailableSimulators))
+                             path: "xcrun simctl delete <listed simulators>",
+                             note: "Simulators whose OS version was removed. Deleting them also deletes the apps and data inside them.",
+                             action: .deleteUnavailableSimulators([]), recommended: false))
         for rt in simRuntimes() {
             p.append(CleanTarget(id: "simrt.\(rt.id)", category: .xcode, name: "\(rt.name) simulator runtime",
                                  path: "xcrun simctl runtime delete \(rt.id)",
@@ -210,11 +212,13 @@ enum Scanner {
             t.exists = !ok.isEmpty
             t.sizeBytes = ok.reduce(0) { $0 + allocatedSize($1) }
         case .deleteUnavailableSimulators:
-            let udids = unavailableSimulatorIDs()
+            let sims = unavailableSimulators()
             let devices = url("Library/Developer/CoreSimulator/Devices")
-            t.exists = !udids.isEmpty
-            t.sizeBytes = udids.reduce(0) { $0 + allocatedSize(devices.appendingPathComponent($1)) }
+            t.action = .deleteUnavailableSimulators(sims)
+            t.exists = !sims.isEmpty
+            t.sizeBytes = sims.reduce(0) { $0 + allocatedSize(devices.appendingPathComponent($1.udid)) }
             if t.exists && t.sizeBytes == 0 { t.sizeBytes = 1 }
+            if !sims.isEmpty { t.note = simulatorNote(sims) }
         }
         return t
     }
@@ -318,12 +322,44 @@ enum Scanner {
         (try? FileHandle(forReadingFrom: URL(fileURLWithPath: "/Library/Application Support/com.apple.TCC/TCC.db"))) != nil
     }
 
-    static func unavailableSimulatorIDs() -> [String] {
+    /// Simulators `simctl` reports as unavailable. nil if simctl couldn't be asked (then nothing is deleted).
+    static func unavailableSimulatorsIfKnown() -> [SimDevice]? {
         guard let out = Shell.run("/usr/bin/xcrun", ["simctl", "list", "devices", "unavailable", "-j"], timeout: 30).output,
               let data = out.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let runtimes = json["devices"] as? [String: [[String: Any]]] else { return [] }
-        return runtimes.values.flatMap { $0 }.compactMap { $0["udid"] as? String }
+              let runtimes = json["devices"] as? [String: [[String: Any]]] else { return nil }
+        return parseSimulators(runtimes)
+    }
+
+    static func unavailableSimulators() -> [SimDevice] { unavailableSimulatorsIfKnown() ?? [] }
+
+    /// `devices` from `simctl list devices -j`: runtime identifier → devices.
+    static func parseSimulators(_ runtimes: [String: [[String: Any]]]) -> [SimDevice] {
+        runtimes.flatMap { rt, list in
+            list.compactMap { d -> SimDevice? in
+                guard let udid = d["udid"] as? String, UUID(uuidString: udid) != nil else { return nil }
+                // "com.apple.CoreSimulator.SimRuntime.iOS-17-2" → "iOS 17.2"
+                let tail = rt.components(separatedBy: ".").last ?? rt
+                let parts = tail.split(separator: "-")
+                let os = parts.isEmpty ? tail : parts[0] + " " + parts.dropFirst().joined(separator: ".")
+                return SimDevice(udid: udid, name: d["name"] as? String ?? udid, os: String(os))
+            }
+        }.sorted { ($0.os, $0.name) < ($1.os, $1.name) }
+    }
+
+    /// What the review says is lost.
+    static func simulatorNote(_ sims: [SimDevice]) -> String {
+        let names = sims.prefix(6).map { "\($0.name) (\($0.os))" }.joined(separator: ", ")
+        let more = sims.count > 6 ? " and \(sims.count - 6) more" : ""
+        return "Deletes \(sims.count) simulator\(sims.count == 1 ? "" : "s") whose OS version was removed: \(names)\(more). "
+            + "The apps, files and settings inside them are deleted too."
+    }
+
+    /// Of the reviewed simulators, those simctl still reports as unavailable now. A simulator that became
+    /// available again (its OS was reinstalled) or was already deleted is left out.
+    static func stillUnavailable(_ reviewed: [SimDevice], now: [SimDevice]) -> [SimDevice] {
+        let current = Set(now.map(\.udid))
+        return reviewed.filter { current.contains($0.udid) }
     }
 
     static func allocatedSize(_ url: URL) -> Int64 {
@@ -423,8 +459,15 @@ enum Cleaner {
                 }
                 let kids = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
                 for kid in kids { remove(kid, label: t.name) }
-            case .deleteUnavailableSimulators:
-                let r = Shell.run("/usr/bin/xcrun", ["simctl", "delete", "unavailable"], timeout: 600)
+            case .deleteUnavailableSimulators(let reviewed):
+                guard let now = Scanner.unavailableSimulatorsIfKnown() else {
+                    errors.append("\(t.name): couldn't check the simulators again, so none were deleted"); continue
+                }
+                let go = Scanner.stillUnavailable(reviewed, now: now)
+                let skipped = reviewed.count - go.count
+                if skipped > 0 { errors.append("\(t.name): \(skipped) simulator(s) were kept because they are available again or already gone") }
+                guard !go.isEmpty else { continue }
+                let r = Shell.run("/usr/bin/xcrun", ["simctl", "delete"] + go.map { $0.udid }, timeout: 600)
                 if r.status != 0 { errors.append("Simulators: \(r.output ?? "simctl failed")") }
             case .deleteSimRuntime(let id):
                 guard UUID(uuidString: id) != nil else { errors.append("\(t.name): bad runtime id"); continue }

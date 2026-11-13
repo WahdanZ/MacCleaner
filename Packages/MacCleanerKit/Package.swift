@@ -1,6 +1,7 @@
 // swift-tools-version: 6.0
 // MacCleanerKit: the app's local package (see docs/architecture/ARCHITECTURE_V2.md).
-// MacCleanerCore holds pure rules and models: Foundation only, no file system access, Swift 6 language mode.
+// MacCleanerCore holds pure rules and models: Foundation (and CryptoKit for the plan digest) only, no file system
+// access, Swift 6 language mode.
 import PackageDescription
 
 let package = Package(

@@ -15,6 +15,17 @@ enum AdminStep {
 
     /// What the privileged step reported per item (indexes into the items it was given).
     struct Report: Equatable, Sendable {
+        /// Moved into staging and verified there as the reviewed item. The only items Mac Cleaner moved: anything not
+        /// listed here was not moved by it, whatever its original path looks like now.
+        var moved: Set<Int> = []
+        /// Not there any more when the privileged step ran (nothing was moved).
+        var missing: Set<Int> = []
+        /// Its folder wasn't a real folder owned by root any more (nothing was moved).
+        var folderChanged: Set<Int> = []
+        /// The move itself failed (e.g. a locked item), or it vanished during the move.
+        var failed: Set<Int> = []
+        /// Outside the folders the password step may touch (nothing was moved).
+        var notAllowed: Set<Int> = []
         /// Moved into staging, then found not to be the reviewed item, and moved straight back.
         var changed: Set<Int> = []
         /// Not the reviewed item and couldn't be moved back (its name was taken): left inside staging, so the staging
@@ -31,6 +42,11 @@ enum AdminStep {
                 let parts = line.split(separator: " ")
                 guard parts.count == 2, let i = Int(parts[1]) else { continue }
                 switch parts[0] {
+                case "MACCLEANER-MOVED": r.moved.insert(i)
+                case "MACCLEANER-MISSING": r.missing.insert(i)
+                case "MACCLEANER-FOLDER": r.folderChanged.insert(i)
+                case "MACCLEANER-FAILED": r.failed.insert(i)
+                case "MACCLEANER-NOT-ALLOWED": r.notAllowed.insert(i)
                 case "MACCLEANER-CHANGED": r.changed.insert(i)
                 case "MACCLEANER-KEPT": r.keptInStaging.insert(i)
                 case "MACCLEANER-UNIDENTIFIED": r.unidentified.insert(i)
@@ -39,6 +55,20 @@ enum AdminStep {
                 }
             }
             return r
+        }
+
+        /// Why item `i` wasn't moved, or nil when it was. An item with no report line at all is "not confirmed", never
+        /// assumed moved.
+        func notMovedReason(_ i: Int) -> String? {
+            if moved.contains(i) { return nil }
+            if changed.contains(i) || keptInStaging.contains(i) { return "it changed after you reviewed it, so it was left alone" }
+            if missing.contains(i) { return "it was gone before the password step ran, so Mac Cleaner didn't remove it" }
+            if folderChanged.contains(i) { return "its folder changed, so it was left alone" }
+            if failed.contains(i) { return "it couldn't be moved" }
+            if notAllowed.contains(i) { return "it isn't in a folder the password step may touch" }
+            if unidentified.contains(i) { return "it couldn't be identified when it was found, so it was left alone" }
+            if otherVolume.contains(i) { return "it's on another volume, so it was left alone" }
+            return "Mac Cleaner can't confirm it was removed"
         }
     }
 
@@ -89,7 +119,7 @@ enum AdminStep {
                 }
                 continue
             }
-            guard allowed(l.url) else { lines.append("R=1"); continue }
+            guard allowed(l.url) else { lines.append("echo MACCLEANER-NOT-ALLOWED \(i); R=1"); continue }
             guard let reviewed = l.identity, let expected = expectedStat(reviewed) else {
                 lines.append("echo MACCLEANER-UNIDENTIFIED \(i); R=1")
                 continue
@@ -108,12 +138,14 @@ enum AdminStep {
                          + " && \(present(src)); then"
                          + " if [ \"$(/usr/bin/stat -f %d \(src))\" != \"$(/usr/bin/stat -f %d \"$D\")\" ]; then echo MACCLEANER-OTHER-VOLUME \(i); R=1;"
                          + " else /bin/mv -n -- \(src) \(staged);"
-                         + " if ! \(present(staged)); then R=1;"
+                         + " if ! \(present(staged)); then echo MACCLEANER-FAILED \(i); R=1;"
                          + " elif [ \"$(/usr/bin/stat -f \(q(expected.format)) \(staged))\" != \(q(expected.value)) ]; then"
                          + " /bin/mv -n -- \(staged) \(src); R=1;"
                          + " if \(present(staged)); then echo MACCLEANER-KEPT \(i); else echo MACCLEANER-CHANGED \(i); fi;"
-                         + " else\(onVerified.isEmpty ? " :;" : onVerified)"
-                         + " fi; fi; else R=1; fi")
+                         + " else echo MACCLEANER-MOVED \(i);\(onVerified)"
+                         + " fi; fi;"
+                         + " elif [ -d \(dir) ] && [ ! -L \(dir) ] && [ \"$(/usr/bin/stat -f %u \(dir))\" = \(parentOwner) ]; then echo MACCLEANER-MISSING \(i); R=1;"
+                         + " else echo MACCLEANER-FOLDER \(i); R=1; fi")
         }
         if !receipts.isEmpty { lines.append("if [ -z \"$R\" ]; then \(receipts.joined(separator: "; ")); fi") }
         lines.append("if [ -n \"$A\" ]; then /usr/bin/killall coreaudiod 2>/dev/null || true; fi")   // a verified HAL plug-in moved

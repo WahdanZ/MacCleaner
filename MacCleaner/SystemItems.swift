@@ -81,12 +81,14 @@ final class ExtensionsModel {
     func remove(_ x: ExtItem, trash: TrashApproval?, refusal: String?,
                 adminStep: @escaping AppEngine.AdminStepRunner = AppEngine.defaultAdminStep) async {
         busy = true
+        var movedToTrash = false   // from the outcome itself, never from the original being gone
         if let refusal {
             message = ("\(x.name): \(refusal)", true)
         } else if x.allUsers {
             var item = AppLeftover(id: x.id, url: x.url, label: x.kind, size: x.size, include: true, note: nil, needsAdmin: true)
             item.identity = x.identity
             let r = await Task.detached { AppEngine.removeSystemItems([item], adminStep: adminStep) }.value
+            movedToTrash = r.removed.contains(x.url) && r.inTrash
             if r.cancelled { message = ("Kept \(x.name) (password prompt cancelled).", false) }
             else if r.errors.isEmpty { message = ("\(x.name) moved to the Trash.", false) }
             else { message = ("\(x.name): \(r.errors.joined(separator: "; "))", true) }
@@ -95,12 +97,13 @@ final class ExtensionsModel {
             }
         } else if let trash {
             let run = await AppCleanup.moveToTrash(trash, source: "Extensions")
+            movedToTrash = run.moved[x.id] != nil
             if run.moved[x.id] != nil && run.problems.isEmpty { message = ("\(x.name) moved to the Trash.", false) }
             else { message = ("\(x.name): \(run.problems.first?.message ?? "not moved")", true) }
         } else {
             message = ("\(x.name): it wasn't approved, so nothing was moved", true)
         }
-        if !FileManager.default.fileExists(atPath: x.url.path) {
+        if movedToTrash {
             HistoryStore.shared.add("\(x.name) Moved to Trash", bytes: x.size, symbol: "puzzlepiece.extension", outcome: .trashed)
         }
         await load()

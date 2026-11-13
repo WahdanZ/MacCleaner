@@ -2295,6 +2295,65 @@ extension SelfTest {
               && fm.fileExists(atPath: unknown.path))
         if let st = p9.staging { try? fm.removeItem(at: st) }
 
+        // Only verified moves count: never inferred from the original being gone.
+        let asYou: AppEngine.AdminStepRunner = { items, uid in
+            let script = AdminStep.script(items, uid: uid, allowed: { _ in true }, parentOwner: uid, chown: "/usr/bin/true")
+            let out = Shell.run("/bin/sh", ["-c", script]).output
+            guard let st = AdminStep.parseStaging(out), AdminStep.isTrustedStaging(st, uid: uid) else { return .failed("no staging") }
+            return .ok(staging: st, report: .parse(out))
+        }
+        let vOK = plain(sys.appendingPathComponent("v-ok.plist"), "ok")
+        let vGone = plain(sys.appendingPathComponent("v-gone.plist"), "gone")
+        let vLocked = plain(sys.appendingPathComponent("v-locked.plist"), "locked")
+        let vSwapped = plain(sys.appendingPathComponent("v-swapped.plist"), "reviewed")
+        let vItems = [leftover(vOK, admin: true), leftover(vGone, admin: true), leftover(vLocked, admin: true), leftover(vSwapped, admin: true)]
+        try? fm.removeItem(at: vGone)                                         // gone before the privileged step
+        chflags(vLocked.path, UInt32(UF_IMMUTABLE))                           // its move will fail
+        try? fm.removeItem(at: vSwapped); _ = plain(vSwapped, "replaced")     // replaced
+        let mixed2 = AppEngine.removeSystemItems(vItems, adminStep: asYou)
+        chflags(vLocked.path, 0)
+        check("only the verified item counts as removed: not one that vanished, failed to move or was replaced",
+              mixed2.removed == [vOK] && mixed2.inTrash && !fm.fileExists(atPath: vOK.path)
+              && fm.fileExists(atPath: vLocked.path) && fm.fileExists(atPath: vSwapped.path))
+        check("each item that wasn't moved says why",
+              mixed2.errors.contains { $0.hasPrefix("v-gone.plist:") && $0.contains("gone before the password step") }
+              && mixed2.errors.contains { $0.hasPrefix("v-locked.plist:") && $0.contains("couldn't be moved") }
+              && mixed2.errors.contains { $0.hasPrefix("v-swapped.plist:") && $0.contains("changed after you reviewed") })
+        check("an item the privileged step didn't report on is never assumed moved",
+              AdminStep.Report().notMovedReason(0)?.contains("can't confirm") == true
+              && AdminStep.Report.parse("MACCLEANER-MOVED 0\nMACCLEANER-MISSING 1").notMovedReason(0) == nil
+              && AdminStep.Report.parse("MACCLEANER-MOVED 0\nMACCLEANER-MISSING 1").notMovedReason(1) != nil)
+        // Moved out of place, but the staging folder can't reach the Trash: reported as staged, not as in the Trash.
+        let vStaged = plain(sys.appendingPathComponent("v-staged.plist"), "staged")
+        let vItem = [leftover(vStaged, admin: true)]
+        AppCleanup.trashMover = { url in
+            if url.path.contains("/MacCleaner-uninstall.") { throw CocoaError(.fileWriteUnknown) }
+            return try isolatedMover(url)
+        }
+        let stagedOnly = AppEngine.removeSystemItems(vItem, adminStep: asYou)
+        AppCleanup.trashMover = isolatedMover
+        check("items moved into staging whose folder can't reach the Trash are reported as staged, not in the Trash",
+              stagedOnly.removed == [vStaged] && !stagedOnly.inTrash
+              && stagedOnly.errors.contains { $0.contains("couldn't be sent to the Trash") })
+        if let st = stagedOnly.errors.first.flatMap({ e -> URL? in
+            guard let r = e.range(of: "MacCleaner-uninstall.") else { return nil }
+            let tail = e[r.lowerBound...].prefix { $0 != "," && $0 != " " }
+            return URL(fileURLWithPath: AdminStep.stagingParent + "/" + tail)
+        }) { try? fm.removeItem(at: st) }
+        // The same rule in an uninstall: a leftover that vanished isn't counted, and the note says what happened.
+        let fooSys = plain(sys.appendingPathComponent("com.example.foo-gone-\(runID).plist"), "daemon")
+        // (The review blocks system leftovers outside the folders the password step may touch, and this one is in the
+        // sandbox, so it is passed to the engine directly next to what the review approved.)
+        let sysLeftover = leftover(fooSys, admin: true)
+        let fooA = app("Foo", fooURL, [leftover(fooSupport)])
+        let rAin = MainActor.assumeIsolated { confirmed(fooA) }
+        try? fm.removeItem(at: fooSys)
+        let rA = AppEngine.uninstall(fooA, picked: (rAin?.0 ?? []) + [sysLeftover], trash: rAin?.1, adminStep: asYou, adminAllowed: allowNone)
+        check("an uninstall doesn't count a system leftover that vanished, and says no system item was moved",
+              rA.appRemoved && rA.bytes == 15 && rA.adminNote.contains("No system item was moved")
+              && rA.errors.contains { $0.contains("gone before the password step") })
+        _ = putBack(fooURL); _ = putBack(fooSupport)
+
         // 10. MCP uninstall_app, on a fake app in this home folder only.
         let mcpApp = folder(SafetyGuard.home.appendingPathComponent("Applications/SelfTestUninstall\(runID).app/Contents"), "x")
             .deletingLastPathComponent()

@@ -89,32 +89,19 @@ extension AppEngine {
         guard !adminItems.isEmpty, r.appRemoved || bundleToAdmin else { return r }
         switch adminStep(adminItems, uid) {
         case .ok(let staging, let report):
-            let staged = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
-            if !report.keptInStaging.isEmpty {
-                r.errors.append("Something that wasn't reviewed ended up in \(Scanner.tilde(staging)), so it was not sent to the Trash; look there")
-            } else if staged.isEmpty {
-                try? FileManager.default.removeItem(at: staging)
-            } else if let e = trash(staging, source: "Uninstall (system items)", restorable: false) {
-                r.errors.append("Moved system items to \(Scanner.tilde(staging)) but could not send it to the Trash: \(e)")
-            }
-            let refused = report.changed.union(report.keptInStaging).union(report.unidentified).union(report.otherVolume)
-            let still = adminItems.enumerated().filter { i, l in
-                l.receipt == nil && (refused.contains(i) || FileManager.default.fileExists(atPath: l.url.path))
-            }.map(\.element)
-            r.bytes += adminItems.filter { i in !still.contains { $0.id == i.id } && i.receipt == nil }.reduce(0) { $0 + $1.size }
-            if !still.contains(where: { $0.url == a.url }) { r.appRemoved = true }
+            // Only items the privileged step reported as moved and verified count; nothing is inferred from a missing
+            // original. Staged is not yet the Trash: the note says which.
+            let toTrash = sendStagingToTrash(staging, report, source: "Uninstall (system items)")
+            let movedFiles = adminItems.enumerated().filter { report.moved.contains($0.offset) && $0.element.receipt == nil }
+            if toTrash.inTrash { r.bytes += movedFiles.reduce(0) { $0 + $1.element.size } }
+            if let i = adminItems.firstIndex(where: { $0.url == a.url }), report.moved.contains(i) { r.appRemoved = true }
             for (i, l) in adminItems.enumerated() where l.receipt == nil {
-                if report.changed.contains(i) || report.keptInStaging.contains(i) {
-                    r.errors.append("\(l.url.lastPathComponent): it changed after you reviewed it, so it was left alone")
-                } else if report.unidentified.contains(i) {
-                    r.errors.append("\(l.url.lastPathComponent): it couldn't be identified when it was found, so it was left alone")
-                } else if report.otherVolume.contains(i) {
-                    r.errors.append("\(l.url.lastPathComponent): it's on another volume, so it was left alone")
-                } else if FileManager.default.fileExists(atPath: l.url.path) {
-                    r.errors.append("\(l.url.lastPathComponent): still there after admin step")
-                }
+                if let why = report.notMovedReason(i) { r.errors.append("\(l.url.lastPathComponent): \(why)") }
             }
-            r.adminNote = " Includes \(adminItems.count - still.count) system item(s)."
+            if let e = toTrash.error { r.errors.append(e) }
+            r.adminNote = movedFiles.isEmpty ? " No system item was moved."
+                : toTrash.inTrash ? " Includes \(movedFiles.count) system item(s) moved to the Trash."
+                : " \(movedFiles.count) system item(s) were moved out of place into \(Scanner.tilde(staging)), not yet the Trash."
         case .cancelled:
             r.adminNote = " System items were kept (password prompt cancelled)."
         case .failed(let msg):
@@ -126,39 +113,46 @@ extension AppEngine {
     /// Moves items outside your home folder to the Trash via one macOS password prompt
     /// (stopping any launch jobs first). Each item's reviewed identity is checked at the privileged move.
     static func removeSystemItems(_ items: [AppLeftover], adminStep: AdminStepRunner = defaultAdminStep)
-        -> (removed: [URL], errors: [String], cancelled: Bool) {
+        -> (removed: [URL], errors: [String], cancelled: Bool, inTrash: Bool) {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
-        guard !items.isEmpty else { return ([], [], false) }
+        guard !items.isEmpty else { return ([], [], false, true) }
         switch adminStep(items, getuid()) {
         case .ok(let staging, let report):
+            // `removed`: only items the privileged step reported as moved and verified (never inferred from a missing
+            // original). `inTrash`: whether they then reached the Trash, or are still in the staging folder.
+            let toTrash = sendStagingToTrash(staging, report, source: "System items")
             var errors: [String] = []
-            let staged = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
-            if !report.keptInStaging.isEmpty {
-                errors.append("Something that wasn't reviewed ended up in \(Scanner.tilde(staging)), so it was not sent to the Trash; look there")
-            } else if staged.isEmpty { try? FileManager.default.removeItem(at: staging) }
-            else if let e = trash(staging, source: "System items", restorable: false) { errors.append("Staging folder \(Scanner.tilde(staging)): \(e)") }
-            let fm = FileManager.default
-            let refused = report.changed.union(report.keptInStaging).union(report.unidentified).union(report.otherVolume)
             var removed: [URL] = []
             for (i, it) in items.enumerated() where it.receipt == nil {
-                if report.changed.contains(i) || report.keptInStaging.contains(i) {
-                    errors.append("\(it.url.lastPathComponent): it changed after you reviewed it, so it was left alone")
-                } else if report.unidentified.contains(i) {
-                    errors.append("\(it.url.lastPathComponent): it couldn't be identified when it was found, so it was left alone")
-                } else if report.otherVolume.contains(i) {
-                    errors.append("\(it.url.lastPathComponent): it's on another volume, so it was left alone")
-                } else if fm.fileExists(atPath: it.url.path) {
-                    errors.append("\(it.url.lastPathComponent): still there")
-                } else if !refused.contains(i) {
-                    removed.append(it.url)
-                }
+                if let why = report.notMovedReason(i) { errors.append("\(it.url.lastPathComponent): \(why)") }
+                else { removed.append(it.url) }
             }
-            return (removed, errors, false)
+            if let e = toTrash.error { errors.append(e) }
+            return (removed, errors, false, toTrash.inTrash)
         case .cancelled:
-            return ([], [], true)
+            return ([], [], true, true)
         case .failed(let msg):
-            return ([], [msg], false)
+            return ([], [msg], false, true)
         }
+    }
+}
+
+extension AppEngine {
+    /// Sends the privileged step's staging folder to the Trash (not restorable item by item), unless it may hold
+    /// something that wasn't reviewed. `inTrash` is false when the moved items are still in the staging folder.
+    static func sendStagingToTrash(_ staging: URL, _ report: AdminStep.Report, source: String) -> (inTrash: Bool, error: String?) {
+        if !report.keptInStaging.isEmpty {
+            return (false, "Something that wasn't reviewed ended up in \(Scanner.tilde(staging)), so that folder was not sent to the Trash; look there")
+        }
+        let staged = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
+        if staged.isEmpty {
+            try? FileManager.default.removeItem(at: staging)
+            return (true, nil)
+        }
+        if let e = trash(staging, source: source, restorable: false) {
+            return (false, "The moved system items are in \(Scanner.tilde(staging)), but that folder couldn't be sent to the Trash: \(e)")
+        }
+        return (true, nil)
     }
 }
 

@@ -63,6 +63,8 @@ public actor CleanupExecutor {
                 for r in results {
                     outcomes.append(r)
                     progress?.yield(.itemFinished(r))
+                    // Cancelled part-way through a folder's entries (possibly the last target): the run was cancelled.
+                    if r.result == .skipped(.cancelled) { cancelled = true }
                 }
             }
         }

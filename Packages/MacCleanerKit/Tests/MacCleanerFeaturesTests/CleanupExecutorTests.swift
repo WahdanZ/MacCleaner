@@ -324,6 +324,24 @@ struct ExecutorCancellationTests {
         #expect(report.wasCancelled && !report.allSucceeded && fs.ops == [.remove(a.path)])
         #expect(events.last == .cancelled && events.filter(\.isTerminal).count == 1)
     }
+
+    @Test func cancellingInsideTheLastFoldersEntriesIsReportedAsCancelled() async throws {
+        let folder = item("C", inode: 1, kind: .directory)
+        let a = item("C/a", inode: 2), b = item("C/b", inode: 3)
+        let fs = FakeFS([folder, a, b])
+        fs.onAct { _ in withUnsafeCurrentTask { $0?.cancel() } }
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let p = try plan([.init(candidate("c", [.directoryContents(folder: folder, entries: [a, b])]), .permanentDelete)])
+        let approval = try await exec.approve(p, by: .userInApp)
+        let (stream, cont) = AsyncStream.makeStream(of: ProgressEvent.self)
+        let report = try await Task { try await exec.execute(p, approval: approval, progress: cont) }.value
+        var events: [ProgressEvent] = []
+        for await e in stream { events.append(e) }
+        let r = results(report)
+        #expect(r[a.path] == .removed(bytes: 100) && r[b.path] == .skipped(.cancelled))
+        #expect(report.wasCancelled && !report.allSucceeded)
+        #expect(events.last == .cancelled && events.filter(\.isTerminal).count == 1)
+    }
 }
 
 // MARK: - End to end on real files

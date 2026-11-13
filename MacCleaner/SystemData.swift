@@ -1,4 +1,5 @@
 import AppKit
+import MacCleanerCore
 import Observation
 import SwiftUI
 
@@ -20,6 +21,8 @@ struct SysItem: Identifiable, Sendable, Hashable {
     let action: Action
     var review = false
     var needsPassword = false
+    /// For a Trash item: what the scan found, captured when it found it (see SDKItem.identity).
+    var identity: FileIdentity? = nil
 }
 
 struct SysReport: Sendable {
@@ -67,7 +70,7 @@ enum SystemDataEngine {
                 r.items.append(SysItem(id: b.path, section: .backups, name: device,
                                        detail: [product, os.map { "iOS \($0)" }, date.map { "backed up " + $0.formatted(date: .abbreviated, time: .omitted) }]
                                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
-                                       size: size, reveal: b, action: .trash(b), review: true))
+                                       size: size, reveal: b, action: .trash(b), review: true, identity: AppCleanup.snapshot(b)))
             }
         } catch {
             if fm.fileExists(atPath: backups.deletingLastPathComponent().path) || isPermission(error) { r.needsFDA.insert(.backups) }
@@ -87,7 +90,7 @@ enum SystemDataEngine {
             for (u, s, d) in files.sorted(by: { $0.1 > $1.1 }).prefix(largestAttachments) where s > 0 {
                 r.items.append(SysItem(id: u.path, section: .messages, name: u.lastPathComponent,
                                        detail: (d.map { $0.formatted(date: .abbreviated, time: .omitted) } ?? "") + " · Messages will show it as unavailable",
-                                       size: s, reveal: u, action: .trash(u), review: true))
+                                       size: s, reveal: u, action: .trash(u), review: true, identity: AppCleanup.snapshot(u)))
             }
             r.totals[.messages] = files.prefix(largestAttachments).reduce(0) { $0 + $1.1 }
         }
@@ -110,7 +113,7 @@ enum SystemDataEngine {
             let first = (try? fm.contentsOfDirectory(atPath: d.path))?.first { !$0.hasPrefix(".") }
             r.items.append(SysItem(id: d.path, section: .mail, name: first ?? d.lastPathComponent,
                                    detail: "Attachment you opened from Mail (a copy; the email keeps the original)",
-                                   size: s, reveal: d, action: .trash(d)))
+                                   size: s, reveal: d, action: .trash(d), identity: AppCleanup.snapshot(d)))
         }
         r.totals[.mail] = r.items.filter { $0.section == .mail }.reduce(0) { $0 + ($1.size ?? 0) }
 
@@ -155,7 +158,10 @@ enum SystemDataEngine {
 
     /// Snapshots need one password prompt (tmutil runs as admin); everything else goes to the Trash.
     /// `bytes` = total; `freed` = the free-space change after deleting snapshots (they have no size up front).
-    static func remove(_ items: [SysItem]) -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
+    /// Trash items move only through `trash`, the approval given at the review sheet or the MCP/CLI confirm for
+    /// exactly the items it showed (never made here); without it they stay and say so.
+    static func remove(_ items: [SysItem], trash: TrashApproval? = nil, trashSource: String = "System Data")
+        -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, freed: Int64 = 0, errors: [String] = [], cancelled = false
         let snaps = items.compactMap { i -> String? in if case .snapshot(let d) = i.action, reason(i) == nil { return d }; return nil }
@@ -171,11 +177,13 @@ enum SystemDataEngine {
                 bytes += freed
             }
         }
-        for i in items {
-            guard case .trash(let u) = i.action else { continue }
-            if let why = reason(i) { errors.append("\(i.name): \(why)"); continue }
-            if let e = AppEngine.trash(u, size: i.size, source: "System Data") { errors.append("\(i.name): \(e)") } else { bytes += i.size ?? 0 }
-        }
+        let trashItems = items.filter { if case .trash = $0.action { return true }; return false }
+        let t = AppCleanup.engineTrash(trashItems.compactMap { i -> AppCleanup.EngineTrashItem? in
+            guard case .trash(let u) = i.action else { return nil }
+            return (i.id, i.name, u, i.identity)
+        }, module: "system-data", trash, source: trashSource)
+        for i in trashItems where t.moved[i.id] != nil { bytes += i.size ?? 0 }
+        errors += t.errors
         return (bytes, freed, errors, cancelled)
     }
 }
@@ -206,10 +214,10 @@ final class SystemDataModel {
     }
 
     /// Removes exactly the reviewed items.
-    func remove(_ list: [SysItem]) async {
+    func remove(_ list: [SysItem], _ trash: TrashApproval?) async {
         guard !list.isEmpty else { return }
         busy = true
-        let r = await Task.detached { SystemDataEngine.remove(list) }.value
+        let r = await Task.detached { SystemDataEngine.remove(list, trash: trash) }.value
         HistoryStore.shared.add("Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
                                 outcome: .deleted, measuredFreeChange: r.freed)
         HistoryStore.shared.add("System Data Moved to Trash", bytes: r.bytes - r.freed, symbol: "internaldrive", outcome: .trashed)
@@ -276,7 +284,7 @@ struct SystemDataView: View {
                 Spacer()
                 Button { Task { await m.load() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.bordered).disabled(m.busy)
-                Button { review.present(ReviewBuild.systemData(m) { items in Task { await m.remove(items) } }) } label: {
+                Button { review.present(ReviewBuild.systemData(m) { items, trash in Task { await m.remove(items, trash) } }) } label: {
                     Label(m.selected.isEmpty ? "Remove" : "Remove \(ByteText.string(m.selectedBytes))", systemImage: "trash")
                         .contentTransition(.numericText())
                 }

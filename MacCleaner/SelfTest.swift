@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MacCleanerCore
 
 /// `Mac Cleaner --selftest`: checks every safety rule. Exit code 0 = all passed.
 ///
@@ -48,6 +49,9 @@ enum SelfTest {
             print("Self-test setup failed: \(sandbox.path) couldn't be created as a new folder. Nothing was changed.")
             return false
         }
+        // Every Trash move of this run goes to a folder in the throwaway home, never the real Trash (FileManager's
+        // trashItem ignores CFFIXED_USER_HOME). Installed before anything can move.
+        isolateTrash(in: h(".maccleaner-selftest-trash-\(runID)"))
         // The Protected list lives in memory for this run: nothing is written to the user's settings.
         let realStore = ProtectedPaths.store
         let realProtectedBefore = realStore.object(forKey: ProtectedPaths.key) as? [String]
@@ -1362,6 +1366,12 @@ enum SelfTest {
         print("Isolation (end)")
         check("the user's own Protected list is unchanged after all tests",
               (realStore.object(forKey: ProtectedPaths.key) as? [String]) == realProtectedBefore)
+        print("Trash isolation")
+        let logFile = home.appendingPathComponent("Library/Application Support/Mac Cleaner/trash-log.json")
+        let everRecorded = (SharedFile.read(logFile) as [TrashedItem]).map(\.trashed)
+        check("every Trash move of the self-test went to its own folder, none to the real Trash",
+              isolatedMoves.count > 0 && isolatedMoves.all.allSatisfy { $0.hasPrefix(isolatedTrash.path + "/") }
+              && everRecorded.allSatisfy { $0.hasPrefix(isolatedTrash.path + "/") || $0.hasPrefix(AppCleanup.physicalPath(isolatedTrash) + "/") })
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty
@@ -1531,6 +1541,7 @@ extension SelfTest {
         trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
         sharedFileLocking(dir: dir)
         mcpAndCLITrash(dir: dir, runID: runID)
+        engineTrash(dir: dir, runID: runID)
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
@@ -1582,22 +1593,29 @@ extension SelfTest {
               putBack(i1) && (try? String(contentsOf: i1, encoding: .utf8)) == "first")
 
         #if MACCLEANER_TEST_HOOKS
-        // Killed (SIGKILL) right after the first move was recorded, in a separate process.
-        let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
-        let child = Process()
-        child.executableURL = Bundle.main.executableURL
-        child.arguments = ["--selftest-child", "trash-then-die", k1.path, k2.path]
-        child.environment = ProcessInfo.processInfo.environment.merging(["MACCLEANER_SELFTEST_CHILD": "1"]) { _, new in new }
-        child.standardOutput = FileHandle.nullDevice
-        child.standardError = FileHandle.nullDevice
-        var started = true
-        do { try child.run(); child.waitUntilExit() } catch { started = false }
-        check("a process killed mid-batch dies after its first move (simulated crash)",
-              started && child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
-        check("the killed process's first move is in the Trash log, the second item untouched",
-              !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
-        check("Put Back restores the first move after the crash",
-              putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+        // Every destructive child process is gated on its own report of where its Trash moves go.
+        if subprocessTrashIsIsolated() {
+            // Killed (SIGKILL) right after the first move was recorded, in a separate process.
+            let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
+            let child = Process()
+            child.executableURL = Bundle.main.executableURL
+            child.arguments = ["--selftest-child", "trash-then-die", k1.path, k2.path]
+            child.environment = ProcessInfo.processInfo.environment.merging(
+                ["MACCLEANER_SELFTEST_CHILD": "1", "MACCLEANER_TEST_TRASH_DIR": isolatedTrash.path]) { _, new in new }
+            child.standardOutput = FileHandle.nullDevice
+            child.standardError = FileHandle.nullDevice
+            var started = true
+            do { try child.run(); child.waitUntilExit() } catch { started = false }
+            check("a process killed mid-batch dies after its first move (simulated crash)",
+                  started && child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
+            check("the killed process's first move is in the Trash log, the second item untouched",
+                  !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
+            let killedTrashed = TrashLog.shared.present().first { $0.original == AppCleanup.physicalPath(k1) }?.trashed
+            check("the killed process moved it into the self-test's isolated Trash, not the real Trash",
+                  inIsolatedTrash(killedTrashed))
+            check("Put Back restores the first move after the crash",
+                  putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+        }
         #else
         print("  - SIGKILL crash test: runs in the test-hooks build only (scripts/build-test-hooks.sh, then the self-test)")
         #endif
@@ -1697,6 +1715,7 @@ extension SelfTest {
         check("an MCP confirm the person approves moves the file and answers as before",
               (ok?["moved_to_trash"] as? [String]) == [Scanner.tilde(a)] && (ok?["errors"] as? [String])?.isEmpty == true
               && !fm.fileExists(atPath: a.path) && approvals.asked.count == 1)
+        check("the MCP move went into the self-test's isolated Trash", inIsolatedTrash(log(a).first?.trashed))
         check("it is logged once, as the AI assistant, and Put Back restores it",
               log(a).count == 1 && log(a).first?.source == "AI assistant" && putBack(a)
               && (try? String(contentsOf: a, encoding: .utf8)) == "ok")
@@ -1758,6 +1777,9 @@ extension SelfTest {
             let p = Process()
             p.executableURL = Bundle.main.executableURL
             p.arguments = ["--cli"] + args
+            #if MACCLEANER_TEST_HOOKS
+            p.environment = ProcessInfo.processInfo.environment.merging(["MACCLEANER_TEST_TRASH_DIR": isolatedTrash.path]) { _, new in new }
+            #endif
             p.standardInput = FileHandle.nullDevice
             let pipe = Pipe()
             p.standardOutput = pipe
@@ -1791,39 +1813,315 @@ extension SelfTest {
         let noYes = cli(["trash-files", c.path])
         check("the CLI without --yes and without a keyboard changes nothing and exits 2",
               noYes.code == 2 && fm.fileExists(atPath: c.path))
-        let withYes = cli(["trash-files", c.path, "--yes", "--json"])
-        check("the CLI with --yes moves the file, exits 0, and answers as before",
-              withYes.code == 0 && !fm.fileExists(atPath: c.path) && withYes.out.contains("moved_to_trash"))
-        check("the CLI's --yes move is logged as an override and Put Back restores it",
-              log(c).first?.source == "Command line (--yes, not confirmed by a person)" && putBack(c)
-              && (try? String(contentsOf: c, encoding: .utf8)) == "cli")
+        #if MACCLEANER_TEST_HOOKS
+        if subprocessTrashIsIsolated() {
+            // A separate process moves files: only the test-hooks build can point its Trash at the isolated folder
+            // (MACCLEANER_TEST_TRASH_DIR); the Release app always uses the real Trash, so it skips these.
+            let withYes = cli(["trash-files", c.path, "--yes", "--json"])
+            check("the CLI with --yes moves the file, exits 0, and answers as before",
+                  withYes.code == 0 && !fm.fileExists(atPath: c.path) && withYes.out.contains("moved_to_trash"))
+            check("the CLI process moved it into the self-test's isolated Trash (its Trash log says so)",
+                  inIsolatedTrash(log(c).first?.trashed))
+            check("the CLI's --yes move is logged as an override and Put Back restores it",
+                  log(c).first?.source == "Command line (--yes, not confirmed by a person)" && putBack(c)
+                  && (try? String(contentsOf: c, encoding: .utf8)) == "cli")
 
-        // The same through the real CLI (a separate process): make its Trash log unwritable (a folder where the
-        // log's lock file goes), so its record fails closed, then read its JSON answer.
-        let logDir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
-        let lockBlocker = logDir.appendingPathComponent("trash-log.json.lock")
-        try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let hadLock = fm.fileExists(atPath: lockBlocker.path)
-        if hadLock { try? fm.removeItem(at: lockBlocker) }
-        try? fm.createDirectory(at: lockBlocker, withIntermediateDirectories: false)
-        let k1 = file("cli-unrecorded-1", "one"), k2 = file("cli-unrecorded-2", "two")
-        let blocked = cli(["trash-files", k1.path, k2.path, "--yes", "--json"])
-        try? fm.removeItem(at: lockBlocker)
-        // With --json the CLI prints the preview, then the result: read the last JSON document.
-        let last = blocked.out.range(of: "\n{", options: .backwards).map { String(blocked.out[$0.lowerBound...]) } ?? blocked.out
-        let answer = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any]
-        let kErrors = answer?["errors"] as? [String] ?? []
-        let k1Error = kErrors.first { $0.hasPrefix(Scanner.tilde(k1) + ":") } ?? ""
-        check("the CLI's JSON answer reports the move AND the missing Put Back record",
-              (answer?["moved_to_trash"] as? [String]) == [Scanner.tilde(k1)] && k1Error.contains("couldn't be recorded for Put Back")
-              && !fm.fileExists(atPath: k1.path))
-        check("the CLI leaves the rest untouched after a failed record and says why",
-              fm.fileExists(atPath: k2.path) && kErrors.contains("\(Scanner.tilde(k2)): \(AppCleanup.unrecordedStop)"))
-        if let where_ = recovery(k1Error) { try? fm.moveItem(atPath: where_, toPath: k1.path) }
-        check("the unrecorded CLI move was where the answer said", fm.fileExists(atPath: k1.path))
+            // The same through the real CLI (a separate process): make its Trash log unwritable (a folder where the
+            // log's lock file goes), so its record fails closed, then read its JSON answer.
+            let logDir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
+            let lockBlocker = logDir.appendingPathComponent("trash-log.json.lock")
+            try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
+            let hadLock = fm.fileExists(atPath: lockBlocker.path)
+            if hadLock { try? fm.removeItem(at: lockBlocker) }
+            try? fm.createDirectory(at: lockBlocker, withIntermediateDirectories: false)
+            let k1 = file("cli-unrecorded-1", "one"), k2 = file("cli-unrecorded-2", "two")
+            let blocked = cli(["trash-files", k1.path, k2.path, "--yes", "--json"])
+            try? fm.removeItem(at: lockBlocker)
+            // With --json the CLI prints the preview, then the result: read the last JSON document.
+            let last = blocked.out.range(of: "\n{", options: .backwards).map { String(blocked.out[$0.lowerBound...]) } ?? blocked.out
+            let answer = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any]
+            let kErrors = answer?["errors"] as? [String] ?? []
+            let k1Error = kErrors.first { $0.hasPrefix(Scanner.tilde(k1) + ":") } ?? ""
+            check("the CLI's JSON answer reports the move AND the missing Put Back record",
+                  (answer?["moved_to_trash"] as? [String]) == [Scanner.tilde(k1)] && k1Error.contains("couldn't be recorded for Put Back")
+                  && !fm.fileExists(atPath: k1.path))
+            check("the CLI leaves the rest untouched after a failed record and says why",
+                  fm.fileExists(atPath: k2.path) && kErrors.contains("\(Scanner.tilde(k2)): \(AppCleanup.unrecordedStop)"))
+            check("the unrecorded CLI move went into the isolated Trash (its answer says where)", inIsolatedTrash(recovery(k1Error)))
+            if let where_ = recovery(k1Error) { try? fm.moveItem(atPath: where_, toPath: k1.path) }
+            check("the unrecorded CLI move was where the answer said", fm.fileExists(atPath: k1.path))
+        }
+        #else
+        print("  - CLI moves in a separate process: run in the test-hooks build only (its Trash is isolated there)")
+        #endif
+    }
+
+    // MARK: SDK archives and System Data through the executor (M01-04b-3a)
+
+    static func engineTrash(dir: URL, runID: String) {
+        print("SDK archives and System Data: review / preview snapshot → approval → engine → executor (M01-04b-3a)")
+        let fm = FileManager.default
+        let home = SafetyGuard.home
+        func folder(_ u: URL, _ text: String = "x") -> URL {
+            try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: u.appendingPathComponent("content.txt"))
+            return u
+        }
+        func log(_ u: URL) -> [TrashedItem] { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) } }
+        func putBack(_ u: URL) -> Bool { log(u).first.map { TrashOps.restore($0) == nil } ?? false }
+        /// An archive as the scan reports it: identity captured now ("when it was found").
+        func archive(_ name: String, _ u: URL, id: String? = nil, identity: FileIdentity?? = nil) -> SDKItem {
+            SDKItem(id: id ?? u.path, group: .xcode, kind: "Archives", name: name, detail: "", size: 10, reveal: u,
+                    action: .trash(u), review: true, regen: "can't be rebuilt exactly",
+                    identity: identity ?? AppCleanup.snapshot(u))
+        }
+        /// Opens the review the screen opens, confirms it through the review sheet's confirmation, returns what the
+        /// screen gets.
+        @MainActor func confirmed<I>(_ build: (@escaping ([I], TrashApproval?) -> Void) -> ReviewRequest,
+                                     beforeConfirm: () -> Void = {}) -> ([I], TrashApproval?)? {
+            let got = Slot<([I], TrashApproval?)>()
+            let request = build { got.value = ($0, $1) }
+            beforeConfirm()
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+
+        // A review mixing an archive (Trash) and Device Support (deleted permanently, its own flow).
+        let arch = folder(dir.appendingPathComponent("A-\(runID).xcarchive"), "archive")
+        let devDir = folder(home.appendingPathComponent("Library/Developer/Xcode/iOS DeviceSupport/selftest-\(runID)"))
+        let dev = SDKItem(id: devDir.path, group: .xcode, kind: "Device support", name: "DS", detail: "", size: 5, reveal: devDir,
+                          action: .delete([devDir]), regen: "copied again")
+        let mixed = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("A", arch), dev], perform: $0) } }
+        let plannedIDs: [String]? = { if case .approved(let a)? = mixed?.1 { return a.plan.candidates.map(\.id) }; return nil }()
+        check("the SDK review's Trash approval covers only the archive, not the permanent delete",
+              plannedIDs == [arch.path] && SDKEngine.reason(dev) == nil)
+        let r1 = SDKEngine.remove(mixed?.0 ?? [], trash: mixed?.1)
+        check("the archive goes to the Trash through the executor and the Device Support folder is deleted as before",
+              r1.errors.isEmpty && r1.trashed == 10 && r1.bytes == 15 && !fm.fileExists(atPath: arch.path) && !fm.fileExists(atPath: devDir.path))
+        check("the archive is logged as Developer SDKs and Put Back restores it",
+              log(arch).first?.source == "Developer SDKs" && putBack(arch) && fm.fileExists(atPath: arch.appendingPathComponent("content.txt").path))
+
+        // Replaced after the sheet opened.
+        let scannedA = archive("A", arch)
+        let stale = MainActor.assumeIsolated {
+            confirmed({ ReviewBuild.sdks([scannedA], perform: $0) }, beforeConfirm: {
+                try? fm.removeItem(at: arch); _ = folder(arch, "someone else's")
+            })
+        }
+        let r2 = SDKEngine.remove(stale?.0 ?? [], trash: stale?.1)
+        check("an archive replaced after review is left alone and reported",
+              r2.trashed == 0 && r2.errors.first?.contains("changed after you reviewed") == true
+              && (try? String(contentsOf: arch.appendingPathComponent("content.txt"), encoding: .utf8)) == "someone else's")
+
+        // No approval, a refused one, and an approval that doesn't match the items: nothing moves.
+        let none = SDKEngine.remove([archive("A", arch)], trash: nil)
+        check("an archive without an approval stays and says so",
+              none.trashed == 0 && none.errors.first?.contains("wasn't approved") == true && fm.fileExists(atPath: arch.path))
+        let other = folder(dir.appendingPathComponent("B-\(runID).xcarchive"))
+        let forOther = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("B", other)], perform: $0) } }
+        if case .approved(let a)? = forOther?.1 {
+            let refused = SDKEngine.remove(forOther?.0 ?? [], trash: .refused(plan: a.plan, reason: "No approval was issued (test)"))
+            check("a refused approval moves nothing and says why",
+                  refused.trashed == 0 && refused.errors.first?.contains("No approval was issued") == true && fm.fileExists(atPath: other.path))
+            let mismatch = SDKEngine.remove([archive("A", arch)], trash: forOther?.1)
+            check("an approval for different items moves nothing at all",
+                  mismatch.trashed == 0 && mismatch.errors.first?.contains("doesn't match") == true
+                  && fm.fileExists(atPath: arch.path) && fm.fileExists(atPath: other.path))
+        } else { check("an approval was issued for the second archive", false) }
+
+        // Partial failure: one archive can't move.
+        let free = folder(dir.appendingPathComponent("C-\(runID).xcarchive")), locked = folder(dir.appendingPathComponent("D-\(runID).xcarchive"))
+        chflags(locked.path, UInt32(UF_IMMUTABLE))
+        let both = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("C", free), archive("D", locked)], perform: $0) } }
+        let r3 = SDKEngine.remove(both?.0 ?? [], trash: both?.1)
+        chflags(locked.path, 0)
+        check("an archive that can't move is reported, the other moves",
+              r3.trashed == 10 && r3.errors.count == 1 && r3.errors.first?.hasPrefix("D:") == true
+              && !fm.fileExists(atPath: free.path) && fm.fileExists(atPath: locked.path) && log(locked).isEmpty)
+        check("the moved archive can be put back", putBack(free))
+
+        // The approved plan must be exactly the engine's items' own Trash targets (finding: id-only check).
+        let x = folder(dir.appendingPathComponent("X-\(runID).xcarchive"), "x"), y = folder(dir.appendingPathComponent("Y-\(runID).xcarchive"), "y")
+        let forX = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("X", x)], perform: $0) } }
+        let sameIDOtherURL = SDKEngine.remove([archive("X", y, id: x.path)], trash: forX?.1)
+        check("an item with the approved id but a different Trash path moves nothing",
+              sameIDOtherURL.trashed == 0 && sameIDOtherURL.errors.first?.contains("different path") == true
+              && fm.fileExists(atPath: x.path) && fm.fileExists(atPath: y.path))
+        let sameIDOtherIdentity = SDKEngine.remove([archive("X", x, identity: AppCleanup.snapshot(y))], trash: forX?.1)
+        check("an item whose scanned identity isn't the approved one moves nothing",
+              sameIDOtherIdentity.trashed == 0 && sameIDOtherIdentity.errors.first?.contains("isn't the item the scan found") == true
+              && fm.fileExists(atPath: x.path))
+        let otherModule = SystemDataEngine.remove([SysItem(id: x.path, section: .backups, name: "X", detail: "", size: 10, reveal: x,
+                                                           action: .trash(x), identity: AppCleanup.snapshot(x))], trash: forX?.1)
+        check("an SDK approval can't move System Data items, even with the same id and path",
+              otherModule.bytes == 0 && otherModule.errors.first?.contains("belongs to sdks") == true && fm.fileExists(atPath: x.path))
+        let twice = MainActor.assumeIsolated { confirmed { ReviewBuild.sdks([archive("X1", x, id: "one"), archive("X2", x, id: "two")], perform: $0) } }
+        let dup = SDKEngine.remove(twice?.0 ?? [], trash: twice?.1)
+        check("two items naming the same path move nothing", dup.trashed == 0
+              && dup.errors.first?.contains("named twice") == true && fm.fileExists(atPath: x.path))
+
+        // Replaced between the scan and opening the sheet: the row describes the scanned item, so it is refused.
+        let scannedY = archive("Y", y)
+        try? fm.removeItem(at: y); _ = folder(y, "replaced before the sheet opened")
+        let rescan = MainActor.assumeIsolated { () -> (ReviewRequest, ([SDKItem], TrashApproval?)?) in
+            let request = ReviewBuild.sdks([scannedY]) { _, _ in }
+            return (request, confirmed { ReviewBuild.sdks([scannedY], perform: $0) })
+        }
+        check("an archive replaced between the scan and the review is blocked and needs a rescan",
+              rescan.0.items.first?.blocked?.contains("changed since the scan") == true && rescan.0.trashPlan == nil)
+        let afterRescanRefusal = SDKEngine.remove(rescan.1?.0 ?? [], trash: rescan.1?.1)
+        check("…and nothing moves", afterRescanRefusal.trashed == 0 && fm.fileExists(atPath: y.path))
+        let unscanned = MainActor.assumeIsolated { ReviewBuild.sdks([archive("Y", y, identity: .some(nil))]) { _, _ in } }
+        check("an archive the scan didn't identify is blocked", unscanned.items.first?.blocked?.contains("Scan again") == true)
+
+        // System Data review: a backup folder.
+        let backup = folder(dir.appendingPathComponent("backup-\(runID)"), "backup")
+        let sys = SysItem(id: backup.path, section: .backups, name: "Phone", detail: "", size: 7, reveal: backup, action: .trash(backup),
+                          review: true, identity: AppCleanup.snapshot(backup))
+        let sysOK = MainActor.assumeIsolated { confirmed { ReviewBuild.systemData([sys], perform: $0) } }
+        let sysScanned = sys
+        let s1 = SystemDataEngine.remove(sysOK?.0 ?? [], trash: sysOK?.1)
+        check("a reviewed backup goes to the Trash through the executor, logged as System Data, and can be put back",
+              s1.errors.isEmpty && s1.bytes == 7 && log(backup).first?.source == "System Data" && putBack(backup))
+        let sysStale = MainActor.assumeIsolated {
+            confirmed({ ReviewBuild.systemData([SysItem(id: backup.path, section: .backups, name: "Phone", detail: "", size: 7,
+                                                        reveal: backup, action: .trash(backup), review: true,
+                                                        identity: AppCleanup.snapshot(backup))], perform: $0) },
+                      beforeConfirm: { try? fm.removeItem(at: backup); _ = folder(backup, "new") })
+        }
+        _ = sysScanned
+        let s2 = SystemDataEngine.remove(sysStale?.0 ?? [], trash: sysStale?.1)
+        check("a backup replaced after review is left alone and reported",
+              s2.bytes == 0 && s2.errors.first?.contains("changed after you reviewed") == true && fm.fileExists(atPath: backup.path))
+
+        // MCP, with the real scans finding items in this home folder.
+        let day = home.appendingPathComponent("Library/Developer/Xcode/Archives/2026-01-01")
+        let mcpArch = folder(day.appendingPathComponent("SelfTest-\(runID).xcarchive"), "mcp archive")
+        (["Name": "SelfTest"] as NSDictionary).write(to: mcpArch.appendingPathComponent("Info.plist"), atomically: true)
+        approvals.asked = []; approvals.answer = true
+        /// The id the tool itself reports for the item (as an AI client would use it).
+        func toolID(_ tool: String, _ args: [String: Any], endingWith tail: String) -> String {
+            let items = ((try? MCPServer.call(tool, args)) as? [String: Any])?["items"] as? [[String: Any]] ?? []
+            return items.compactMap { $0["id"] as? String }.first { $0.hasSuffix(tail) } ?? "missing"
+        }
+        let archTail = "/Archives/2026-01-01/SelfTest-\(runID).xcarchive"
+        func sdkConfirm(_ approval: ToolApproval?) -> [String: Any]? {
+            let sdkID = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
+            let pv = (try? MCPServer.call("remove_sdks", ["ids": [sdkID]])) as? [String: Any]
+            let id = pv?["preview_id"] as? String ?? ""
+            return (try? MCPServer.call("remove_sdks", ["ids": [sdkID], "confirm": true, "preview_id": id], approval: approval)) as? [String: Any]
+        }
+        let m1 = sdkConfirm(nil)
+        check("MCP remove_sdks moves the archive through the executor after the window, logged as the AI assistant",
+              (m1?["errors"] as? [String])?.isEmpty == true && !fm.fileExists(atPath: mcpArch.path) && approvals.asked.count == 1
+              && log(mcpArch).first?.source == "Developer SDKs · AI assistant")
+        check("the MCP archive can be put back", putBack(mcpArch))
+        let m2 = sdkConfirm(.yesFlag)
+        check("remove_sdks with --yes is logged as the non-interactive override",
+              (m2?["errors"] as? [String])?.isEmpty == true
+              && log(mcpArch).first?.source == "Developer SDKs · Command line (--yes, not confirmed by a person)")
+        _ = putBack(mcpArch)
+        HumanApproval.ask = { _ in try? fm.removeItem(at: mcpArch); _ = folder(mcpArch, "replaced while asking"); return true }
+        let m3 = sdkConfirm(nil)
+        installTestApprover(); approvals.answer = true
+        check("an archive replaced during the confirmation window is left alone and reported",
+              (m3?["errors"] as? [String])?.first?.contains("changed after you reviewed") == true && fm.fileExists(atPath: mcpArch.path))
+
+        // Replaced between list_sdks and the preview: refused, not approved, not moved.
+        _ = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
+        let scanID = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
+        try? fm.removeItem(at: mcpArch); _ = folder(mcpArch, "replaced after list_sdks")
+        let rpv = (try? MCPServer.call("remove_sdks", ["ids": [scanID]])) as? [String: Any]
+        let rRow = (rpv?["items"] as? [[String: Any]])?.first
+        let rc = (try? MCPServer.call("remove_sdks", ["ids": [scanID], "confirm": true,
+                                                      "preview_id": rpv?["preview_id"] as? String ?? ""])) as? [String: Any]
+        check("an archive replaced between list_sdks and the preview is refused and isn't moved",
+              rRow?["allowed"] as? Bool == false && (rRow?["reason"] as? String)?.contains("changed since the scan") == true
+              && fm.fileExists(atPath: mcpArch.path) && (rc?["moved_to_trash"] as? String) == ByteText.string(0))
+
+        let mcpBackup = folder(home.appendingPathComponent("Library/Application Support/MobileSync/Backup/selftest-\(runID)"), "mcp backup")
+        let backupID = toolID("system_data", [:], endingWith: "/MobileSync/Backup/selftest-\(runID)")
+        let spv = (try? MCPServer.call("remove_system_data", ["ids": [backupID]])) as? [String: Any]
+        let sm = (try? MCPServer.call("remove_system_data", ["ids": [backupID], "confirm": true,
+                                                             "preview_id": spv?["preview_id"] as? String ?? ""], approval: .terminal)) as? [String: Any]
+        check("MCP remove_system_data moves the backup through the executor, logged with who confirmed",
+              (sm?["errors"] as? [String])?.isEmpty == true && !fm.fileExists(atPath: mcpBackup.path)
+              && log(mcpBackup).first?.source == "System Data · Command line")
+        check("the MCP backup can be put back", putBack(mcpBackup))
+        try? fm.removeItem(at: mcpArch); try? fm.removeItem(at: mcpBackup)
+    }
+
+    // MARK: Trash isolation
+
+    /// The self-test's Trash: a folder in the throwaway home (set by `isolateTrash`).
+    nonisolated(unsafe) static var isolatedTrash = URL(fileURLWithPath: "/nonexistent")
+    /// Every Trash move the self-test made.
+    static let isolatedMoves = PathList()
+
+    final class PathList: @unchecked Sendable {   // `items` behind `lock`
+        private let lock = NSLock()
+        private var items: [String] = []
+        func add(_ p: String) { lock.lock(); items.append(p); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
+        var count: Int { all.count }
+    }
+
+    /// True once `isolateTrash` has replaced the Trash mover in this process.
+    nonisolated(unsafe) static var trashIsIsolated = false
+
+    /// True when `path` lies inside this run's isolated Trash folder.
+    static func inIsolatedTrash(_ path: String?) -> Bool {
+        guard let path, trashIsIsolated else { return false }
+        return path.hasPrefix(isolatedTrash.path + "/") || path.hasPrefix(AppCleanup.physicalPath(isolatedTrash) + "/")
+    }
+
+    /// Points every Trash move (the executor's and the legacy AppEngine.trash) at `dir` instead of the real Trash.
+    static func isolateTrash(in dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        isolatedTrash = dir
+        trashIsIsolated = true
+        AppCleanup.trashMover = { url in
+            let slot = dir.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: false)
+            let dest = slot.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: dest)   // a rename: the item itself, never what a link points to
+            isolatedMoves.add(dest.path)
+            return dest
+        }
     }
 
     #if MACCLEANER_TEST_HOOKS
+    /// Asks a fresh process of this build where its Trash moves would go, given this run's isolated folder, and
+    /// checks the probe can tell (the same process without the folder must say "system"). Destructive child
+    /// processes run only when this is true, so a broken isolation hook fails these checks instead of moving files
+    /// into the real Trash.
+    static func subprocessTrashIsIsolated() -> Bool {
+        func probe(_ extra: [String: String]) -> String {
+            let p = Process()
+            p.executableURL = Bundle.main.executableURL
+            p.arguments = ["--cli", "status"]
+            var env = ProcessInfo.processInfo.environment
+            env["MACCLEANER_TEST_TRASH_DIR"] = nil
+            p.environment = env.merging(extra.merging(["MACCLEANER_TEST_TRASH_PROBE": "1"]) { a, _ in a }) { _, new in new }
+            p.standardInput = FileHandle.nullDevice
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return "" }
+            let out = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let isolated = probe(["MACCLEANER_TEST_TRASH_DIR": isolatedTrash.path])
+        let unset = probe([:])
+        let ok = isolated == "trash-destination: \(isolatedTrash.path)" && unset == "trash-destination: system"
+        check("a child process reports the self-test's isolated Trash before it may move anything", ok)
+        if !ok { print("    (skipping destructive child-process checks: got \"\(isolated)\" / \"\(unset)\")") }
+        return ok
+    }
+
     /// `--selftest-child <task> ...`: work the self-test runs in a separate process. Compiled only into the
     /// test-hooks build, never into Release. Even there it refuses unless started by the self-test
     /// (MACCLEANER_SELFTEST_CHILD=1) in a throwaway home folder.
@@ -1834,6 +2132,8 @@ extension SelfTest {
             return 2
         }
         guard args.count == 3, args[0] == "trash-then-die" else { return 2 }
+        if let dir = ProcessInfo.processInfo.environment["MACCLEANER_TEST_TRASH_DIR"] { isolateTrash(in: URL(fileURLWithPath: dir)) }
+        else { return 2 }   // never touch the real Trash
         let urls = [URL(fileURLWithPath: args[1]), URL(fileURLWithPath: args[2])]
         // Kill this process the moment the first move has been recorded: no cleanup, no flushing.
         AppCleanup.afterRecording = { _ in kill(getpid(), SIGKILL) }

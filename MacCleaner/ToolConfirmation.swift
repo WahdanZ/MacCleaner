@@ -27,30 +27,40 @@ enum ToolConfirmation {
         }
     }
 
-    /// Approves the preview's Trash plan, attributed to whoever confirmed it, and moves it to the Trash through the
-    /// cleanup executor (recorded per item for Put Back). Blocks until done: the MCP server and the CLI handle one
-    /// call at a time, synchronously; none of this work needs the main thread.
-    static func moveToTrash(_ confirmed: MCPServer.ConfirmedPreview) -> TrashRun {
-        guard let plan = confirmed.trashPlan else { return TrashRun() }
-        let approver = approver(for: confirmed.approvedBy), source = trashSource(for: confirmed.approvedBy)
-        let slot = RunSlot()
+    /// The Trash log `source` for an engine's Trash items approved through MCP or the CLI ("Developer SDKs · AI
+    /// assistant", "System Data · Command line (--yes, …)").
+    static func trashSource(_ module: String, for approval: ToolApproval?) -> String {
+        "\(module) · \(trashSource(for: approval))"
+    }
+
+    /// Approves the preview's Trash plan, attributed to whoever confirmed it. nil when the preview had no Trash
+    /// items. Waits for the executor (the MCP server and the CLI are synchronous).
+    static func approveTrash(_ confirmed: MCPServer.ConfirmedPreview) -> TrashApproval? {
+        guard let plan = confirmed.trashPlan else { return nil }
+        let approver = approver(for: confirmed.approvedBy)
+        let slot = ApprovalSlot()
         let done = DispatchSemaphore(value: 0)
         Task.detached {
-            let decision: TrashApproval
             do {
-                decision = .approved(ApprovedTrash(plan: plan, approval: try await AppCleanup.executor.approve(plan, by: approver)))
+                slot.value = .approved(ApprovedTrash(plan: plan, approval: try await AppCleanup.executor.approve(plan, by: approver)))
             } catch {
-                decision = .refused(plan: plan, reason: "No approval was issued (\(error)); nothing was moved")
+                slot.value = .refused(plan: plan, reason: "No approval was issued (\(error)); nothing was moved")
             }
-            slot.run = await AppCleanup.moveToTrash(decision, source: source)
             done.signal()
         }
         done.wait()
-        return slot.run ?? TrashRun()
+        return slot.value
+    }
+
+    /// Approves the preview's Trash plan and moves it to the Trash through the cleanup executor (recorded per item
+    /// for Put Back).
+    static func moveToTrash(_ confirmed: MCPServer.ConfirmedPreview) -> TrashRun {
+        guard let decision = approveTrash(confirmed) else { return TrashRun() }
+        return AppCleanup.moveToTrashBlocking(decision, source: trashSource(for: confirmed.approvedBy))
     }
 }
 
-/// Carries the result out of the detached task (written once before the semaphore is signalled).
-private final class RunSlot: @unchecked Sendable {
-    var run: TrashRun?
+/// Carries the approval out of the detached task (written once before the semaphore is signalled).
+private final class ApprovalSlot: @unchecked Sendable {
+    var value: TrashApproval?
 }

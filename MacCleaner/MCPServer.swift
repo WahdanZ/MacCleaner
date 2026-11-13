@@ -417,16 +417,29 @@ enum MCPServer {
             let ids = Set(a["ids"] as? [String] ?? [])
             let list = sdkScan.items.filter { ids.contains($0.id) }
             guard !list.isEmpty else { throw ToolError(description: "No matching items. Pass ids from list_sdks.") }
+            // Archives: the scan's identity, and only if the same item is still there (else refused: list_sdks again).
+            var archives: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] = []
+            var refusals: [String: String] = [:]
+            for i in list {
+                if let why = SDKEngine.reason(i) { refusals[i.id] = why; continue }
+                guard case .trash(let u) = i.action else { continue }
+                let (snap, why) = AppCleanup.scannedSnapshot(u, scanned: i.identity)
+                if let snap { archives.append((i.id, i.name, snap, i.size, "Requested through Mac Cleaner's AI connection or command line")) }
+                else { refusals[i.id] = (why ?? "It changed") + " (call list_sdks again)" }
+            }
             let preview = list.map { ["name": $0.name, "size": size($0.size), "in_use": $0.inUse ?? NSNull(), "review": $0.review,
                                       "how": { if case .trash = $0.action { return "Trash" }; return "permanent" }($0),
-                                      "allowed": SDKEngine.reason($0) == nil, "reason": SDKEngine.reason($0) ?? NSNull()] as [String: Any] }
+                                      "allowed": refusals[$0.id] == nil, "reason": refusals[$0.id] ?? NSNull()] as [String: Any] }
             let digest = plan(list.map { i in "\(i.id)|" + sdkPaths(i.action).map(identity).joined(separator: ",") })
             if !confirm {
+                // The confirm can only approve exactly these archives.
                 return withPreview(name, digest, ["preview": true, "items": preview, "total": size(list.reduce(0) { $0 + $1.size }),
-                        "next": "Show this to the user, point out in_use and review items. Only after an explicit yes, call remove_sdks again with confirm: true and the preview_id."])
+                        "next": "Show this to the user, point out in_use and review items. Only after an explicit yes, call remove_sdks again with confirm: true and the preview_id."],
+                        trashPlan: AppCleanup.trashPlan(archives, module: "sdks"))
             }
-            try approve(name, digest, a, approval)
-            let r = SDKEngine.remove(list)
+            let confirmed = try approve(name, digest, a, approval)
+            let r = SDKEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
+                                     trashSource: ToolConfirmation.trashSource("Developer SDKs", for: approval))
             HistoryStore.add(title: "Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
             HistoryStore.add(title: "Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)
             sdkScan = SDKScan()
@@ -453,13 +466,26 @@ enum MCPServer {
             guard !list.isEmpty else { throw ToolError(description: "No matching items. Pass ids from system_data.") }
             let digest = plan(list.map { i -> String in if case .trash(let u) = i.action { return "\(i.id)|\(identity(u.path))" }; return i.id })
             if !confirm {
+                // Trash items: the scan's identity, only if the same item is still there (else refused: system_data
+                // again). The confirm can only approve exactly these.
+                var trashItems: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] = []
+                var refusals: [String: String] = [:]
+                for i in list {
+                    if let why = SystemDataEngine.reason(i) { refusals[i.id] = why; continue }
+                    guard case .trash(let u) = i.action else { continue }
+                    let (snap, why) = AppCleanup.scannedSnapshot(u, scanned: i.identity)
+                    if let snap { trashItems.append((i.id, i.name, snap, i.size ?? 0, "Requested through Mac Cleaner's AI connection or command line")) }
+                    else { refusals[i.id] = (why ?? "It changed") + " (call system_data again)" }
+                }
                 return withPreview(name, digest, ["preview": true,
                         "items": list.map { ["name": $0.section.rawValue + ": " + $0.name, "size": $0.size.map(size) ?? "unknown",
-                                             "allowed": SystemDataEngine.reason($0) == nil, "reason": SystemDataEngine.reason($0) ?? NSNull()] as [String: Any] },
-                        "next": "Show this to the user (backups and attachments can't be recreated). Only after an explicit yes, call again with confirm: true and the preview_id."])
+                                             "allowed": refusals[$0.id] == nil, "reason": refusals[$0.id] ?? NSNull()] as [String: Any] },
+                        "next": "Show this to the user (backups and attachments can't be recreated). Only after an explicit yes, call again with confirm: true and the preview_id."],
+                        trashPlan: AppCleanup.trashPlan(trashItems, module: "system-data"))
             }
-            try approve(name, digest, a, approval)
-            let r = SystemDataEngine.remove(list)
+            let confirmed = try approve(name, digest, a, approval)
+            let r = SystemDataEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
+                                            trashSource: ToolConfirmation.trashSource("System Data", for: approval))
             HistoryStore.add(title: "Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
                              outcome: .deleted, measuredFreeChange: r.freed)
             HistoryStore.add(title: "System Data Moved to Trash", bytes: r.bytes - r.freed, symbol: "internaldrive", outcome: .trashed)

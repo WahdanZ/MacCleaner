@@ -1,3 +1,4 @@
+import MacCleanerCore
 import Foundation
 
 // Builds the Review Cleanup list for each feature. Blocked status comes from the same guard the
@@ -161,40 +162,64 @@ enum ReviewBuild {
                       verb: "Clean", perform: { ok in perform(pairs.filter { ok.contains($0.0.id) }) })
     }
 
-    static func sdks(_ m: SDKModel, perform: @escaping ([SDKItem]) -> Void) -> ReviewRequest {
-        let chosen = m.chosen
+    static func sdks(_ m: SDKModel, perform: @escaping ([SDKItem], TrashApproval?) -> Void) -> ReviewRequest {
+        sdks(m.chosen, perform: perform)
+    }
+
+    /// Archives (`.trash`) are approved-Trash items: the plan holds the identity the scan captured (what the sheet
+    /// describes), and only if the same item is still there when the sheet opens; otherwise the row is blocked and
+    /// needs a rescan. Everything else keeps its own flow.
+    static func sdks(_ chosen: [SDKItem], perform: @escaping ([SDKItem], TrashApproval?) -> Void) -> ReviewRequest {
+        let items = chosen.map { i -> ReviewItem in
+            let action: ReviewItem.Action = {
+                switch i.action {
+                case .simRuntime, .docker, .brew: return .command
+                case .delete: return .delete
+                case .trash: return .trash
+                }
+            }()
+            var snap: FileIdentity?
+            var blocked = SDKEngine.reason(i)
+            if case .trash(let u) = i.action, blocked == nil {
+                (snap, blocked) = AppCleanup.scannedSnapshot(u, scanned: i.identity)
+            }
+            return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? "\(i.group.rawValue) · \(i.detail)",
+                              size: i.size, action: action,
+                              risk: i.inUse != nil ? .inUse : i.review ? .review : .safe,
+                              note: i.inUse ?? "comes back with \(i.regen)", blocked: blocked, snapshot: snap)
+        }
         return ReviewRequest(title: "Review Developer SDKs",
                       explanation: "Runtimes and SDK parts are deleted permanently and can be downloaded again, which takes time and bandwidth. Xcode archives go to the Trash. Docker volumes and stopped containers hold data that can't be rebuilt.",
-                      items: chosen.map { i in
-                          let action: ReviewItem.Action = {
-                              switch i.action {
-                              case .simRuntime, .docker, .brew: return .command
-                              case .delete: return .delete
-                              case .trash: return .trash
-                              }
-                          }()
-                          return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? "\(i.group.rawValue) · \(i.detail)",
-                                            size: i.size, action: action,
-                                            risk: i.inUse != nil ? .inUse : i.review ? .review : .safe,
-                                            note: i.inUse ?? "comes back with \(i.regen)", blocked: SDKEngine.reason(i))
-                      },
-                      verb: "Remove", perform: { ok in perform(chosen.filter { ok.contains($0.id) }) })
+                      items: items, verb: "Remove", perform: { _ in },
+                      trashPlan: AppCleanup.trashPlan(items, module: "sdks"),
+                      performApproved: { ok, approval in perform(chosen.filter { ok.contains($0.id) }, approval) })
     }
 
     // MARK: System Data, Shredder
 
-    static func systemData(_ m: SystemDataModel, perform: @escaping ([SysItem]) -> Void) -> ReviewRequest {
-        let chosen = m.chosen
+    static func systemData(_ m: SystemDataModel, perform: @escaping ([SysItem], TrashApproval?) -> Void) -> ReviewRequest {
+        systemData(m.chosen, perform: perform)
+    }
+
+    /// Trash items are approved-Trash items: the plan holds the scan's identity, only if the same item is still
+    /// there when the sheet opens (otherwise blocked, rescan). Snapshots keep their password flow.
+    static func systemData(_ chosen: [SysItem], perform: @escaping ([SysItem], TrashApproval?) -> Void) -> ReviewRequest {
+        let items = chosen.map { i -> ReviewItem in
+            let snapshot: Bool = { if case .snapshot = i.action { return true }; return false }()
+            var snap: FileIdentity?
+            var blocked = SystemDataEngine.reason(i)
+            if case .trash(let u) = i.action, blocked == nil {
+                (snap, blocked) = AppCleanup.scannedSnapshot(u, scanned: i.identity)
+            }
+            return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? i.section.rawValue, size: i.size,
+                              action: snapshot ? .command : .trash, risk: i.review ? .review : .safe,
+                              note: snapshot ? "tmutil, needs your password" : i.detail, blocked: blocked, snapshot: snap)
+        }
         return ReviewRequest(title: "Review System Data",
                       explanation: "Device backups and attachments go to the Trash; they can't be recreated without the device or the sender. Time Machine snapshots are deleted permanently after you enter your password.",
-                      items: chosen.map { i in
-                          let snapshot: Bool = { if case .snapshot = i.action { return true }; return false }()
-                          return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? i.section.rawValue, size: i.size,
-                                            action: snapshot ? .command : .trash, risk: i.review ? .review : .safe,
-                                            note: snapshot ? "tmutil, needs your password" : i.detail,
-                                            blocked: SystemDataEngine.reason(i))
-                      },
-                      verb: "Remove", perform: { ok in perform(chosen.filter { ok.contains($0.id) }) })
+                      items: items, verb: "Remove", perform: { _ in },
+                      trashPlan: AppCleanup.trashPlan(items, module: "system-data"),
+                      performApproved: { ok, approval in perform(chosen.filter { ok.contains($0.id) }, approval) })
     }
 
     static func shred(_ items: [ShredderModel.Item], perform: @escaping ([ShredderModel.Item]) -> Void) -> ReviewRequest {

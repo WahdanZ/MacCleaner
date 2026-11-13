@@ -23,7 +23,12 @@ enum HumanApproval {
     /// How Mac Cleaner asks. Replaced only by the self-test.
     nonisolated(unsafe) static var ask: (ApprovalRequest) -> Bool = askWithDialog
     /// The dialog cancels itself after this long, so an unattended request never goes ahead.
-    static let timeout: TimeInterval = 120
+    /// MACCLEANER_APPROVAL_TIMEOUT can only shorten it (1–120 s), for testing the cancel path.
+    static var timeout: TimeInterval {
+        let fallback: TimeInterval = 120
+        guard let raw = ProcessInfo.processInfo.environment["MACCLEANER_APPROVAL_TIMEOUT"], let v = TimeInterval(raw) else { return fallback }
+        return min(fallback, max(1, v))
+    }
 
     /// True when a person's login session with a screen is available (not over SSH, not in a headless job).
     static var hasGUISession: Bool { CGSessionCopyCurrentDictionary() != nil }

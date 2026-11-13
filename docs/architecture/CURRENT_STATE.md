@@ -132,7 +132,32 @@ The two failures under a relocated home are fixture-environment issues, not prod
 `Trash refuses a file reached through a linked folder` needs `~/Library/Keychains` to exist, and
 `Storage Map keeps a non-ASCII name exactly as stored` compared full paths, which differ as `/tmp/…` vs
 `/private/tmp/…` (same folder) when home is under `/private` (RISK-014; fixed on main by #28).
-App startup, scan latency and memory were not measured in this pass.
+App startup, scan latency and memory were not measured in this pass; see §8a.
+
+## 8a. Performance baseline (M01-01) — `main` at `73e8d3c`, after M00
+
+Same host. Release build, ad-hoc signed, hardened runtime. Run from a shell without Full Disk Access, against the
+real home folder (read-only: `--cli bench` deletes nothing; `SizeCache` off). Home folder: ~2.26 million files,
+~256 GB. Every M01 change that touches scanning compares against these numbers (MIGRATION_PLAN Stage E: > 10 %
+slower needs a recorded reason).
+
+| Measure | Median of 3 | Min | Max main-thread stall | Result | Command |
+|---|---|---|---|---|---|
+| Junk Files scan | 9.68 s | 9.51 s | 0.011 s | 63 items, 50.8 GB | `--cli bench junk --runs 3` |
+| Storage Map (home) | 20.29 s | 16.16 s | 0.069 s | 2,259,389 files, 255.5 GB | `… storage` |
+| Duplicates (default folders) | 0.47 s | 0.47 s | 0.012 s | 25 groups, 155.6 MB | `… duplicates` |
+| Large & Old Files | 5.29 s | 5.08 s | 0.121 s | 520 files, 73.1 GB | `… large` |
+| Projects | 4.66 s | 3.94 s | 0.035 s | 247 projects, 27.6 GB | `… projects` |
+| Developer SDKs | 4.11 s | 3.99 s | 0.012 s | 88 items, 37.0 GB | `… sdks` |
+| Applications | 9.56 s | 8.71 s | 0.054 s | 65 apps, 76.4 GB | `… apps` |
+| System Data | 0.11 s | 0.09 s | 0.010 s | 0 items (no Full Disk Access) | `… system` |
+| Overview | 13.17 s | 12.51 s | 0.036 s | — | `… overview` |
+| CLI start (`--cli status`) | 0.03–0.04 s warm, 0.89 s first run | | | 17 MB max resident | `/usr/bin/time -l` |
+
+Peak queued folder jobs in the shared walker: 13,218 (storage/large), 16,685 (overview).
+
+**Not measured yet:** window launch to first frame, memory during a full scan, and menu bar idle CPU (these need
+the app running in a session with Instruments; planned before M01-05), and anything with Full Disk Access.
 
 ## 9. Pull requests
 

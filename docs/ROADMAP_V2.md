@@ -23,7 +23,7 @@ Status values: `todo` · `in progress` · `in review (#N)` = open PR, **not on `
 | M00-04 | MCP human approval + identity digest (RISK-004) | Confirm without Mac Cleaner-owned human approval refused; `empty_trash` digest includes listed item identities; replaced-at-same-path item refused | in review (#29) |
 | M00-05 | Simulators review-only (RISK-005) | `xcode.sims` not recommended, review row says app data is lost; only reviewed, still-unavailable devices deleted | in review (#30) |
 | M00-06 | RISK-014 Storage Map check under `/private` home | Root cause: `/tmp` vs `/private/tmp` spelling; check compares name bytes + identity | in review (#28) |
-| M00-07 | Release baseline (RISK-008) | Hardened runtime in project Release config; release job fails if signing expected but missing; doc for `.sig` | todo |
+| M00-07 | Release baseline (RISK-008) | Hardened runtime in project Release config; release job fails if signing expected but missing; doc for `.sig` | in review (#31) |
 
 **Verification.** `scripts/selftest.sh` locally and in CI; Release build; CLI/MCP smoke.
 

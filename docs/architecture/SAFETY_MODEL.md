@@ -52,6 +52,8 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
 * **Overwrite → `F_FULLFSYNC` → final identity check → unlink → re-check through the still-open file:** data
   another process appended meanwhile is overwritten before closing.
 * **Stop at the first failure.** Already-shredded files are gone; the failed file and the rest stay in place.
+  `removed` is reported only when the item is gone **and** the staging folder was removed; otherwise the
+  staging folder's path is reported (`leftover`).
   A file whose overwrite started is reported as **damaged**. Folders are removed only when empty (`rmdir`), so
   a swapped folder can never cause data loss.
 * **Residual limits (not atomic):** macOS has no "unlink only if unchanged" call. A process of the same user

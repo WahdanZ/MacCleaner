@@ -153,6 +153,8 @@ enum SelfTest {
         check("protected file is refused by trash()", AppEngine.trash(rt, source: "Self-test") != nil && fm.fileExists(atPath: rt.path))
         ProtectedPaths.set(savedProtected)
 
+        approvedTrash(sandbox: sandbox, runID: String(runID), savedProtected: savedProtected)
+
         print("Projects (build files)")
         let proj = sandbox.appendingPathComponent("proj")
         for d in ["node_modules/pkg", "src", "dist", "build"] {
@@ -1364,4 +1366,315 @@ enum SelfTest {
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty
     }
+}
+
+// MARK: - Approved Trash (M01-04b)
+
+/// Holds a value produced on the main actor while the self-test spins the run loop.
+private final class Slot<T>: @unchecked Sendable {   // written once on the main actor, read after on the main thread
+    var value: T?
+}
+
+extension SelfTest {
+    /// Runs main-actor async work and spins the main run loop until it is done. The self-test runs on the main
+    /// thread before the app starts, so this is how it awaits the executor and the review confirmation.
+    static func wait<T>(_ seconds: TimeInterval = 30, _ work: @escaping @MainActor () async -> T) -> T? {
+        let box = Slot<T>()
+        Task { @MainActor in box.value = await work() }
+        let end = Date().addingTimeInterval(seconds)
+        while box.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        return box.value
+    }
+
+    /// Opens a review for `urls`, confirms it through the review sheet's own confirmation, and returns what the
+    /// sheet handed to the screen.
+    @MainActor
+    static func confirmTrashReview(_ urls: [URL]) -> TrashApproval?? {
+        let got = Slot<TrashApproval?>()
+        let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
+                                             urls.map { ($0, 1, nil) }) { _, approval in got.value = .some(approval) }
+        ReviewConfirmation.confirm(request)
+        let end = Date().addingTimeInterval(30)
+        while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        return got.value
+    }
+
+    static func approvedTrash(sandbox: URL, runID: String, savedProtected: [String]) {
+        print("Approved Trash: review sheet → approval → executor (M01-04b)")
+        let fm = FileManager.default
+        let dir = sandbox.appendingPathComponent("approved-trash")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        func file(_ name: String, _ text: String = "reviewed") -> URL {
+            let u = dir.appendingPathComponent("\(name)-\(runID).txt")
+            try? Data(text.utf8).write(to: u)
+            return u
+        }
+        func run(_ a: TrashApproval??, _ source: String = "Self-test") -> TrashRun? {
+            guard case .some(.some(let approval)) = a else { return nil }
+            return wait { await AppCleanup.moveToTrash(approval, source: source) }
+        }
+        func approved(_ a: TrashApproval??) -> ApprovedTrash? {
+            if case .some(.some(.approved(let x))) = a { return x }
+            return nil
+        }
+        func putBack(_ u: URL) -> Bool {
+            guard let e = TrashLog.shared.present().first(where: { $0.original == AppCleanup.physicalPath(u) }) else { return false }
+            return TrashOps.restore(e) == nil
+        }
+        let outstanding = { wait { await AppCleanup.executor.outstandingApprovals } ?? -1 }
+
+        // Declined: the sheet was cancelled, so confirm never ran. Nothing is approved or moved.
+        let declined = file("declined")
+        let before = outstanding()
+        _ = MainActor.assumeIsolated {
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(declined, 1, nil)]) { _, _ in }
+        }
+        check("a cancelled review issues no approval and moves nothing",
+              outstanding() == before && fm.fileExists(atPath: declined.path))
+
+        // Confirmed, moved, logged, and put back.
+        let ok = file("ok", "roundtrip")
+        let okReview = MainActor.assumeIsolated { confirmTrashReview([ok]) }
+        let okRun = run(okReview)
+        check("a confirmed review moves exactly the reviewed item to the Trash",
+              okRun?.moved[ok.path] != nil && okRun?.problems.isEmpty == true && !fm.fileExists(atPath: ok.path))
+        check("the approval was used up by the move", outstanding() == before)
+        check("the approved move is in the Trash log and Put Back restores it",
+              putBack(ok) && (try? String(contentsOf: ok, encoding: .utf8)) == "roundtrip")
+
+        // Replayed: the same approval presented again does nothing.
+        let replay = run(okReview)
+        check("a replayed approval is refused and moves nothing",
+              replay?.moved.isEmpty == true && replay?.problems.first?.message.contains("already used") == true
+              && fm.fileExists(atPath: ok.path))
+
+        // Stale identity: the file was written to after the sheet opened.
+        let stale = file("stale")
+        let staleReview = MainActor.assumeIsolated { () -> TrashApproval?? in
+            let got = Slot<TrashApproval?>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(stale, 1, nil)]) {
+                got.value = .some($1)
+            }
+            try? Data("written after review".utf8).write(to: stale)   // between the sheet opening and the click
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        let staleRun = run(staleReview)
+        check("a file changed after review is left alone and reported",
+              staleRun?.moved.isEmpty == true && staleRun?.problems.first?.message.contains("changed after you reviewed") == true
+              && (try? String(contentsOf: stale, encoding: .utf8)) == "written after review")
+
+        // Replaced: same name, different file.
+        let replaced = file("replaced")
+        let replacedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
+            let got = Slot<TrashApproval?>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(replaced, 1, nil)]) {
+                got.value = .some($1)
+            }
+            try? fm.removeItem(at: replaced)
+            try? Data("a different file".utf8).write(to: replaced)
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        let replacedRun = run(replacedReview)
+        check("a file replaced after review is left alone and reported",
+              replacedRun?.moved.isEmpty == true && replacedRun?.problems.count == 1
+              && (try? String(contentsOf: replaced, encoding: .utf8)) == "a different file")
+
+        // Protected after review.
+        let guarded = file("guarded")
+        let guardedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
+            let got = Slot<TrashApproval?>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(guarded, 1, nil)]) {
+                got.value = .some($1)
+            }
+            ProtectedPaths.set(savedProtected + [guarded.path])
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        let guardedRun = run(guardedReview)
+        ProtectedPaths.set(savedProtected)
+        check("an item protected after review is left alone and reported",
+              guardedRun?.moved.isEmpty == true && guardedRun?.problems.count == 1 && fm.fileExists(atPath: guarded.path))
+
+        // Partial failure: one of two can't be moved.
+        let free = file("free"), locked = file("locked")
+        chflags(locked.path, UInt32(UF_IMMUTABLE))
+        let partial = run(MainActor.assumeIsolated { confirmTrashReview([free, locked]) })
+        chflags(locked.path, 0)
+        check("a partial failure moves what it can and reports the rest",
+              partial?.moved[free.path] != nil && partial?.moved[locked.path] == nil
+              && partial?.problems.map(\.id) == [locked.path] && fm.fileExists(atPath: locked.path))
+        check("the partly moved item can be put back", putBack(free) && fm.fileExists(atPath: free.path))
+
+        // The approved list is what the sheet showed: nothing added later, nothing missing at open.
+        let shown = file("shown")
+        let shownReview = MainActor.assumeIsolated { confirmTrashReview([shown]) }
+        let later = file("added-later")
+        check("the approval covers exactly the items the sheet showed",
+              approved(shownReview)?.plan.candidates.map(\.id) == [shown.path])
+        let shownRun = run(shownReview)
+        check("an item added after the review isn't moved", shownRun?.moved.keys.sorted() == [shown.path]
+              && fm.fileExists(atPath: later.path))
+        _ = putBack(shown)
+        trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
+        sharedFileLocking(dir: dir)
+
+        let allowedOne = file("allowed"), blockedOne = file("blocked")
+        ProtectedPaths.set(savedProtected + [blockedOne.path])
+        let mixed = MainActor.assumeIsolated { () -> ([URL], TrashApproval?)? in
+            let got = Slot<([URL], TrashApproval?)>()
+            let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
+                                                 [(allowedOne, 1, nil), (blockedOne, 1, nil)]) { got.value = ($0, $1) }
+            ReviewConfirmation.confirm(request)
+            let end = Date().addingTimeInterval(30)
+            while got.value == nil && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            return got.value
+        }
+        ProtectedPaths.set(savedProtected)
+        let mixedPlan: [String]? = { if case .approved(let a)? = mixed?.1 { return a.plan.candidates.map(\.id) }; return nil }()
+        check("a blocked item is neither approved nor handed to the screen",
+              mixed?.0 == [allowedOne] && mixedPlan == [allowedOne.path])
+        let gone = dir.appendingPathComponent("never-there-\(runID).txt")
+        let goneRequest = MainActor.assumeIsolated {
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(gone, 1, nil)]) { _, _ in }
+        }
+        check("an item missing when the sheet opens is blocked and not in the plan",
+              goneRequest.items.first?.blocked != nil && goneRequest.trashPlan == nil)
+    }
+
+    // MARK: Trash log per move (crash safety)
+
+    static func trashLogDurability(dir: URL, runID: String, file: (String, String) -> URL,
+                                   run: (TrashApproval??, String) -> TrashRun?, putBack: (URL) -> Bool) {
+        let fm = FileManager.default
+        func entries(_ u: URL) -> Int { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) }.count }
+
+        // Several moves, each recorded once.
+        let m1 = file("multi-1", "one"), m2 = file("multi-2", "two")
+        let both = run(MainActor.assumeIsolated { confirmTrashReview([m1, m2]) }, "Self-test")
+        check("several moves are each recorded once in the Trash log",
+              both?.moved.count == 2 && entries(m1) == 1 && entries(m2) == 1)
+        check("each of them can be put back", putBack(m1) && putBack(m2)
+              && (try? String(contentsOf: m2, encoding: .utf8)) == "two")
+
+        // Interrupted after the first move: the first is recorded, the second untouched.
+        let i1 = file("interrupt-1", "first"), i2 = file("interrupt-2", "second")
+        AppCleanup.afterRecording = { _ in withUnsafeCurrentTask { $0?.cancel() } }
+        let interrupted = run(MainActor.assumeIsolated { confirmTrashReview([i1, i2]) }, "Self-test")
+        AppCleanup.afterRecording = nil
+        check("an interruption after the first move keeps its record and leaves the second alone",
+              interrupted?.moved.keys.sorted() == [i1.path] && entries(i1) == 1 && fm.fileExists(atPath: i2.path)
+              && interrupted?.report?.wasCancelled == true)
+        check("the interrupted batch's moved item can be put back",
+              putBack(i1) && (try? String(contentsOf: i1, encoding: .utf8)) == "first")
+
+        #if MACCLEANER_TEST_HOOKS
+        // Killed (SIGKILL) right after the first move was recorded, in a separate process.
+        let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
+        let child = Process()
+        child.executableURL = Bundle.main.executableURL
+        child.arguments = ["--selftest-child", "trash-then-die", k1.path, k2.path]
+        child.environment = ProcessInfo.processInfo.environment.merging(["MACCLEANER_SELFTEST_CHILD": "1"]) { _, new in new }
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        var started = true
+        do { try child.run(); child.waitUntilExit() } catch { started = false }
+        check("a process killed mid-batch dies after its first move (simulated crash)",
+              started && child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
+        check("the killed process's first move is in the Trash log, the second item untouched",
+              !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
+        check("Put Back restores the first move after the crash",
+              putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+        #else
+        print("  - SIGKILL crash test: runs in the test-hooks build only (scripts/build-test-hooks.sh, then the self-test)")
+        #endif
+
+        // A record that can't be written stops the run and is reported, never shown as a recoverable success.
+        let f1 = file("unrecorded-1", "reviewed"), f2 = file("unrecorded-2", "reviewed")
+        let saved = AppCleanup.recordMove
+        AppCleanup.recordMove = { _, _, _, _ in false }
+        let failed = run(MainActor.assumeIsolated { confirmTrashReview([f1, f2]) }, "Self-test")
+        AppCleanup.recordMove = saved
+        let f1Message = failed?.problems.first { $0.id == f1.path }?.message ?? ""
+        check("a move whose record can't be written is reported as not restorable from Mac Cleaner",
+              failed?.moved[f1.path] != nil && f1Message.contains("couldn't be recorded for Put Back") && entries(f1) == 0)
+        check("after a failed record, the rest are left alone and say why",
+              fm.fileExists(atPath: f2.path)
+              && failed?.problems.first { $0.id == f2.path }?.message == AppCleanup.unrecordedStop)
+        // Put the unrecorded file back by hand (the report says where it went).
+        if case .trashed(_, let where_)? = failed?.report?.outcomes.first(where: { $0.candidateID == f1.path })?.result {
+            try? fm.moveItem(atPath: where_, toPath: f1.path)
+        }
+        check("the unrecorded file was where the report said", fm.fileExists(atPath: f1.path))
+    }
+
+    // MARK: Shared files: checked writes need the lock
+
+    static func sharedFileLocking(dir: URL) {
+        let fm = FileManager.default
+        struct Row: Codable { let n: Int }
+        func count(_ f: URL) -> Int { (SharedFile.read(f) as [Row]).count }
+
+        // The lock file can't be opened (a folder is in its place).
+        let noLock = dir.appendingPathComponent("no-lock.json")
+        try? fm.createDirectory(atPath: noLock.path + ".lock", withIntermediateDirectories: true)
+        let refused = SharedFile.commit(noLock) { (rows: inout [Row]) in rows.append(Row(n: 1)); return true }
+        check("a checked write fails, writing nothing, when the lock file can't be opened",
+              !refused && !fm.fileExists(atPath: noLock.path))
+        check("a Trash log record fails the same way (so the run stops and says so)",
+              !TrashLog(file: noLock).record(original: "/x", trashed: "/y", size: 1, source: "Self-test", restorable: true)
+              && !fm.fileExists(atPath: noLock.path))
+        SharedFile.update(noLock) { (rows: inout [Row]) in rows.append(Row(n: 1)); return true }
+        check("existing unchecked writers keep their old behavior (written without the lock)", count(noLock) == 1)
+
+        // The lock can't be taken (flock fails).
+        let noFlock = dir.appendingPathComponent("no-flock.json")
+        let realLock = SharedFile.lockCall
+        SharedFile.lockCall = { _, _ in errno = ENOLCK; return -1 }
+        let refused2 = SharedFile.commit(noFlock) { (rows: inout [Row]) in rows.append(Row(n: 1)); return true }
+        SharedFile.lockCall = realLock
+        check("a checked write fails, writing nothing, when the lock can't be taken", !refused2 && !fm.fileExists(atPath: noFlock.path))
+
+        // Many writers at once (separate open lock files conflict, like separate processes): nothing is lost.
+        let busy = dir.appendingPathComponent("busy.json")
+        let failures = Box(0)
+        DispatchQueue.concurrentPerform(iterations: 12) { w in
+            for i in 0..<25 {
+                if w % 3 == 0 {
+                    SharedFile.update(busy) { (rows: inout [Row]) in rows.append(Row(n: w * 100 + i)); return true }
+                } else if !SharedFile.commit(busy, { (rows: inout [Row]) in rows.append(Row(n: w * 100 + i)); return true }) {
+                    failures.mutate { $0 += 1 }
+                }
+            }
+        }
+        check("concurrent checked and unchecked writers lose no entry", count(busy) == 300 && failures.value == 0)
+    }
+
+    #if MACCLEANER_TEST_HOOKS
+    /// `--selftest-child <task> ...`: work the self-test runs in a separate process. Compiled only into the
+    /// test-hooks build, never into Release. Even there it refuses unless started by the self-test
+    /// (MACCLEANER_SELFTEST_CHILD=1) in a throwaway home folder.
+    static func child(_ args: [String]) -> Int32 {
+        guard ProcessInfo.processInfo.environment["MACCLEANER_SELFTEST_CHILD"] == "1",
+              SafetyGuard.home.path != accountHome?.path else {
+            print("This mode is only for the self-test.")
+            return 2
+        }
+        guard args.count == 3, args[0] == "trash-then-die" else { return 2 }
+        let urls = [URL(fileURLWithPath: args[1]), URL(fileURLWithPath: args[2])]
+        // Kill this process the moment the first move has been recorded: no cleanup, no flushing.
+        AppCleanup.afterRecording = { _ in kill(getpid(), SIGKILL) }
+        let approval = MainActor.assumeIsolated { confirmTrashReview(urls) }
+        guard case .some(.some(let a)) = approval else { return 3 }
+        _ = wait { await AppCleanup.moveToTrash(a, source: "Self-test") }
+        return 4   // not reached when the first move succeeds
+    }
+    #endif
 }

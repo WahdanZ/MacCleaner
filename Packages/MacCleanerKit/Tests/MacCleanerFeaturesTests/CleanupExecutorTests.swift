@@ -170,6 +170,19 @@ struct ExecutorRevalidationTests {
             freedBytes: 0, kept: [KeptEntry(path: folder.path + "/nested", reason: .protected("Protected in Settings"))], damaged: []))
     }
 
+    @Test func aCallersPreconditionCanRefuseSingleItems() async throws {
+        let other = item("Library/Caches/b.log", inode: 9)
+        let fs = FakeFS([file, other])
+        let p = try plan([.init(candidate("f", [.file(file)]), .trash), .init(candidate("o", [.file(other)]), .trash)])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let approval = try await exec.approve(p, by: .userInApp)
+        #expect(await exec.outstandingApprovals == 1)
+        let report = try await exec.execute(p, approval: approval, precondition: { id, _ in id == "f" ? "no copy left" : nil })
+        #expect(results(report)[file.path] == .skipped(.preconditionFailed("no copy left")))
+        let left = await exec.outstandingApprovals
+        #expect(fs.ops == [.trash(other.path)] && left == 0)
+    }
+
     @Test func alreadyDeletedIsReportedAsMissing() async throws {
         let fs = FakeFS([file])
         let p = try plan([.init(candidate("f", [.file(file)]), .permanentDelete)])
@@ -406,3 +419,66 @@ func realPath(_ p: String) -> String {
     defer { free(r) }
     return String(cString: r)
 }
+
+// MARK: - Per-item completion
+
+/// Thread-safe list for completion callbacks.
+final class Journal<T: Sendable>: @unchecked Sendable {   // `items` behind `lock`
+    private let lock = NSLock()
+    private var items: [T] = []
+    func add(_ x: T) { lock.lock(); items.append(x); lock.unlock() }
+    var all: [T] { lock.lock(); defer { lock.unlock() }; return items }
+}
+
+@Suite("Executor: per-item completion")
+struct ExecutorCompletionTests {
+    let a = item("a", inode: 1), b = item("b", inode: 2), c = item("c", inode: 3)
+
+    @Test func eachItemIsFinishedBeforeTheNextIsTouched() async throws {
+        let fs = FakeFS([a, b, c])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let p = try plan([.init(candidate("a", [.file(a)]), .trash), .init(candidate("b", [.file(b)]), .trash),
+                          .init(candidate("c", [.file(c)]), .trash)])
+        let seen = Journal<(String, Int)>()   // (candidate, operations done when it was finished)
+        let approval = try await exec.approve(p, by: .userInApp)
+        let report = try await exec.execute(p, approval: approval, onItemFinished: { o in
+            seen.add((o.candidateID, fs.ops.count)); return nil
+        })
+        #expect(seen.all.map(\.0) == ["a", "b", "c"])
+        #expect(seen.all.map(\.1) == [1, 2, 3])   // a finished while only a had moved, and so on
+        #expect(report.allSucceeded)
+    }
+
+    @Test func stoppingAfterAnItemLeavesTheRestUntouched() async throws {
+        let fs = FakeFS([a, b, c])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let p = try plan([.init(candidate("a", [.file(a)]), .trash), .init(candidate("b", [.file(b)]), .trash),
+                          .init(candidate("c", [.file(c)]), .trash)])
+        let approval = try await exec.approve(p, by: .userInApp)
+        let report = try await exec.execute(p, approval: approval, onItemFinished: { o in
+            o.candidateID == "a" ? "couldn't record it" : nil
+        })
+        let r = results(report)
+        #expect(r[a.path] == .trashed(bytes: 100, recoveryPath: "/Users/tester/.Trash/a"))
+        #expect(r[b.path] == .skipped(.preconditionFailed("couldn't record it")) && r[c.path] == r[b.path])
+        #expect(fs.ops == [.trash(a.path)] && !report.wasCancelled && !report.allSucceeded)
+        // The approval was used by this run, stopped or not.
+        await #expect(throws: CleanupApproval.Refusal.alreadyUsed) { try await exec.execute(p, approval: approval) }
+    }
+
+    @Test func folderEntriesAreFinishedOneByOne() async throws {
+        let folder = item("F", inode: 10, kind: .directory)
+        let x = item("F/x", inode: 11), y = item("F/y", inode: 12)
+        let fs = FakeFS([folder, x, y])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let p = try plan([.init(candidate("f", [.directoryContents(folder: folder, entries: [x, y])]), .permanentDelete)])
+        let approval = try await exec.approve(p, by: .userInApp)
+        let report = try await exec.execute(p, approval: approval, onItemFinished: { o in
+            if case .file(let i) = o.target, i.path == x.path { return "stop after x" }
+            return nil
+        })
+        #expect(fs.ops == [.remove(x.path)])
+        #expect(results(report)[y.path] == .skipped(.preconditionFailed("stop after x")))
+    }
+}
+

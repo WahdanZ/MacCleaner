@@ -30,6 +30,10 @@ jobs:
       - name: Core tests (Swift 6 package)
         run: swift test --package-path Packages/MacCleanerKit
 
+      # Finds unexpected places that could issue a cleanup approval; the self-test checks the confirmation itself.
+      - name: Approval call sites
+        run: scripts/check-approval-sites.sh
+
       # A fresh checkout: nothing built or resolved before this step (the check below proves it).
       - name: Build (Release, ad-hoc signed, from a clean checkout)
         run: |
@@ -40,6 +44,17 @@ jobs:
 
       - name: Safety self-test (throwaway home folder)
         run: scripts/selftest.sh "$APP"
+
+      - name: No test-only modes in the Release app
+        run: scripts/check-no-test-hooks.sh "$APP"
+
+      # A separate, never-shipped build with MACCLEANER_TEST_HOOKS: adds the self-test's crash child, so the
+      # SIGKILL Trash-log test runs. Built after the Release checks so the clean-checkout check above holds.
+      - name: Self-test, test-hooks build (adds the SIGKILL crash test)
+        run: |
+          scripts/build-test-hooks.sh
+          scripts/check-no-test-hooks.sh --expect-hooks "build/test-hooks/Release/Mac Cleaner.app"
+          scripts/selftest.sh "build/test-hooks/Release/Mac Cleaner.app"
 
       - name: Command line check (read-only commands)
         run: |

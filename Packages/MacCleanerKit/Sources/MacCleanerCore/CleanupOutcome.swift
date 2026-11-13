@@ -58,6 +58,8 @@ public enum SkipReason: Sendable, Hashable {
     case missing
     /// An entry that appeared in a reviewed folder after review. Left alone: the person never saw it.
     case addedAfterReview
+    /// A check the caller asked for, run right before the item, refused it (e.g. "no identical copy is left").
+    case preconditionFailed(String)
     /// The person cancelled before this item.
     case cancelled
 }

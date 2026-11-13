@@ -302,25 +302,22 @@ final class DiskMapModel {
         NSWorkspace.shared.activateFileViewerSelecting([node.url])
     }
 
-    /// Moves marked items to the Trash (recoverable) and updates the tree.
-    /// Moves exactly the reviewed items to the Trash.
-    func trashMarked(_ items: [DiskNode]) async {
-        guard !items.isEmpty else { return }
+    /// Moves exactly the reviewed items to the Trash (approved path: each one is re-checked against what the review
+    /// sheet showed, and left alone if it changed) and updates the tree.
+    func trashMarked(_ items: [DiskNode], _ approval: TrashApproval?) async {
+        guard let approval, !items.isEmpty else { return }
         phase = .trashing
-        var errors: [String] = []
+        let run = await AppCleanup.moveToTrash(approval, source: "Storage Analysis")
+        let byID = Dictionary(items.map { ($0.url.path, $0) }, uniquingKeysWith: { a, _ in a })
+        var errors = run.problems.map { "\(byID[$0.id]?.name ?? $0.id): \($0.message)" }
         var bytes: Int64 = 0
         var count = 0
-        for n in items {
-            if let why = TrashGuard.reason(n.url) { errors.append("\(n.name): \(why)"); continue }
-            let url = n.url, sz = n.size
-            let ok: String? = await Task.detached(priority: .userInitiated) {
-                AppEngine.trash(url, size: sz, source: "Storage Analysis")
-            }.value
-            if let ok { errors.append("\(n.name): \(ok)"); continue }
+        for n in items where run.moved[n.url.path] != nil {
             bytes += n.size
             count += 1
             remove(n)
         }
+        if count + errors.count < items.count { errors.append("\(items.count - count - errors.count) item(s) weren't handled") }
         marked = [:]
         lastTrash = (count, bytes, errors)
         HistoryStore.shared.add("Files Moved to Trash", bytes: bytes, symbol: "chart.bar.xaxis", outcome: .trashed)

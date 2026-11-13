@@ -50,6 +50,12 @@ They need no files and no home folder. CI runs them before building the app.
 scripts/selftest.sh "build/Release/Mac Cleaner.app"
 ```
 
+The SIGKILL crash test (a move recorded in the Trash log survives the process being killed) needs a child
+process mode that must never ship, so it lives only in the **test-hooks build**: `scripts/build-test-hooks.sh`
+builds the app with `MACCLEANER_TEST_HOOKS` into `build/test-hooks/`, then run
+`scripts/selftest.sh "build/test-hooks/Release/Mac Cleaner.app"`. CI runs both self-tests, and
+`scripts/check-no-test-hooks.sh` fails CI and the release workflow if a test-only mode is in the Release app.
+
 It runs about 200 checks (the safety rules, the audit fixes, the scheduled clean timing, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one). The script gives it a fresh, empty home folder (`CFFIXED_USER_HOME` set to a `mktemp -d` folder that is deleted afterwards), so it never reads or changes your own files. The Protected list is kept in a throwaway settings domain for the run. Run directly (`--selftest`) it refuses to start in your real home folder unless `MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1` is set.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).

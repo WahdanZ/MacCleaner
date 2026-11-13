@@ -9,6 +9,12 @@ enum Entry {
         if args.count > 1 && args[1] == "--cli" {
             exit(CLI.run(Array(args.dropFirst(2))))
         }
+        #if MACCLEANER_TEST_HOOKS
+        // Only in the test-hooks build (scripts/build-test-hooks.sh), never in Release: the self-test's crash child.
+        if args.count > 1 && args[1] == "--selftest-child" {
+            exit(SelfTest.child(Array(args.dropFirst(2))))
+        }
+        #endif
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.installTestApprover()   // never show a real confirmation window during the self-test
             exit(SelfTest.run() ? 0 : 1)

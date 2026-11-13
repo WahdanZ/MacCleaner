@@ -169,20 +169,18 @@ final class LargeFilesModel {
         if marked.contains(f.id) { marked.remove(f.id) } else { marked.insert(f.id) }
     }
 
-    /// Moves exactly the reviewed files to the Trash.
-    func trashMarked(_ items: [BigFile]) async {
-        guard !items.isEmpty else { return }
+    /// Moves exactly the reviewed files to the Trash (approved path: each one is re-checked against what the review
+    /// sheet showed, and left alone if it changed).
+    func trashMarked(_ items: [BigFile], _ approval: TrashApproval?) async {
+        guard let approval, !items.isEmpty else { return }
         phase = .trashing
-        var bytes: Int64 = 0, errors: [String] = []
-        for f in items {
-            if let why = TrashGuard.reason(f.url) { errors.append("\(f.url.lastPathComponent): \(why)"); continue }
-            let u = f.url
-            if let e = await Task.detached(operation: { AppEngine.trash(u, size: f.size, source: "Large & Old Files") }).value {
-                errors.append("\(f.url.lastPathComponent): \(e)")
-            } else {
-                bytes += f.size
-                files.removeAll { $0.id == f.id }
-            }
+        let run = await AppCleanup.moveToTrash(approval, source: "Large & Old Files")
+        let byID = Dictionary(items.map { ($0.url.path, $0) }, uniquingKeysWith: { a, _ in a })
+        let errors = run.problems.map { "\(byID[$0.id]?.url.lastPathComponent ?? $0.id): \($0.message)" }
+        var bytes: Int64 = 0
+        for f in items where run.moved[f.url.path] != nil {
+            bytes += f.size
+            files.removeAll { $0.id == f.id }
         }
         marked = []
         HistoryStore.shared.add("Large & Old Files Moved to Trash", bytes: bytes, symbol: "folder", outcome: .trashed)
@@ -261,7 +259,7 @@ struct LargeFilesView: View {
                         .font(.system(size: 12)).foregroundStyle(Palette.dim)
                 }
                 Spacer()
-                Button { review.present(ReviewBuild.largeFiles(m) { files in Task { await m.trashMarked(files) } }) } label: {
+                Button { review.present(ReviewBuild.largeFiles(m) { files, approval in Task { await m.trashMarked(files, approval) } }) } label: {
                     Label(m.marked.isEmpty ? "Move to Trash" : "Move \(ByteText.string(m.markedBytes)) to Trash", systemImage: "trash")
                 }
                 .buttonStyle(.borderedProminent)

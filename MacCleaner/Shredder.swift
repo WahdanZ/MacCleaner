@@ -28,8 +28,11 @@ import UniformTypeIdentifiers
 /// are unrecoverable (copy-on-write, snapshots, wear levelling).
 enum ShredEngine {
     struct Result {
-        /// The whole item is gone.
+        /// The whole item is gone and nothing was left behind (no staging folder, nothing kept).
         var removed = false
+        /// The staging folder, when it couldn't be removed afterwards (it may hold items that couldn't be put
+        /// back, or something another app put there). The user is told where it is.
+        var leftover: String?
         /// Files that were overwritten, flushed and then deleted.
         var overwritten = 0
         /// Files and folders left in place after a step failed, with why. Nothing is ever deleted
@@ -88,6 +91,8 @@ enum ShredEngine {
         var afterOverwrite: ((URL) -> Void)? = nil
         /// After a folder's contents are done, right before the folder itself is removed.
         var beforeFolderRemove: ((URL) -> Void)? = nil
+        /// Right before the staging folder is removed, with its location.
+        var beforeStagingCleanup: ((URL) -> Void)? = nil
     }
 
     /// Why an item can't be shredded. Checked when it is added and again right before shredding,
@@ -348,10 +353,13 @@ enum ShredEngine {
 
         process(plan.root, in: pfd, path: plan.url.path)
         close(sfd)
+        hooks.beforeStagingCleanup?(URL(fileURLWithPath: stagePath))
         if unlinkat(pfd, stageName, AT_REMOVEDIR) != 0 {
-            r.kept.append("Some items couldn't be put back and are in \(stagePath)")
+            r.leftover = stagePath
+            r.kept.append("The shred's work folder couldn't be removed and may still hold items: \(stagePath)")
         }
-        r.removed = !stopped
+        // Only "removed" when the item is gone and nothing stayed behind anywhere.
+        r.removed = !stopped && r.leftover == nil
         if stopped {
             let total = plan.root.fileCount
             if total > r.overwritten { r.kept.append("\(total - r.overwritten) of \(total) file(s) were kept") }
@@ -411,9 +419,15 @@ final class ShredderModel {
             guard let plan = i.plan else { continue }
             let r = await Task.detached(operation: { ShredEngine.shred(plan) }).value
             if let why = r.refused { problems.append("\(u.lastPathComponent): \(why)"); continue }
+            var gone = stat()
             if r.removed {
                 bytes += i.size
                 items.removeAll { $0.id == i.id }
+            } else if let leftover = r.leftover, lstat(u.path, &gone) != 0 {
+                // The item itself is gone, but the work folder stayed (it may hold something): say where.
+                bytes += i.size
+                items.removeAll { $0.id == i.id }
+                problems.append("\(u.lastPathComponent): shredded, but its work folder couldn't be removed and may still hold items: \(leftover)")
             } else {
                 // Stopped part-way: what was overwritten is gone, the rest is untouched. Re-measure what's left.
                 partial += 1

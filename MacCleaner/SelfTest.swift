@@ -739,6 +739,20 @@ enum SelfTest {
         try? fm.createSymbolicLink(at: rootLink, withDestinationURL: shredLinkTarget)
         check("refuses a link as the item itself", ShredEngine.shred(rootLink).refused != nil
               && text(shredLinkTarget) == "outside" && (try? fm.destinationOfSymbolicLink(atPath: rootLink.path)) != nil)
+        // The staging folder can't be removed afterwards (here: another app drops a file into it). The item's
+        // own files are shredded, but the result must not say "removed": something stayed behind.
+        let (dLeft, _) = shredDir("shred-leftover", text: "L")
+        var leftHooks = ShredEngine.Hooks()
+        var stagingSeen: URL?
+        leftHooks.beforeStagingCleanup = { stage in
+            stagingSeen = stage
+            fm.createFile(atPath: stage.appendingPathComponent("intruder.txt").path, contents: Data("x".utf8))
+        }
+        let rLeft = ShredEngine.shred(dLeft, hooks: leftHooks)
+        check("a staging folder that can't be removed means the result is not 'removed', and says where it is",
+              !rLeft.removed && rLeft.overwritten == 1 && rLeft.leftover == stagingSeen?.path && rLeft.leftover != nil
+              && rLeft.kept.contains { $0.contains(stagingSeen?.path ?? "?") } && !fm.fileExists(atPath: dLeft.path))
+        if let stagingSeen { try? fm.removeItem(at: stagingSeen) }
         check("no staging folders are left anywhere in the test area", noStaging(sandbox))
 
         print("Audit fixes: update signatures")

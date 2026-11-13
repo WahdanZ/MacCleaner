@@ -204,8 +204,9 @@ enum MCPServer {
 
     private static func size(_ b: Int64) -> String { ByteText.string(b) }
 
-    /// `approval` is set only by the CLI (the person at the terminal said yes). Calls from the MCP connection
-    /// pass nil, so every confirm from an AI client also needs the person's yes in Mac Cleaner's own window.
+    /// `approval` is set only by the CLI: `.terminal` when a person typed "yes" at its prompt, `.yesFlag` for the
+    /// `--yes` override (no prompt, not a person's confirmation). Calls from the MCP connection pass nil, so every
+    /// confirm from an AI client also needs the person's yes in Mac Cleaner's own window.
     static func call(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
         let confirm = a["confirm"] as? Bool ?? false
         switch name {
@@ -587,8 +588,12 @@ enum MCPServer {
                     continue
                 }
                 guard reported.insert(u.path).inserted else { errors.append("\(Scanner.tilde(u)): listed more than once"); continue }
+                // An item can be both moved and have a problem (moved, but its Put Back record couldn't be written):
+                // report both.
+                let problems = run.problems.filter { $0.id == u.path }.map(\.message)
                 if run.moved[u.path] != nil { moved.append(Scanner.tilde(u)) }
-                else { errors.append("\(Scanner.tilde(u)): \(run.problems.first { $0.id == u.path }?.message ?? "not moved")") }
+                else if problems.isEmpty { errors.append("\(Scanner.tilde(u)): not moved") }
+                for p in problems { errors.append("\(Scanner.tilde(u)): \(p)") }
             }
             return ["moved_to_trash": moved, "errors": errors, "note": "Empty the Trash to free the space."]
 
@@ -633,8 +638,8 @@ enum MCPServer {
     }
 
     /// Checks a confirm: a single-use preview_id for this tool, issued less than 10 minutes ago, whose items are
-    /// still exactly the same files (path and file identity). Then, unless the person already approved at the
-    /// terminal, Mac Cleaner asks them in its own window, showing the preview's list. The preview is used up
+    /// still exactly the same files (path and file identity). Then, unless the CLI already approved it (a typed
+    /// "yes", or the --yes override), Mac Cleaner asks the person in its own window, showing the preview's list. The preview is used up
     /// either way, so a refused confirm can't be retried without a new preview.
     @discardableResult
     static func approve(_ tool: String, _ digest: String, _ a: [String: Any], _ approval: ToolApproval? = nil,

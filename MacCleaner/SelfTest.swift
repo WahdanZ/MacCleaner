@@ -1767,6 +1767,26 @@ extension SelfTest {
             p.waitUntilExit()
             return (p.terminationStatus, String(decoding: data, as: UTF8.self))
         }
+        // Moved, but the Put Back record couldn't be written: the answer must say both, and the rest stay untouched.
+        func recovery(_ message: String) -> String? {
+            guard let open = message.range(of: "moved to the Trash ("), let close = message.range(of: "), but") else { return nil }
+            return String(message[open.upperBound..<close.lowerBound])
+        }
+        let u1 = file("mcp-unrecorded-1", "one"), u2 = file("mcp-unrecorded-2", "two")
+        let saved = AppCleanup.recordMove
+        AppCleanup.recordMove = { _, _, _, _ in false }
+        let unrecorded = confirm([u1, u2], previewID([u1, u2]))
+        AppCleanup.recordMove = saved
+        let uErrors = unrecorded?["errors"] as? [String] ?? []
+        let u1Error = uErrors.first { $0.hasPrefix(Scanner.tilde(u1) + ":") } ?? ""
+        check("MCP reports a move whose Put Back record failed as moved AND as an error",
+              (unrecorded?["moved_to_trash"] as? [String]) == [Scanner.tilde(u1)]
+              && u1Error.contains("couldn't be recorded for Put Back") && !fm.fileExists(atPath: u1.path) && log(u1).isEmpty)
+        check("MCP leaves the rest untouched after a failed record and says why",
+              fm.fileExists(atPath: u2.path) && uErrors.contains("\(Scanner.tilde(u2)): \(AppCleanup.unrecordedStop)"))
+        if let where_ = recovery(u1Error) { try? fm.moveItem(atPath: where_, toPath: u1.path) }
+        check("the unrecorded MCP move was where the answer said", fm.fileExists(atPath: u1.path))
+
         let c = file("cli-real", "cli")
         let noYes = cli(["trash-files", c.path])
         check("the CLI without --yes and without a keyboard changes nothing and exits 2",
@@ -1777,6 +1797,30 @@ extension SelfTest {
         check("the CLI's --yes move is logged as an override and Put Back restores it",
               log(c).first?.source == "Command line (--yes, not confirmed by a person)" && putBack(c)
               && (try? String(contentsOf: c, encoding: .utf8)) == "cli")
+
+        // The same through the real CLI (a separate process): make its Trash log unwritable (a folder where the
+        // log's lock file goes), so its record fails closed, then read its JSON answer.
+        let logDir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
+        let lockBlocker = logDir.appendingPathComponent("trash-log.json.lock")
+        try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
+        let hadLock = fm.fileExists(atPath: lockBlocker.path)
+        if hadLock { try? fm.removeItem(at: lockBlocker) }
+        try? fm.createDirectory(at: lockBlocker, withIntermediateDirectories: false)
+        let k1 = file("cli-unrecorded-1", "one"), k2 = file("cli-unrecorded-2", "two")
+        let blocked = cli(["trash-files", k1.path, k2.path, "--yes", "--json"])
+        try? fm.removeItem(at: lockBlocker)
+        // With --json the CLI prints the preview, then the result: read the last JSON document.
+        let last = blocked.out.range(of: "\n{", options: .backwards).map { String(blocked.out[$0.lowerBound...]) } ?? blocked.out
+        let answer = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any]
+        let kErrors = answer?["errors"] as? [String] ?? []
+        let k1Error = kErrors.first { $0.hasPrefix(Scanner.tilde(k1) + ":") } ?? ""
+        check("the CLI's JSON answer reports the move AND the missing Put Back record",
+              (answer?["moved_to_trash"] as? [String]) == [Scanner.tilde(k1)] && k1Error.contains("couldn't be recorded for Put Back")
+              && !fm.fileExists(atPath: k1.path))
+        check("the CLI leaves the rest untouched after a failed record and says why",
+              fm.fileExists(atPath: k2.path) && kErrors.contains("\(Scanner.tilde(k2)): \(AppCleanup.unrecordedStop)"))
+        if let where_ = recovery(k1Error) { try? fm.moveItem(atPath: where_, toPath: k1.path) }
+        check("the unrecorded CLI move was where the answer said", fm.fileExists(atPath: k1.path))
     }
 
     #if MACCLEANER_TEST_HOOKS

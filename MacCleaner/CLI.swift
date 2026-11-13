@@ -129,7 +129,8 @@ enum CLI {
             guard var a = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { err("Arguments must be a JSON object."); return 64 }
             if (a["confirm"] as? Bool) == true {
                 guard yes else { err("For safety, `tool` with confirm: true also needs --yes."); return 64 }
-                // --yes is the person at the keyboard approving: preview the same arguments, then confirm that preview.
+                // --yes is a non-interactive override, not a person confirming (attributed as such, never as a typed
+                // "yes"): preview the same arguments, then confirm that preview.
                 if a["preview_id"] == nil {
                     var p = a; p["confirm"] = false
                     do { a["preview_id"] = (try MCPServer.call(args[1], p) as? [String: Any])?["preview_id"] }

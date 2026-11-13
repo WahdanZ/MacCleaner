@@ -132,7 +132,66 @@ The two failures under a relocated home are fixture-environment issues, not prod
 `Trash refuses a file reached through a linked folder` needs `~/Library/Keychains` to exist, and
 `Storage Map keeps a non-ASCII name exactly as stored` compared full paths, which differ as `/tmp/…` vs
 `/private/tmp/…` (same folder) when home is under `/private` (RISK-014; fixed on main by #28).
-App startup, scan latency and memory were not measured in this pass.
+App startup, scan latency and memory were not measured in this pass; see §8a.
+
+## 8a. Performance baseline (M01-01) — `main` at `73e8d3c`, after M00
+
+### Environment
+
+| | |
+|---|---|
+| Machine | MacBook Pro (`MacBookPro18,3`), Apple M1 Pro, 8 cores (6 performance + 2 efficiency), 16 GB RAM |
+| Disk | internal SSD, APFS (case-insensitive), FileVault state not recorded |
+| OS / tools | macOS 26.0 (25A354), Xcode 26.3 (17C529), Swift 6.2.4 |
+| Power | on AC, battery 80 %, not charging |
+| Build | Release, ad-hoc signed, hardened runtime (`scripts`-equivalent `xcodebuild … -configuration Release CODE_SIGN_IDENTITY=-`) |
+| Process | launched from a terminal shell **without Full Disk Access**; other apps were running (normal desktop use, load not controlled) |
+| Data | the maintainer's real home folder, ~2.26 million files, ~256 GB; read-only (`--cli bench` deletes nothing) |
+| Date | 2026-11-13 |
+
+### Method
+
+* `"Mac Cleaner" --cli bench --runs 3`: every scan runs **3 times in a row** in one process, through the same models
+  the window uses; the table shows the **median** and the **fastest** of the 3. `SizeCache` is off (each run walks
+  the disk again), but the OS file-system cache is warm after the first run, so these are mostly warm-cache numbers.
+* "Max main-thread stall" is the longest time the main actor was blocked during the scan (the window could not redraw).
+* CLI start: `/usr/bin/time -p "Mac Cleaner" --cli status --json`, 5 runs; memory from `/usr/bin/time -l`.
+
+### Results
+
+| Measure | Median of 3 | Min | Max main-thread stall | Result |
+|---|---|---|---|---|
+| Junk Files scan | 9.68 s | 9.51 s | 0.011 s | 63 items, 50.8 GB |
+| Storage Map (home) | 20.29 s | 16.16 s | 0.069 s | 2,259,389 files, 255.5 GB |
+| Duplicates (default folders) | 0.47 s | 0.47 s | 0.012 s | 25 groups, 155.6 MB |
+| Large & Old Files | 5.29 s | 5.08 s | 0.121 s | 520 files, 73.1 GB |
+| Projects | 4.66 s | 3.94 s | 0.035 s | 247 projects, 27.6 GB |
+| Developer SDKs | 4.11 s | 3.99 s | 0.012 s | 88 items, 37.0 GB |
+| Applications | 9.56 s | 8.71 s | 0.054 s | 65 apps, 76.4 GB |
+| System Data | 0.11 s | 0.09 s | 0.010 s | 0 items (needs Full Disk Access) |
+| Overview | 13.17 s | 12.51 s | 0.036 s | — |
+| CLI start (`--cli status`) | first run 0.89 s, then 0.03–0.04 s | | | 17 MB max resident |
+
+Peak queued folder jobs in the shared walker: 13,218 (storage/large), 16,685 (overview).
+
+### Limitations
+
+* One machine, one data set, 3 runs per scan, uncontrolled background load: differences under ~10 % are noise.
+  Compare branches on the same Mac, back to back, with the same command.
+* Warm OS cache; cold-cache (after reboot) times are not measured.
+* No Full Disk Access, so System Data and protected folders are not part of these numbers.
+* `bench` drives the models without the window; SwiftUI rendering cost is not included.
+
+### Follow-ups (not measured yet, explicitly open)
+
+| ID | Measure | How | When |
+|---|---|---|---|
+| PERF-FU-1 | Window launch to first frame | Instruments *App Launch* template on the Release app, 5 launches, cold and warm | before M01-05 |
+| PERF-FU-2 | Memory during a full scan (peak and after) | Instruments *Allocations* / `footprint` during Storage Map and Junk scans | before M01-05 |
+| PERF-FU-3 | Menu bar idle CPU and wake-ups | Instruments *Energy* / `top -pid` over 10 min with only the menu bar panel loaded | before M04A |
+
+Every M01 change that touches scanning compares against these numbers (MIGRATION_PLAN Stage E: more than 10 %
+slower needs a recorded reason or is reverted).
 
 ## 9. Pull requests
 

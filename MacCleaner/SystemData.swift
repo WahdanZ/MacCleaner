@@ -1,4 +1,5 @@
 import AppKit
+import MacCleanerCore
 import Observation
 import SwiftUI
 
@@ -20,6 +21,8 @@ struct SysItem: Identifiable, Sendable, Hashable {
     let action: Action
     var review = false
     var needsPassword = false
+    /// For a Trash item: what the scan found, captured when it found it (see SDKItem.identity).
+    var identity: FileIdentity? = nil
 }
 
 struct SysReport: Sendable {
@@ -67,7 +70,7 @@ enum SystemDataEngine {
                 r.items.append(SysItem(id: b.path, section: .backups, name: device,
                                        detail: [product, os.map { "iOS \($0)" }, date.map { "backed up " + $0.formatted(date: .abbreviated, time: .omitted) }]
                                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
-                                       size: size, reveal: b, action: .trash(b), review: true))
+                                       size: size, reveal: b, action: .trash(b), review: true, identity: AppCleanup.snapshot(b)))
             }
         } catch {
             if fm.fileExists(atPath: backups.deletingLastPathComponent().path) || isPermission(error) { r.needsFDA.insert(.backups) }
@@ -87,7 +90,7 @@ enum SystemDataEngine {
             for (u, s, d) in files.sorted(by: { $0.1 > $1.1 }).prefix(largestAttachments) where s > 0 {
                 r.items.append(SysItem(id: u.path, section: .messages, name: u.lastPathComponent,
                                        detail: (d.map { $0.formatted(date: .abbreviated, time: .omitted) } ?? "") + " · Messages will show it as unavailable",
-                                       size: s, reveal: u, action: .trash(u), review: true))
+                                       size: s, reveal: u, action: .trash(u), review: true, identity: AppCleanup.snapshot(u)))
             }
             r.totals[.messages] = files.prefix(largestAttachments).reduce(0) { $0 + $1.1 }
         }
@@ -110,7 +113,7 @@ enum SystemDataEngine {
             let first = (try? fm.contentsOfDirectory(atPath: d.path))?.first { !$0.hasPrefix(".") }
             r.items.append(SysItem(id: d.path, section: .mail, name: first ?? d.lastPathComponent,
                                    detail: "Attachment you opened from Mail (a copy; the email keeps the original)",
-                                   size: s, reveal: d, action: .trash(d)))
+                                   size: s, reveal: d, action: .trash(d), identity: AppCleanup.snapshot(d)))
         }
         r.totals[.mail] = r.items.filter { $0.section == .mail }.reduce(0) { $0 + ($1.size ?? 0) }
 
@@ -175,7 +178,10 @@ enum SystemDataEngine {
             }
         }
         let trashItems = items.filter { if case .trash = $0.action { return true }; return false }
-        let t = AppCleanup.engineTrash(trashItems.map { ($0.id, $0.name) }, trash, source: trashSource)
+        let t = AppCleanup.engineTrash(trashItems.compactMap { i -> AppCleanup.EngineTrashItem? in
+            guard case .trash(let u) = i.action else { return nil }
+            return (i.id, i.name, u, i.identity)
+        }, module: "system-data", trash, source: trashSource)
         for i in trashItems where t.moved[i.id] != nil { bytes += i.size ?? 0 }
         errors += t.errors
         return (bytes, freed, errors, cancelled)

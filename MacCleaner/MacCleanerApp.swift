@@ -10,7 +10,11 @@ enum Entry {
             exit(CLI.run(Array(args.dropFirst(2))))
         }
         #if MACCLEANER_TEST_HOOKS
-        // Only in the test-hooks build (scripts/build-test-hooks.sh), never in Release: the self-test's crash child.
+        // Only in the test-hooks build (scripts/build-test-hooks.sh), never in Release: the self-test runs CLI processes
+        // whose Trash must be its isolated folder, and its crash child.
+        if args.count > 1 && args[1] == "--cli", let dir = ProcessInfo.processInfo.environment["MACCLEANER_TEST_TRASH_DIR"] {
+            SelfTest.isolateTrash(in: URL(fileURLWithPath: dir))
+        }
         if args.count > 1 && args[1] == "--selftest-child" {
             exit(SelfTest.child(Array(args.dropFirst(2))))
         }

@@ -166,8 +166,9 @@ enum ReviewBuild {
         sdks(m.chosen, perform: perform)
     }
 
-    /// Archives (`.trash`) are approved-Trash items: their identity is captured now, when the sheet opens, and the
-    /// Trash plan is built from exactly them. Everything else keeps its own flow.
+    /// Archives (`.trash`) are approved-Trash items: the plan holds the identity the scan captured (what the sheet
+    /// describes), and only if the same item is still there when the sheet opens; otherwise the row is blocked and
+    /// needs a rescan. Everything else keeps its own flow.
     static func sdks(_ chosen: [SDKItem], perform: @escaping ([SDKItem], TrashApproval?) -> Void) -> ReviewRequest {
         let items = chosen.map { i -> ReviewItem in
             let action: ReviewItem.Action = {
@@ -180,8 +181,7 @@ enum ReviewBuild {
             var snap: FileIdentity?
             var blocked = SDKEngine.reason(i)
             if case .trash(let u) = i.action, blocked == nil {
-                snap = AppCleanup.snapshot(u)
-                if snap == nil { blocked = "It's no longer there" }
+                (snap, blocked) = AppCleanup.scannedSnapshot(u, scanned: i.identity)
             }
             return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? "\(i.group.rawValue) · \(i.detail)",
                               size: i.size, action: action,
@@ -201,16 +201,15 @@ enum ReviewBuild {
         systemData(m.chosen, perform: perform)
     }
 
-    /// Trash items are approved-Trash items: identity captured now, plan built from exactly them. Snapshots keep
-    /// their password flow.
+    /// Trash items are approved-Trash items: the plan holds the scan's identity, only if the same item is still
+    /// there when the sheet opens (otherwise blocked, rescan). Snapshots keep their password flow.
     static func systemData(_ chosen: [SysItem], perform: @escaping ([SysItem], TrashApproval?) -> Void) -> ReviewRequest {
         let items = chosen.map { i -> ReviewItem in
             let snapshot: Bool = { if case .snapshot = i.action { return true }; return false }()
             var snap: FileIdentity?
             var blocked = SystemDataEngine.reason(i)
             if case .trash(let u) = i.action, blocked == nil {
-                snap = AppCleanup.snapshot(u)
-                if snap == nil { blocked = "It's no longer there" }
+                (snap, blocked) = AppCleanup.scannedSnapshot(u, scanned: i.identity)
             }
             return ReviewItem(id: i.id, name: i.name, location: i.reveal?.path ?? i.section.rawValue, size: i.size,
                               action: snapshot ? .command : .trash, risk: i.review ? .review : .safe,

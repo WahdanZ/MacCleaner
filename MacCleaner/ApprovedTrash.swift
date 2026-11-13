@@ -13,7 +13,14 @@ import MacCleanerPlatform
 
 /// One cleanup executor for this process (the app, a `--cli` run or an `--mcp` server each have their own).
 enum AppCleanup {
-    static let executor = CleanupExecutor(fileSystem: LocalFileSystem(), protection: AppProtection())
+    /// Moves one item to the Trash and returns where it went: the system Trash (FileManager.trashItem) in the app,
+    /// the CLI and the MCP server. Every Trash move goes through here (the executor's file system and the legacy
+    /// AppEngine.trash). Only the self-test replaces it, at its start, with a folder in its throwaway home, so tests
+    /// never touch the real Trash (trashItem ignores CFFIXED_USER_HOME).
+    nonisolated(unsafe) static var trashMover: LocalFileSystem.TrashMover = LocalFileSystem.systemTrash
+
+    static let executor = CleanupExecutor(fileSystem: LocalFileSystem(trashMover: { try AppCleanup.trashMover($0) }),
+                                          protection: AppProtection())
 
     /// `url` with the symlinks in its parent folders resolved (realpath), the item itself not followed. The executor
     /// refuses a symlink anywhere in a path, and URL standardization turns /private/var back into /var.
@@ -124,11 +131,30 @@ enum AppCleanup {
         return slot.run ?? TrashRun()
     }
 
+    /// For an item a scan found and a screen describes (name, size, risk from the scan): the identity to approve
+    /// — the scan's own — or why it can't be approved. If what is at `url` now isn't the item the scan found, the
+    /// selection is stale: it is refused and needs a rescan, never re-captured under the old description.
+    static func scannedSnapshot(_ url: URL, scanned: FileIdentity?) -> (identity: FileIdentity?, refusal: String?) {
+        guard let scanned else { return (nil, "It wasn't identified when it was found. Scan again to review it") }
+        guard let now = snapshot(url) else { return (nil, "It's no longer there") }
+        if scanned.path != now.path || scanned.mismatch(against: now) != nil {
+            return (nil, "It changed since the scan. Scan again to review it")
+        }
+        return (scanned, nil)
+    }
+
+    /// One reviewed Trash item of an engine: its id, display name, the URL its `.trash` action names, and the
+    /// identity its scan captured.
+    typealias EngineTrashItem = (id: String, name: String, url: URL, identity: FileIdentity?)
+
     /// The Trash part of an engine's run (SDK archives, System Data): moves exactly the approved items among the
-    /// engine's reviewed Trash items `items` (id, display name). It never makes an approval; it uses the one given.
-    /// Nothing moves (every item says why) when there is no approval, or the approved plan holds anything that isn't
-    /// one of `items`. A reviewed Trash item missing from the plan is reported and left alone.
-    static func engineTrash(_ items: [(id: String, name: String)], _ decision: TrashApproval?,
+    /// engine's reviewed Trash items. It never makes an approval and never re-captures or rebuilds the plan; it uses
+    /// the one given, unchanged. Nothing at all moves (every item says why) when there is no approval, or the plan
+    /// isn't exactly a set of this engine's reviewed Trash items: each entry must be a `.trash` of `module`, name one
+    /// of `items` by id, have exactly one target whose path is that item's `.trash` URL and whose identity is the
+    /// item's scanned identity, and no two entries may name the same target. A reviewed item not in the plan is
+    /// reported and left alone.
+    static func engineTrash(_ items: [EngineTrashItem], module: String, _ decision: TrashApproval?,
                             source: String) -> (moved: [String: Int64], errors: [String]) {
         guard !items.isEmpty else { return ([:], []) }
         guard let decision else {
@@ -136,10 +162,10 @@ enum AppCleanup {
         }
         let plan: CleanupPlan
         switch decision { case .approved(let a): plan = a.plan; case .refused(let p, _): plan = p }
-        let ids = Set(items.map(\.id)), planned = Set(plan.candidates.map(\.id))
-        guard planned.isSubset(of: ids) else {
-            return ([:], items.map { "\($0.name): the approved list doesn't match the items, so nothing was moved" })
+        if let why = planMismatch(plan, items, module: module) {
+            return ([:], items.map { "\($0.name): the approved list doesn't match the items (\(why)), so nothing was moved" })
         }
+        let planned = Set(plan.candidates.map(\.id))
         var errors = items.filter { !planned.contains($0.id) }.map {
             "\($0.name): it wasn't in the reviewed list for the Trash, so it was left alone"
         }
@@ -147,6 +173,27 @@ enum AppCleanup {
         let names = Dictionary(items.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         for p in run.problems { errors.append("\(names[p.id] ?? p.id): \(p.message)") }
         return (run.moved, errors)
+    }
+
+    /// nil when every plan entry is exactly one of `items`' Trash actions, as reviewed; otherwise what doesn't fit.
+    static func planMismatch(_ plan: CleanupPlan, _ items: [EngineTrashItem], module: String) -> String? {
+        var byID: [String: EngineTrashItem] = [:]
+        for i in items {
+            guard byID[i.id] == nil else { return "item \(i.id) is listed twice" }
+            byID[i.id] = i
+        }
+        var targets = Set<String>()
+        for e in plan.entries {
+            let c = e.candidate
+            guard e.disposition == .trash else { return "\(c.id) isn't a Trash move" }
+            guard c.module == module else { return "\(c.id) belongs to \(c.module), not \(module)" }
+            guard let item = byID[c.id] else { return "\(c.id) isn't one of the reviewed items" }
+            guard c.targets.count == 1, case .file(let f) = c.targets[0] else { return "\(c.id) doesn't name exactly one item" }
+            guard f.path == physicalPath(item.url) else { return "\(c.id) names a different path than its item" }
+            guard let scanned = item.identity, f == scanned else { return "\(c.id) isn't the item the scan found" }
+            guard targets.insert(f.path).inserted else { return "\(f.path) is named twice" }
+        }
+        return nil
     }
 
     static func text(_ r: ItemOutcome.Result) -> String {

@@ -1,4 +1,5 @@
 import Foundation
+import MacCleanerCore
 import Observation
 
 /// One removable SDK component: a simulator runtime, a DeviceSupport folder, an Android system image, a Docker group…
@@ -28,6 +29,9 @@ struct SDKItem: Identifiable, Sendable, Hashable {
     var note: String?
     var review = false
     let regen: String
+    /// For an archive (`.trash`): what the scan found, captured when it found it. The review approves exactly this
+    /// item; if something else is there by then, the selection is refused and needs a rescan.
+    var identity: FileIdentity? = nil
 
     var isProtected: Bool {
         switch action {
@@ -156,7 +160,7 @@ enum SDKEngine {
                                      detail: (date?.formatted(date: .abbreviated, time: .omitted) ?? day.lastPathComponent)
                                         + " · keep it if you need to read crash reports for this build",
                                      size: Scanner.allocatedSize(a), reveal: a, action: .trash(a), review: true,
-                                     regen: "can't be rebuilt exactly; goes to the Trash"))
+                                     regen: "can't be rebuilt exactly; goes to the Trash", identity: AppCleanup.snapshot(a)))
             }
         }
         return items
@@ -440,7 +444,10 @@ enum SDKEngine {
             if ok { bytes += item.size }
         }
         if let first = archives.first { progress(first.name) }
-        let t = AppCleanup.engineTrash(archives.map { ($0.id, $0.name) }, trash, source: trashSource)
+        let t = AppCleanup.engineTrash(archives.compactMap { a -> AppCleanup.EngineTrashItem? in
+            guard case .trash(let u) = a.action else { return nil }
+            return (a.id, a.name, u, a.identity)
+        }, module: "sdks", trash, source: trashSource)
         for a in archives where t.moved[a.id] != nil {
             bytes += a.size
             trashed += a.size

@@ -1,6 +1,7 @@
 import AppKit
 import CoreServices
 import Foundation
+import MacCleanerPlatform
 import Observation
 
 struct AppLeftover: Identifiable, Sendable {
@@ -691,12 +692,9 @@ enum AppEngine {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         if let why = ProtectedPaths.reason(url) { return why }
         let bytes = size ?? Scanner.allocatedSize(url)
-        var out: NSURL?
-        do { try FileManager.default.trashItem(at: url, resultingItemURL: &out) }
-        catch { return error.localizedDescription }
-        if let dest = out as URL? {
-            TrashLog.shared.record(original: url.path, trashed: dest.path, size: bytes, source: source, restorable: restorable)
-        }
+        let dest: URL
+        do { dest = try AppCleanup.trashMover(url) } catch { return error.localizedDescription }
+        TrashLog.shared.record(original: url.path, trashed: dest.path, size: bytes, source: source, restorable: restorable)
         return nil
     }
 

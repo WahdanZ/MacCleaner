@@ -164,9 +164,9 @@ enum TrashGuard {
 enum ProtectedPaths {
     static let key = "protectedPaths"
 
-    /// Where the list is kept. Only the self-test changes it, once at start and back at the end, to a
-    /// throwaway domain so it never edits the user's list; nothing else runs concurrently at that point.
-    nonisolated(unsafe) static var store: UserDefaults = .standard
+    /// Where the list is kept. Only the self-test changes it, once at start and back at the end, to an
+    /// in-memory store so it never writes the user's settings; nothing else runs concurrently at that point.
+    nonisolated(unsafe) static var store: SettingsStore = UserDefaults.standard
 
     static var all: [String] { store.stringArray(forKey: key) ?? [] }
 
@@ -202,4 +202,31 @@ enum ProtectedPaths {
         let p = normalize(url.path)
         return all.contains { p == $0 || p.hasPrefix($0 + "/") }
     }
+}
+
+/// The few settings calls the Protected list and the settings migration need. `UserDefaults` provides them;
+/// the self-test uses `MemorySettings`, so it never writes the user's preferences.
+protocol SettingsStore: AnyObject {
+    func object(forKey defaultName: String) -> Any?
+    func string(forKey defaultName: String) -> String?
+    func stringArray(forKey defaultName: String) -> [String]?
+    func bool(forKey defaultName: String) -> Bool
+    func set(_ value: Any?, forKey defaultName: String)
+    func set(_ value: Bool, forKey defaultName: String)
+    func removeObject(forKey defaultName: String)
+}
+
+extension UserDefaults: SettingsStore {}
+
+/// Settings kept in memory only (self-test). Not shared between processes and gone when the process ends.
+final class MemorySettings: SettingsStore {
+    private var values: [String: Any]
+    init(_ values: [String: Any] = [:]) { self.values = values }
+    func object(forKey k: String) -> Any? { values[k] }
+    func string(forKey k: String) -> String? { values[k] as? String }
+    func stringArray(forKey k: String) -> [String]? { values[k] as? [String] }
+    func bool(forKey k: String) -> Bool { values[k] as? Bool ?? false }
+    func set(_ v: Any?, forKey k: String) { values[k] = v }
+    func set(_ v: Bool, forKey k: String) { values[k] = v }
+    func removeObject(forKey k: String) { values[k] = nil }
 }

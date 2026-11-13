@@ -35,32 +35,36 @@ enum SelfTest {
             return false
         }
         let h = { (rel: String) in home.appendingPathComponent(rel) }
-        let runID = UUID().uuidString.prefix(8).lowercased()
+        let runUUID = UUID().uuidString.lowercased()
+        let runID = runUUID.prefix(8)
         let sandbox = h(".maccleaner-selftest-\(runID)")
         let cacheLink = h(".cache/maccleaner-selftest-\(runID)-link")
         let cacheItem = h(".cache/maccleaner-selftest-\(runID)-item")
-        // Only ever work in folders this run created: if the name is taken, stop before touching anything.
-        try? fm.createDirectory(at: h(".cache"), withIntermediateDirectories: true)
+        // Only ever work in folders this run created: if a name is taken, stop before touching anything.
+        let madeCacheFolder = !fm.fileExists(atPath: h(".cache").path)
+            && (try? fm.createDirectory(at: h(".cache"), withIntermediateDirectories: false)) != nil
         guard (try? fm.createDirectory(at: sandbox, withIntermediateDirectories: false)) != nil,
               !fm.fileExists(atPath: cacheLink.path), !fm.fileExists(atPath: cacheItem.path) else {
             print("Self-test setup failed: \(sandbox.path) couldn't be created as a new folder. Nothing was changed.")
             return false
         }
-        // The Protected list lives in a throwaway settings domain for this run, never the user's own.
-        let suite = "io.github.wahdanz.maccleaner.selftest"   // emptied at the end; one fixed name so runs leave no new files
-        guard let testDefaults = UserDefaults(suiteName: suite) else {
-            print("Self-test setup failed: no test settings domain."); try? fm.removeItem(at: sandbox); return false
-        }
+        // The Protected list lives in memory for this run: nothing is written to the user's settings.
         let realStore = ProtectedPaths.store
-        ProtectedPaths.store = testDefaults
+        let realProtectedBefore = realStore.object(forKey: ProtectedPaths.key) as? [String]
+        ProtectedPaths.store = MemorySettings()
         let savedProtected = ProtectedPaths.all
         defer {
             ProtectedPaths.store = realStore
-            UserDefaults.standard.removePersistentDomain(forName: suite)
             try? fm.removeItem(at: sandbox)
             try? fm.removeItem(at: cacheLink)
             try? fm.removeItem(at: cacheItem)
+            if madeCacheFolder { try? fm.removeItem(at: h(".cache")) }   // only if this run made it (and left it empty)
         }
+        print("Isolation")
+        ProtectedPaths.set([h("selftest-sentinel-\(runID)").path])
+        check("the Protected list used by the tests is not the user's",
+              ProtectedPaths.all.count == 1 && (realStore.object(forKey: ProtectedPaths.key) as? [String]) == realProtectedBefore)
+        ProtectedPaths.set(savedProtected)
         try? fm.createDirectory(at: sandbox.appendingPathComponent("keep/inner"), withIntermediateDirectories: true)
         fm.createFile(atPath: sandbox.appendingPathComponent("keep/inner/file.txt").path, contents: Data("x".utf8))
         fm.createFile(atPath: sandbox.appendingPathComponent("loose.txt").path, contents: Data("x".utf8))
@@ -129,7 +133,9 @@ enum SelfTest {
 
         print("Trash and Put Back")
         ProtectedPaths.set(savedProtected)
-        let rt = sandbox.appendingPathComponent("roundtrip.txt")
+        // The one test that uses the real Trash (trashItem always uses the volume's Trash, whatever the home
+        // folder): a file this run created, with a per-run name, put back right away.
+        let rt = sandbox.appendingPathComponent("roundtrip-\(runID).txt")
         fm.createFile(atPath: rt.path, contents: Data("roundtrip".utf8))
         let trashErr = AppEngine.trash(rt, source: "Self-test")
         let entry = TrashLog.shared.present().first { $0.original == rt.path }
@@ -317,26 +323,20 @@ enum SelfTest {
         check("daily: due again the next day", daily.isDue(now: at(19, 10, 5), lastRun: at(18, 10, 1), armedAt: at(1, 0), calendar: utc))
 
         print("Settings migration (old app ID)")
-        let oldName = "maccleaner.selftest.old", newName = "maccleaner.selftest.new"
-        UserDefaults.standard.setPersistentDomain([ProtectedPaths.key: ["/a/keep", "/b/keep"], "appearance": "dark",
-                                                   "NSWindow Frame x": "1"], forName: oldName)
-        UserDefaults.standard.removePersistentDomain(forName: newName)
-        if let target = UserDefaults(suiteName: newName) {
+        do {
+            let old: [String: Any] = [ProtectedPaths.key: ["/a/keep", "/b/keep"], "appearance": "dark", "NSWindow Frame x": "1"]
+            let target = MemorySettings()
             target.set(["/c/mine"], forKey: ProtectedPaths.key)
             target.set("light", forKey: "appearance")
-            SettingsMigration.migrate(fromDomain: oldName, to: target)
+            SettingsMigration.migrate(old: { old }, to: target)
             check("protected paths are merged, none dropped",
                   Set(target.stringArray(forKey: ProtectedPaths.key) ?? []) == ["/a/keep", "/b/keep", "/c/mine"])
             check("settings already set under the new ID win", target.string(forKey: "appearance") == "light")
             check("system window keys are not copied", target.object(forKey: "NSWindow Frame x") == nil)
             target.removeObject(forKey: ProtectedPaths.key)
-            check("runs only once", SettingsMigration.migrate(fromDomain: oldName, to: target) == 0
+            check("runs only once", SettingsMigration.migrate(old: { old }, to: target) == 0
                   && target.stringArray(forKey: ProtectedPaths.key) == nil)
-        } else {
-            check("test settings domain available", false)
         }
-        UserDefaults.standard.removePersistentDomain(forName: oldName)
-        UserDefaults.standard.removePersistentDomain(forName: newName)
 
         print("Insights")
         let cal = Calendar.current
@@ -883,6 +883,9 @@ enum SelfTest {
         let stubborn = Shell.run("/bin/sh", ["-c", "trap '' TERM; sleep 20"], timeout: 1)
         check("a tool that ignores SIGTERM is killed", Date().timeIntervalSince(started) < 8 && (stubborn.output ?? "").contains("timed out"))
 
+        print("Isolation (end)")
+        check("the user's own Protected list is unchanged after all tests",
+              (realStore.object(forKey: ProtectedPaths.key) as? [String]) == realProtectedBefore)
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

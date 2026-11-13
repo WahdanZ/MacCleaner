@@ -139,18 +139,33 @@ extension AppEngine {
 
 extension AppEngine {
     /// Sends the privileged step's staging folder to the Trash (not restorable item by item), unless it may hold
-    /// something that wasn't reviewed. `inTrash` is false when the moved items are still in the staging folder.
-    static func sendStagingToTrash(_ staging: URL, _ report: AdminStep.Report, source: String) -> (inTrash: Bool, error: String?) {
+    /// something that wasn't reviewed. `inTrash` is true only when the moved items reached the Trash (or nothing was
+    /// moved); a staging folder that can't be read, removed or sent to the Trash is reported, never treated as done.
+    /// The file operations are parameters only so the self-test can make them fail.
+    static func sendStagingToTrash(_ staging: URL, _ report: AdminStep.Report, source: String,
+                                   list: (URL) throws -> [String] = { try FileManager.default.contentsOfDirectory(atPath: $0.path) },
+                                   removeEmpty: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) },
+                                   moveToTrash: (URL, String) -> String? = { trash($0, source: $1, restorable: false) })
+        -> (inTrash: Bool, error: String?) {
+        let place = Scanner.tilde(staging)
         if !report.keptInStaging.isEmpty {
-            return (false, "Something that wasn't reviewed ended up in \(Scanner.tilde(staging)), so that folder was not sent to the Trash; look there")
+            return (false, "Something that wasn't reviewed ended up in \(place), so that folder was not sent to the Trash; look there")
         }
-        let staged = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
+        let staged: [String]
+        do { staged = try list(staging) } catch {
+            return (false, "The staging folder \(place) couldn't be checked (\(error.localizedDescription)), so it was not sent to the Trash; look there")
+        }
         if staged.isEmpty {
-            try? FileManager.default.removeItem(at: staging)
+            if !report.moved.isEmpty {
+                return (false, "The moved system items weren't found in the staging folder \(place); look there")
+            }
+            do { try removeEmpty(staging) } catch {
+                return (true, "The empty staging folder \(place) couldn't be removed (\(error.localizedDescription))")
+            }
             return (true, nil)
         }
-        if let e = trash(staging, source: source, restorable: false) {
-            return (false, "The moved system items are in \(Scanner.tilde(staging)), but that folder couldn't be sent to the Trash: \(e)")
+        if let e = moveToTrash(staging, source) {
+            return (false, "The moved system items are in \(place), but that folder couldn't be sent to the Trash: \(e)")
         }
         return (true, nil)
     }

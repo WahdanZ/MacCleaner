@@ -2340,6 +2340,40 @@ extension SelfTest {
             let tail = e[r.lowerBound...].prefix { $0 != "," && $0 != " " }
             return URL(fileURLWithPath: AdminStep.stagingParent + "/" + tail)
         }) { try? fm.removeItem(at: st) }
+        // The staging folder itself: a listing or removal failure is reported, never treated as done (injected operations).
+        struct Refused: Error {}
+        let stDir = base.appendingPathComponent("staging-check-\(runID)")
+        try? fm.createDirectory(at: stDir, withIntermediateDirectories: true)
+        let movedOne = AdminStep.Report.parse("MACCLEANER-MOVED 0"), movedNone = AdminStep.Report()
+        let unlistable = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                      list: { _ in throw Refused() }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
+        check("a staging folder that can't be listed is not reported as in the Trash, and stays",
+              !unlistable.inTrash && unlistable.error?.contains("couldn't be checked") == true && fm.fileExists(atPath: stDir.path))
+        let unremovable = AppEngine.sendStagingToTrash(stDir, movedNone, source: "Self-test",
+                                                       list: { _ in [] }, removeEmpty: { _ in throw Refused() }, moveToTrash: { _, _ in nil })
+        check("an empty staging folder that can't be removed is reported, not cleaned up silently",
+              unremovable.error?.contains("couldn't be removed") == true && fm.fileExists(atPath: stDir.path))
+        let movedButEmpty = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                         list: { _ in [] }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
+        check("verified items missing from the staging folder are never reported as in the Trash",
+              !movedButEmpty.inTrash && movedButEmpty.error?.contains("weren't found") == true)
+        let trashRefused = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                        list: { _ in ["0-item"] }, removeEmpty: { _ in }, moveToTrash: { _, _ in "refused" })
+        let trashOK = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
+                                                   list: { _ in ["0-item"] }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
+        check("verified items stay 'not in the Trash' until their staging folder actually moved there",
+              !trashRefused.inTrash && trashRefused.error?.contains("couldn't be sent to the Trash") == true
+              && trashOK.inTrash && trashOK.error == nil)
+        // A really unreadable staging folder, with the default (real) operations.
+        try? Data("x".utf8).write(to: stDir.appendingPathComponent("0-item"))
+        chmod(stDir.path, 0)
+        let unreadable = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test")
+        chmod(stDir.path, 0o755)
+        check("a staging folder the system won't list is reported and left alone",
+              !unreadable.inTrash && unreadable.error?.contains("couldn't be checked") == true
+              && fm.fileExists(atPath: stDir.appendingPathComponent("0-item").path))
+        try? fm.removeItem(at: stDir)
+
         // The same rule in an uninstall: a leftover that vanished isn't counted, and the note says what happened.
         let fooSys = plain(sys.appendingPathComponent("com.example.foo-gone-\(runID).plist"), "daemon")
         // (The review blocks system leftovers outside the folders the password step may touch, and this one is in the

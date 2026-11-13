@@ -551,8 +551,70 @@ enum SelfTest {
         try? fm.setAttributes([.immutable: false], ofItemAtPath: fC.path)
         let (dD, _) = shredDir("shred-normal")
         let rD = ShredEngine.shred(dD)
-        check("overwrites and deletes a normal folder", rD.removed && rD.overwritten == 1 && rD.notOverwritten.isEmpty
+        check("overwrites and deletes a normal folder", rD.removed && rD.overwritten == 1 && rD.kept.isEmpty
               && !fm.fileExists(atPath: dD.path))
+
+        print("Shredder fails closed (SAFE-01)")
+        func text(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
+        // A write failure on the second of three files: the first is shredded, the failed one and the one after
+        // it stay with their content, and the folder stays.
+        let (dE, _) = shredDir("shred-writefail", file: "a.txt", text: "A")
+        let eB = dE.appendingPathComponent("b.txt"), eC = dE.appendingPathComponent("c.txt")
+        fm.createFile(atPath: eB.path, contents: Data("B".utf8))
+        fm.createFile(atPath: eC.path, contents: Data("C".utf8))
+        let rE = ShredEngine.shred(dE) { u, st in
+            u.lastPathComponent == "b.txt" ? "writing failed" : ShredEngine.overwrite(u, planned: st)
+        }
+        check("a failed write keeps that file and everything after it; nothing un-overwritten is deleted",
+              !rE.removed && rE.refused == nil && rE.overwritten == 1 && !rE.kept.isEmpty
+              && !fm.fileExists(atPath: dE.appendingPathComponent("a.txt").path)
+              && text(eB) == "B" && text(eC) == "C" && fm.fileExists(atPath: dE.path))
+        let (_, fF) = shredDir("shred-flushfail", text: "F")
+        let rF = ShredEngine.shred(fF) { _, _ in "couldn't flush to disk" }
+        check("a failed flush keeps the file", !rF.removed && rF.overwritten == 0 && fm.fileExists(atPath: fF.path))
+        // An unreadable folder inside: its files would be deleted unseen, so the whole item is refused.
+        let (dG, fG) = shredDir("shred-unreadable", text: "G")
+        let gLocked = dG.appendingPathComponent("sub")
+        try? fm.createDirectory(at: gLocked, withIntermediateDirectories: true)
+        fm.createFile(atPath: gLocked.appendingPathComponent("hidden.txt").path, contents: Data("H".utf8))
+        chmod(gLocked.path, 0)
+        let rG = ShredEngine.shred(dG)
+        chmod(gLocked.path, 0o755)
+        check("refuses a folder with an unreadable folder inside, untouched",
+              rG.refused != nil && text(fG) == "G" && text(gLocked.appendingPathComponent("hidden.txt")) == "H")
+        // A file over 4 GB (sparse, takes no space): refused before anything changes.
+        let (dH, fH) = shredDir("shred-huge", text: "small")
+        let huge = dH.appendingPathComponent("huge.bin")
+        fm.createFile(atPath: huge.path, contents: nil)
+        if let fh = try? FileHandle(forWritingTo: huge) { try? fh.truncate(atOffset: 4_000_000_001); try? fh.close() }
+        let rH = ShredEngine.shred(dH)
+        check("refuses a folder holding a file over 4 GB, untouched",
+              rH.refused != nil && text(fH) == "small" && fm.fileExists(atPath: huge.path))
+        try? fm.removeItem(at: huge)
+        // The file is replaced between planning and overwriting: the new file is not overwritten or deleted.
+        let (dI, fI) = shredDir("shred-swapped", text: "old")
+        let swapIn = sandbox.appendingPathComponent("shred-swap-new.txt")
+        let rI = ShredEngine.shred(dI) { u, st in
+            fm.createFile(atPath: swapIn.path, contents: Data("new".utf8))
+            _ = rename(swapIn.path, u.path)
+            return ShredEngine.overwrite(u, planned: st)
+        }
+        check("a file replaced during shredding is kept as it is", !rI.removed && text(fI) == "new")
+        // A link inside a folder is removed as a link; the file it points to is never opened.
+        let (dJ, _) = shredDir("shred-withlink", text: "J")
+        let shredLinkTarget = sandbox.appendingPathComponent("shred-link-target.txt")
+        fm.createFile(atPath: shredLinkTarget.path, contents: Data("outside".utf8))
+        try? fm.createSymbolicLink(at: dJ.appendingPathComponent("link"), withDestinationURL: shredLinkTarget)
+        let rJ = ShredEngine.shred(dJ)
+        check("a link inside a folder is removed, its target untouched",
+              rJ.removed && rJ.overwritten == 1 && !fm.fileExists(atPath: dJ.path) && text(shredLinkTarget) == "outside")
+        let rootLink = sandbox.appendingPathComponent("shred-root-link")
+        try? fm.createSymbolicLink(at: rootLink, withDestinationURL: shredLinkTarget)
+        check("refuses a link as the item itself", ShredEngine.shred(rootLink).refused != nil
+              && text(shredLinkTarget) == "outside" && (try? fm.destinationOfSymbolicLink(atPath: rootLink.path)) != nil)
+        let (dK, fK) = shredDir("shred-fifo", text: "K")
+        mkfifo(dK.appendingPathComponent("pipe").path, 0o600)
+        check("refuses a folder holding a pipe, untouched", ShredEngine.shred(dK).refused != nil && text(fK) == "K")
         check("refuses items outside the home folder",
               ShredEngine.reason(URL(fileURLWithPath: "/private/tmp/x")) != nil
               && ShredEngine.reason(URL(fileURLWithPath: "/Applications/Example.app")) != nil)

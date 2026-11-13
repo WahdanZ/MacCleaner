@@ -141,4 +141,5 @@ App startup, scan latency and memory were not measured in this pass.
 * Closed unmerged, superseded by #15: #11, #12, #13, #14.
 * Open: #22 (Dependabot, `actions/upload-pages-artifact` 5.0.0).
 * Opened from this audit (not merged; `main` still has the defects): #25 (these docs), #26 (Shredder,
-  RISK-001), #27 (Duplicates, RISK-002), #28 (self-test isolation, RISK-003/014).
+  RISK-001), #27 (Duplicates, RISK-002), #28 (self-test isolation, RISK-003/014), #29 (MCP human approval,
+  RISK-004), #30 (simulators, RISK-005).

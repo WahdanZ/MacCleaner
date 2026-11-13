@@ -20,8 +20,8 @@ Status values: `todo` · `in progress` · `in review (#N)` = open PR, **not on `
 | M00-01 | Shredder fail-closed + races (RISK-001) | No un-overwritten data deleted; growth, replacement, folder/parent swaps, edits after review handled; partial results reported; residual limits documented | in review (#26) |
 | M00-02 | Duplicate read failures (RISK-002) | Errors, truncation, growth never match; valid short reads still match; no scan slowdown | in review (#27) |
 | M00-03 | Self-test isolation (RISK-003) | Refuses real home; temp home; in-memory settings; user's list verified unchanged; concurrent runs pass | in review (#28) |
-| M00-04 | MCP human approval + identity digest (RISK-004) | Confirm without Mac Cleaner-owned human approval refused; `empty_trash` digest includes listed item identities; replaced-at-same-path item refused | todo |
-| M00-05 | Simulators review-only (RISK-005) | `xcode.sims` not recommended, review row says app data is lost | todo |
+| M00-04 | MCP human approval + identity digest (RISK-004) | Confirm without Mac Cleaner-owned human approval refused; `empty_trash` digest includes listed item identities; replaced-at-same-path item refused | in review (#29) |
+| M00-05 | Simulators review-only (RISK-005) | `xcode.sims` not recommended, review row says app data is lost; only reviewed, still-unavailable devices deleted | in review (#30) |
 | M00-06 | RISK-014 Storage Map check under `/private` home | Root cause: `/tmp` vs `/private/tmp` spelling; check compares name bytes + identity | in review (#28) |
 | M00-07 | Release baseline (RISK-008) | Hardened runtime in project Release config; release job fails if signing expected but missing; doc for `.sig` | todo |
 

@@ -76,7 +76,7 @@ The scheduled safe clean runs under the automation policy (`ARCHITECTURE_V2.md` 
 same guards and revalidation, recorded as a session, revocable. It never runs command targets, review items,
 Trash-only items or privileged steps.
 
-## 6. Simulators and command targets
+## 6. Simulators and command targets (PR #30, open — not on `main` yet)
 
 `simctl delete unavailable`, `simctl runtime delete`, `docker … prune` are **command targets**: never
 recommended, never scheduled, always reviewed with a description of what is lost (device app data, images,

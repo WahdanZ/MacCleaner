@@ -8,8 +8,8 @@ PR and **not on `main`**; "done" is used only after merge.
 |---|---|---|---|---|---|
 | SAFE-01 | Shredder fail-closed + race safety | Unsafe | M00-01 | in review (#26) | n/a |
 | SAFE-02 | Test isolation | Unsafe | M00-03 | in review (#28) | n/a |
-| SAFE-03 | MCP human approval | Unsafe | M00-04 | todo | yes |
-| SAFE-04 | Simulator deletion review-only | Unsafe | M00-05 | todo | yes |
+| SAFE-03 | MCP human approval | Unsafe | M00-04 | in review (#29) | yes |
+| SAFE-04 | Simulator deletion review-only | Unsafe | M00-05 | in review (#30) | yes |
 | SAFE-05 | Filesystem correctness (dups, scans, identity) | Unsafe | M00-02, M01-04, M02-01 | dups in review (#27); rest todo | yes |
 | SAFE-06 | Release/update integrity | Partial | M00-07, M09 | todo | n/a |
 | CLEAN-01 | Smart Scan | Missing | M02-09 | todo | read-only |

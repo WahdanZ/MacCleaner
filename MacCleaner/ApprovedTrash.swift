@@ -35,17 +35,17 @@ enum AppCleanup {
     static func trashPlan(_ items: [ReviewItem], module: String) -> CleanupPlan? {
         trashPlan(items.compactMap { i in
             guard i.blocked == nil, let s = i.snapshot else { return nil }
-            return (i.id, i.name, s, i.size ?? 0)
+            return (i.id, i.name, s, i.size ?? 0, i.note ?? "")
         }, module: module)
     }
 
-    /// A Trash plan from exactly these snapshots (id, title, identity, size). nil when there are none.
-    static func trashPlan(_ snapshots: [(id: String, title: String, item: FileIdentity, size: Int64)],
+    /// A Trash plan from exactly these snapshots (id, title, identity, size, explanation). nil when there are none.
+    static func trashPlan(_ snapshots: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)],
                           module: String) -> CleanupPlan? {
         let entries = snapshots.map { s in
             CleanupPlan.Entry(CleanupCandidate(id: s.id, module: module, title: s.title, targets: [.file(s.item)],
                                                estimatedBytes: s.size, risk: .reviewRequired, recommended: false,
-                                               explanation: ""), .trash)
+                                               explanation: s.explanation), .trash)
         }
         return entries.isEmpty ? nil : try? CleanupPlan(entries)
     }

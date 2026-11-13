@@ -557,7 +557,7 @@ enum MCPServer {
             let digest = plan(urls.map { "\(TrashGuard.key($0))|\(identity($0.path))" })
             if !confirm {
                 // The preview captures what each allowed item is now; the confirm can only approve exactly these.
-                var snapshots: [(id: String, title: String, item: FileIdentity, size: Int64)] = []
+                var snapshots: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] = []
                 var seen = Set<String>()
                 let items: [[String: Any]] = urls.map { u in
                     let exists = FileManager.default.fileExists(atPath: u.path)
@@ -565,7 +565,7 @@ enum MCPServer {
                     let bytes = exists ? Scanner.allocatedSize(u) : 0
                     if why == nil, seen.insert(u.path).inserted {
                         if let snap = AppCleanup.snapshot(u) {
-                            snapshots.append((u.path, u.lastPathComponent, snap, bytes))
+                            snapshots.append((u.path, u.lastPathComponent, snap, bytes, "Requested through Mac Cleaner's AI connection or command line"))
                         } else { why = "Does not exist" }
                     }
                     return ["path": Scanner.tilde(u), "size": exists ? size(bytes) : "—",

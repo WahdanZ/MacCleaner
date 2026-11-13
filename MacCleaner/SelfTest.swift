@@ -1519,6 +1519,11 @@ extension SelfTest {
         let later = file("added-later")
         check("the approval covers exactly the items the sheet showed",
               approved(shownReview)?.plan.candidates.map(\.id) == [shown.path])
+        let noted = MainActor.assumeIsolated {
+            ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(shown, 1, "keeps a copy")]) { _, _ in }
+        }
+        check("the plan keeps each reviewed item's note as its explanation",
+              noted.trashPlan?.candidates.first?.explanation == "keeps a copy")
         let shownRun = run(shownReview)
         check("an item added after the review isn't moved", shownRun?.moved.keys.sorted() == [shown.path]
               && fm.fileExists(atPath: later.path))

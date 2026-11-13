@@ -7,7 +7,7 @@ EXPECT=0
 if [ "${1:-}" = "--expect-hooks" ]; then EXPECT=1; shift; fi
 BIN="${1:?usage: check-no-test-hooks.sh [--expect-hooks] path/to/Mac Cleaner.app}/Contents/MacOS/Mac Cleaner"
 test -x "$BIN"
-N=$(strings -a "$BIN" | grep -c -e '--selftest-child' -e 'MACCLEANER_TEST_TRASH_DIR' || true)
+N=$(strings -a "$BIN" | grep -c -e '--selftest-child' -e 'MACCLEANER_TEST_TRASH_DIR' -e 'MACCLEANER_TEST_TRASH_PROBE' || true)
 if [ "$EXPECT" = 1 ]; then
   [ "$N" -gt 0 ] || { echo "✗ expected the test-hooks build to contain its test-only modes"; exit 1; }
   echo "✓ the test-hooks build contains its test-only mode (the check can see it)"

@@ -4,21 +4,26 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
-        SettingsMigration.migrate()
         let args = CommandLine.arguments
-        if args.count > 1 && args[1] == "--cli" {
-            exit(CLI.run(Array(args.dropFirst(2))))
-        }
         #if MACCLEANER_TEST_HOOKS
-        // Only in the test-hooks build (scripts/build-test-hooks.sh), never in Release: the self-test runs CLI processes
-        // whose Trash must be its isolated folder, and its crash child.
-        if args.count > 1 && args[1] == "--cli", let dir = ProcessInfo.processInfo.environment["MACCLEANER_TEST_TRASH_DIR"] {
+        // Only in the test-hooks build (scripts/build-test-hooks.sh), never in Release. First, before any dispatch or
+        // anything that can move a file: a process the self-test starts gets the self-test's isolated Trash folder.
+        if let dir = ProcessInfo.processInfo.environment["MACCLEANER_TEST_TRASH_DIR"] {
             SelfTest.isolateTrash(in: URL(fileURLWithPath: dir))
+        }
+        // The self-test asks a process where its Trash moves would go before it lets one move anything.
+        if ProcessInfo.processInfo.environment["MACCLEANER_TEST_TRASH_PROBE"] == "1" {
+            print("trash-destination: " + (SelfTest.trashIsIsolated ? SelfTest.isolatedTrash.path : "system"))
+            exit(0)
         }
         if args.count > 1 && args[1] == "--selftest-child" {
             exit(SelfTest.child(Array(args.dropFirst(2))))
         }
         #endif
+        SettingsMigration.migrate()
+        if args.count > 1 && args[1] == "--cli" {
+            exit(CLI.run(Array(args.dropFirst(2))))
+        }
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.installTestApprover()   // never show a real confirmation window during the self-test
             exit(SelfTest.run() ? 0 : 1)

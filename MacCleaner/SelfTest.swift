@@ -1593,23 +1593,29 @@ extension SelfTest {
               putBack(i1) && (try? String(contentsOf: i1, encoding: .utf8)) == "first")
 
         #if MACCLEANER_TEST_HOOKS
-        // Killed (SIGKILL) right after the first move was recorded, in a separate process.
-        let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
-        let child = Process()
-        child.executableURL = Bundle.main.executableURL
-        child.arguments = ["--selftest-child", "trash-then-die", k1.path, k2.path]
-        child.environment = ProcessInfo.processInfo.environment.merging(
-            ["MACCLEANER_SELFTEST_CHILD": "1", "MACCLEANER_TEST_TRASH_DIR": isolatedTrash.path]) { _, new in new }
-        child.standardOutput = FileHandle.nullDevice
-        child.standardError = FileHandle.nullDevice
-        var started = true
-        do { try child.run(); child.waitUntilExit() } catch { started = false }
-        check("a process killed mid-batch dies after its first move (simulated crash)",
-              started && child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
-        check("the killed process's first move is in the Trash log, the second item untouched",
-              !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
-        check("Put Back restores the first move after the crash",
-              putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+        // Every destructive child process is gated on its own report of where its Trash moves go.
+        if subprocessTrashIsIsolated() {
+            // Killed (SIGKILL) right after the first move was recorded, in a separate process.
+            let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
+            let child = Process()
+            child.executableURL = Bundle.main.executableURL
+            child.arguments = ["--selftest-child", "trash-then-die", k1.path, k2.path]
+            child.environment = ProcessInfo.processInfo.environment.merging(
+                ["MACCLEANER_SELFTEST_CHILD": "1", "MACCLEANER_TEST_TRASH_DIR": isolatedTrash.path]) { _, new in new }
+            child.standardOutput = FileHandle.nullDevice
+            child.standardError = FileHandle.nullDevice
+            var started = true
+            do { try child.run(); child.waitUntilExit() } catch { started = false }
+            check("a process killed mid-batch dies after its first move (simulated crash)",
+                  started && child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
+            check("the killed process's first move is in the Trash log, the second item untouched",
+                  !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
+            let killedTrashed = TrashLog.shared.present().first { $0.original == AppCleanup.physicalPath(k1) }?.trashed
+            check("the killed process moved it into the self-test's isolated Trash, not the real Trash",
+                  inIsolatedTrash(killedTrashed))
+            check("Put Back restores the first move after the crash",
+                  putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+        }
         #else
         print("  - SIGKILL crash test: runs in the test-hooks build only (scripts/build-test-hooks.sh, then the self-test)")
         #endif
@@ -1709,6 +1715,7 @@ extension SelfTest {
         check("an MCP confirm the person approves moves the file and answers as before",
               (ok?["moved_to_trash"] as? [String]) == [Scanner.tilde(a)] && (ok?["errors"] as? [String])?.isEmpty == true
               && !fm.fileExists(atPath: a.path) && approvals.asked.count == 1)
+        check("the MCP move went into the self-test's isolated Trash", inIsolatedTrash(log(a).first?.trashed))
         check("it is logged once, as the AI assistant, and Put Back restores it",
               log(a).count == 1 && log(a).first?.source == "AI assistant" && putBack(a)
               && (try? String(contentsOf: a, encoding: .utf8)) == "ok")
@@ -1807,38 +1814,43 @@ extension SelfTest {
         check("the CLI without --yes and without a keyboard changes nothing and exits 2",
               noYes.code == 2 && fm.fileExists(atPath: c.path))
         #if MACCLEANER_TEST_HOOKS
-        // A separate process moves files: only the test-hooks build can point its Trash at the isolated folder
-        // (MACCLEANER_TEST_TRASH_DIR); the Release app always uses the real Trash, so it skips these.
-        let withYes = cli(["trash-files", c.path, "--yes", "--json"])
-        check("the CLI with --yes moves the file, exits 0, and answers as before",
-              withYes.code == 0 && !fm.fileExists(atPath: c.path) && withYes.out.contains("moved_to_trash"))
-        check("the CLI's --yes move is logged as an override and Put Back restores it",
-              log(c).first?.source == "Command line (--yes, not confirmed by a person)" && putBack(c)
-              && (try? String(contentsOf: c, encoding: .utf8)) == "cli")
+        if subprocessTrashIsIsolated() {
+            // A separate process moves files: only the test-hooks build can point its Trash at the isolated folder
+            // (MACCLEANER_TEST_TRASH_DIR); the Release app always uses the real Trash, so it skips these.
+            let withYes = cli(["trash-files", c.path, "--yes", "--json"])
+            check("the CLI with --yes moves the file, exits 0, and answers as before",
+                  withYes.code == 0 && !fm.fileExists(atPath: c.path) && withYes.out.contains("moved_to_trash"))
+            check("the CLI process moved it into the self-test's isolated Trash (its Trash log says so)",
+                  inIsolatedTrash(log(c).first?.trashed))
+            check("the CLI's --yes move is logged as an override and Put Back restores it",
+                  log(c).first?.source == "Command line (--yes, not confirmed by a person)" && putBack(c)
+                  && (try? String(contentsOf: c, encoding: .utf8)) == "cli")
 
-        // The same through the real CLI (a separate process): make its Trash log unwritable (a folder where the
-        // log's lock file goes), so its record fails closed, then read its JSON answer.
-        let logDir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
-        let lockBlocker = logDir.appendingPathComponent("trash-log.json.lock")
-        try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let hadLock = fm.fileExists(atPath: lockBlocker.path)
-        if hadLock { try? fm.removeItem(at: lockBlocker) }
-        try? fm.createDirectory(at: lockBlocker, withIntermediateDirectories: false)
-        let k1 = file("cli-unrecorded-1", "one"), k2 = file("cli-unrecorded-2", "two")
-        let blocked = cli(["trash-files", k1.path, k2.path, "--yes", "--json"])
-        try? fm.removeItem(at: lockBlocker)
-        // With --json the CLI prints the preview, then the result: read the last JSON document.
-        let last = blocked.out.range(of: "\n{", options: .backwards).map { String(blocked.out[$0.lowerBound...]) } ?? blocked.out
-        let answer = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any]
-        let kErrors = answer?["errors"] as? [String] ?? []
-        let k1Error = kErrors.first { $0.hasPrefix(Scanner.tilde(k1) + ":") } ?? ""
-        check("the CLI's JSON answer reports the move AND the missing Put Back record",
-              (answer?["moved_to_trash"] as? [String]) == [Scanner.tilde(k1)] && k1Error.contains("couldn't be recorded for Put Back")
-              && !fm.fileExists(atPath: k1.path))
-        check("the CLI leaves the rest untouched after a failed record and says why",
-              fm.fileExists(atPath: k2.path) && kErrors.contains("\(Scanner.tilde(k2)): \(AppCleanup.unrecordedStop)"))
-        if let where_ = recovery(k1Error) { try? fm.moveItem(atPath: where_, toPath: k1.path) }
-        check("the unrecorded CLI move was where the answer said", fm.fileExists(atPath: k1.path))
+            // The same through the real CLI (a separate process): make its Trash log unwritable (a folder where the
+            // log's lock file goes), so its record fails closed, then read its JSON answer.
+            let logDir = SafetyGuard.home.appendingPathComponent("Library/Application Support/Mac Cleaner")
+            let lockBlocker = logDir.appendingPathComponent("trash-log.json.lock")
+            try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
+            let hadLock = fm.fileExists(atPath: lockBlocker.path)
+            if hadLock { try? fm.removeItem(at: lockBlocker) }
+            try? fm.createDirectory(at: lockBlocker, withIntermediateDirectories: false)
+            let k1 = file("cli-unrecorded-1", "one"), k2 = file("cli-unrecorded-2", "two")
+            let blocked = cli(["trash-files", k1.path, k2.path, "--yes", "--json"])
+            try? fm.removeItem(at: lockBlocker)
+            // With --json the CLI prints the preview, then the result: read the last JSON document.
+            let last = blocked.out.range(of: "\n{", options: .backwards).map { String(blocked.out[$0.lowerBound...]) } ?? blocked.out
+            let answer = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any]
+            let kErrors = answer?["errors"] as? [String] ?? []
+            let k1Error = kErrors.first { $0.hasPrefix(Scanner.tilde(k1) + ":") } ?? ""
+            check("the CLI's JSON answer reports the move AND the missing Put Back record",
+                  (answer?["moved_to_trash"] as? [String]) == [Scanner.tilde(k1)] && k1Error.contains("couldn't be recorded for Put Back")
+                  && !fm.fileExists(atPath: k1.path))
+            check("the CLI leaves the rest untouched after a failed record and says why",
+                  fm.fileExists(atPath: k2.path) && kErrors.contains("\(Scanner.tilde(k2)): \(AppCleanup.unrecordedStop)"))
+            check("the unrecorded CLI move went into the isolated Trash (its answer says where)", inIsolatedTrash(recovery(k1Error)))
+            if let where_ = recovery(k1Error) { try? fm.moveItem(atPath: where_, toPath: k1.path) }
+            check("the unrecorded CLI move was where the answer said", fm.fileExists(atPath: k1.path))
+        }
         #else
         print("  - CLI moves in a separate process: run in the test-hooks build only (its Trash is isolated there)")
         #endif
@@ -2056,10 +2068,20 @@ extension SelfTest {
         var count: Int { all.count }
     }
 
+    /// True once `isolateTrash` has replaced the Trash mover in this process.
+    nonisolated(unsafe) static var trashIsIsolated = false
+
+    /// True when `path` lies inside this run's isolated Trash folder.
+    static func inIsolatedTrash(_ path: String?) -> Bool {
+        guard let path, trashIsIsolated else { return false }
+        return path.hasPrefix(isolatedTrash.path + "/") || path.hasPrefix(AppCleanup.physicalPath(isolatedTrash) + "/")
+    }
+
     /// Points every Trash move (the executor's and the legacy AppEngine.trash) at `dir` instead of the real Trash.
     static func isolateTrash(in dir: URL) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         isolatedTrash = dir
+        trashIsIsolated = true
         AppCleanup.trashMover = { url in
             let slot = dir.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: false)
@@ -2071,6 +2093,35 @@ extension SelfTest {
     }
 
     #if MACCLEANER_TEST_HOOKS
+    /// Asks a fresh process of this build where its Trash moves would go, given this run's isolated folder, and
+    /// checks the probe can tell (the same process without the folder must say "system"). Destructive child
+    /// processes run only when this is true, so a broken isolation hook fails these checks instead of moving files
+    /// into the real Trash.
+    static func subprocessTrashIsIsolated() -> Bool {
+        func probe(_ extra: [String: String]) -> String {
+            let p = Process()
+            p.executableURL = Bundle.main.executableURL
+            p.arguments = ["--cli", "status"]
+            var env = ProcessInfo.processInfo.environment
+            env["MACCLEANER_TEST_TRASH_DIR"] = nil
+            p.environment = env.merging(extra.merging(["MACCLEANER_TEST_TRASH_PROBE": "1"]) { a, _ in a }) { _, new in new }
+            p.standardInput = FileHandle.nullDevice
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return "" }
+            let out = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let isolated = probe(["MACCLEANER_TEST_TRASH_DIR": isolatedTrash.path])
+        let unset = probe([:])
+        let ok = isolated == "trash-destination: \(isolatedTrash.path)" && unset == "trash-destination: system"
+        check("a child process reports the self-test's isolated Trash before it may move anything", ok)
+        if !ok { print("    (skipping destructive child-process checks: got \"\(isolated)\" / \"\(unset)\")") }
+        return ok
+    }
+
     /// `--selftest-child <task> ...`: work the self-test runs in a separate process. Compiled only into the
     /// test-hooks build, never into Release. Even there it refuses unless started by the self-test
     /// (MACCLEANER_SELFTEST_CHILD=1) in a throwaway home folder.

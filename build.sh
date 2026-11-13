@@ -6,7 +6,7 @@ xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Relea
   | grep -E 'error:|BUILD (SUCCEEDED|FAILED)' | sort -u
 APP="build/Release/Mac Cleaner.app"
 echo "--- self-test"
-"$APP/Contents/MacOS/Mac Cleaner" --selftest
+scripts/selftest.sh "$APP"
 codesign --force --deep --sign - "$APP"
 pkill -x "Mac Cleaner" || true
 sleep 1

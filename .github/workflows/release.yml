@@ -94,7 +94,7 @@ jobs:
           codesign --force --deep --sign - "$APP"
 
       - name: Safety self-test
-        run: '"$APP/Contents/MacOS/Mac Cleaner" --selftest > /dev/null && echo "self-test passed"'
+        run: scripts/selftest.sh "$APP" > /dev/null && echo "self-test passed"
 
       - name: Notarize app
         if: env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true'

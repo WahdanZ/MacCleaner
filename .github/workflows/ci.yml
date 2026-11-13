@@ -34,8 +34,8 @@ jobs:
             CODE_SIGN_IDENTITY=- build | tee build.log | grep -E 'error:|warning:|BUILD (SUCCEEDED|FAILED)' || true
           grep -q 'BUILD SUCCEEDED' build.log
 
-      - name: Safety self-test
-        run: '"$APP/Contents/MacOS/Mac Cleaner" --selftest'
+      - name: Safety self-test (throwaway home folder)
+        run: scripts/selftest.sh "$APP"
 
       - name: Command line check (read-only commands)
         run: |

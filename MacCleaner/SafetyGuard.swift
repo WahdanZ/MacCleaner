@@ -164,12 +164,16 @@ enum TrashGuard {
 enum ProtectedPaths {
     static let key = "protectedPaths"
 
-    static var all: [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
+    /// Where the list is kept. Only the self-test changes it, once at start and back at the end, to a
+    /// throwaway domain so it never edits the user's list; nothing else runs concurrently at that point.
+    nonisolated(unsafe) static var store: UserDefaults = .standard
+
+    static var all: [String] { store.stringArray(forKey: key) ?? [] }
 
     static func set(_ paths: [String]) {
         var seen = Set<String>()
         let clean = paths.map(normalize).filter { seen.insert($0).inserted }.sorted()
-        UserDefaults.standard.set(clean, forKey: key)
+        store.set(clean, forKey: key)
     }
 
     static func add(_ urls: [URL]) { set(all + urls.map(\.path)) }

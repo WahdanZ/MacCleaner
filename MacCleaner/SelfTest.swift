@@ -1,9 +1,13 @@
 import CryptoKit
 import Foundation
 
-/// `Mac Cleaner --selftest`: checks every safety rule. Creates only throwaway files under
-/// ~/.maccleaner-selftest and ~/.cache/maccleaner-selftest-*, removes them afterwards,
-/// and restores the Protected list. Exit code 0 = all passed.
+/// `Mac Cleaner --selftest`: checks every safety rule. Exit code 0 = all passed.
+///
+/// Run it with `scripts/selftest.sh`, which gives it a fresh, empty home folder (`CFFIXED_USER_HOME`).
+/// It refuses to run against your real home folder unless MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1 is set.
+/// Even then it only creates folders with a unique name per run (~/.maccleaner-selftest-<run>,
+/// ~/.cache/maccleaner-selftest-<run>-*), never reuses one that already exists, and keeps the Protected
+/// list in a throwaway settings domain instead of yours.
 enum SelfTest {
     private static var passed = 0
     private static var failed: [String] = []
@@ -13,16 +17,46 @@ enum SelfTest {
         print((ok ? "  ✓ " : "  ✗ ") + name)
     }
 
+    /// The account's real home folder (from the user database; CFFIXED_USER_HOME doesn't change it).
+    static var accountHome: URL? {
+        guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else { return nil }
+        return URL(fileURLWithPath: String(cString: dir)).resolvingSymlinksInPath().standardizedFileURL
+    }
+
     static func run() -> Bool {
         let fm = FileManager.default
         let home = SafetyGuard.home
+        if home.path == accountHome?.path && ProcessInfo.processInfo.environment["MACCLEANER_SELFTEST_ALLOW_REAL_HOME"] != "1" {
+            print("""
+            Refusing to run the self-test in your real home folder (\(home.path)).
+            Run scripts/selftest.sh, which uses a throwaway home folder, or set
+            MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1 to run here anyway.
+            """)
+            return false
+        }
         let h = { (rel: String) in home.appendingPathComponent(rel) }
-        let sandbox = h(".maccleaner-selftest")
-        let cacheLink = h(".cache/maccleaner-selftest-link")
-        let cacheItem = h(".cache/maccleaner-selftest-item")
+        let runID = UUID().uuidString.prefix(8).lowercased()
+        let sandbox = h(".maccleaner-selftest-\(runID)")
+        let cacheLink = h(".cache/maccleaner-selftest-\(runID)-link")
+        let cacheItem = h(".cache/maccleaner-selftest-\(runID)-item")
+        // Only ever work in folders this run created: if the name is taken, stop before touching anything.
+        try? fm.createDirectory(at: h(".cache"), withIntermediateDirectories: true)
+        guard (try? fm.createDirectory(at: sandbox, withIntermediateDirectories: false)) != nil,
+              !fm.fileExists(atPath: cacheLink.path), !fm.fileExists(atPath: cacheItem.path) else {
+            print("Self-test setup failed: \(sandbox.path) couldn't be created as a new folder. Nothing was changed.")
+            return false
+        }
+        // The Protected list lives in a throwaway settings domain for this run, never the user's own.
+        let suite = "io.github.wahdanz.maccleaner.selftest"   // emptied at the end; one fixed name so runs leave no new files
+        guard let testDefaults = UserDefaults(suiteName: suite) else {
+            print("Self-test setup failed: no test settings domain."); try? fm.removeItem(at: sandbox); return false
+        }
+        let realStore = ProtectedPaths.store
+        ProtectedPaths.store = testDefaults
         let savedProtected = ProtectedPaths.all
         defer {
-            ProtectedPaths.set(savedProtected)
+            ProtectedPaths.store = realStore
+            UserDefaults.standard.removePersistentDomain(forName: suite)
             try? fm.removeItem(at: sandbox)
             try? fm.removeItem(at: cacheLink)
             try? fm.removeItem(at: cacheItem)
@@ -376,7 +410,13 @@ enum SelfTest {
         let reference = (try? fm.contentsOfDirectory(at: fx.appendingPathComponent("a"), includingPropertiesForKeys: nil))?
             .first { $0.lastPathComponent == nfc }   // what the FileManager walk reported for the same file
         let nameOK = listed.map { Array($0.name.utf8) == Array(nfc.utf8) } ?? false
-        let pathOK = listed.map { Array($0.url.path.utf8) == Array((reference?.path ?? "").utf8) } ?? false
+        // The file name must keep its stored bytes; the folder part may be spelled /tmp or /private/tmp
+        // (same folder), so the two paths are compared by the file they reach.
+        let pathOK = listed.map { l -> Bool in
+            guard let r = reference, Array(l.url.lastPathComponent.utf8) == Array(r.lastPathComponent.utf8) else { return false }
+            var a = stat(), b = stat()
+            return lstat(l.url.path, &a) == 0 && lstat(r.path, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino
+        } ?? false
         check("Storage Map keeps a non-ASCII name exactly as stored", nameOK && pathOK)
         if !(nameOK && pathOK) {
             let form = { (t: String?) -> String in
@@ -384,6 +424,7 @@ enum SelfTest {
                 return t == t.precomposedStringWithCanonicalMapping && Array(t.utf8) == Array(t.precomposedStringWithCanonicalMapping.utf8) ? "NFC" : "NFD"
             }
             print("    name \(form(listed?.name)), path \(form(listed?.url.path)), FileManager path \(form(reference?.path))")
+            print("    map path: \(listed?.url.path ?? "missing")\n    FileManager path: \(reference?.path ?? "missing")")
         }
         check("Storage Map lists a 1.5 MB file with its date",
               map.children.contains { $0.name == "big.bin" && !$0.isDirectory && $0.modified != nil && $0.size >= 1_500_000 })
@@ -587,8 +628,8 @@ enum SelfTest {
         // Three throwaway caches: one outside the allow-list (blocked), one allowed, and one allowed when the
         // review is built but protected before Clear runs. Only the allowed one may be deleted.
         let ccBlocked = sandbox.appendingPathComponent("appcache-blocked")
-        let ccAllowed = h(".cache/maccleaner-selftest-appcache")
-        let ccLater = h(".cache/maccleaner-selftest-appcache-later")
+        let ccAllowed = h(".cache/maccleaner-selftest-\(runID)-appcache")
+        let ccLater = h(".cache/maccleaner-selftest-\(runID)-appcache-later")
         defer { try? fm.removeItem(at: ccAllowed); try? fm.removeItem(at: ccLater) }
         for u in [ccBlocked, ccAllowed, ccLater] {
             try? fm.createDirectory(at: u, withIntermediateDirectories: true)

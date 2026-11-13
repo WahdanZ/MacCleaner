@@ -28,10 +28,12 @@ public actor CleanupExecutor {
         self.now = now
     }
 
-    /// Records that a person (or an enabled policy) approved exactly `plan`. Call it only from the flow where that
-    /// approval happened: the review sheet (`.userInApp`), the terminal prompt on a TTY (`.userInTerminal`), Mac
-    /// Cleaner's own confirmation window for an MCP request (`.userViaMCPPrompt`), or the scheduler running an
-    /// enabled policy (`.standingPolicy`). The approval works once, in this process, until it expires.
+    /// Records an approval of exactly `plan`, attributed to `approver`. It does not check that the approval happened:
+    /// the caller must call it only from the flow where it did, right after the person confirmed this plan — the
+    /// review sheet (`.userInApp`), the terminal prompt on a TTY (`.userInTerminal`), Mac Cleaner's own confirmation
+    /// window for an MCP request (`.userViaMCPPrompt`) — or from the scheduler for an enabled policy whose scope
+    /// covers the plan (`.standingPolicy`). Enforcing that is M01-04b's job (unmet until then). The approval works
+    /// once, in this process, until it expires.
     public func approve(_ plan: CleanupPlan, by approver: CleanupApproval.Approver,
                         lifetime: TimeInterval = CleanupExecutor.defaultLifetime) throws(CleanupApproval.IssueRefusal) -> CleanupApproval {
         try ledger.issue(for: plan, approvedBy: approver, at: now(), lifetime: lifetime)
@@ -101,6 +103,7 @@ public actor CleanupExecutor {
             switch refusal {
             case .missing: return skipAll(.missing)
             case .changed(let m): return skipAll(.changed(m))
+            case .protected(let why): return skipAll(.protected(why))
             }
         } catch {
             return reviewed.map { ItemOutcome(candidateID: candidate, target: .file($0), result: .failed("\(error)")) }
@@ -134,13 +137,15 @@ public actor CleanupExecutor {
                 let r = try fileSystem.moveToTrash(item)
                 return outcome(.trashed(bytes: r.bytes, recoveryPath: r.recoveryPath))
             }
-            let r = try fileSystem.remove(item)
+            let rules = protection
+            let r = try fileSystem.remove(item, protection: { rules.refusal(path: $0, disposition: .permanentDelete) })
             return outcome(r.kept.isEmpty ? .removed(bytes: r.freedBytes)
                                           : .partiallyDone(freedBytes: r.freedBytes, kept: r.kept, damaged: []))
         } catch let refusal as FileSystemRefusal {
             switch refusal {
             case .missing: return outcome(.skipped(.missing))
             case .changed(let m): return outcome(.skipped(.changed(m)))
+            case .protected(let why): return outcome(.skipped(.protected(why)))
             }
         } catch {
             return outcome(.failed("\(error)"))

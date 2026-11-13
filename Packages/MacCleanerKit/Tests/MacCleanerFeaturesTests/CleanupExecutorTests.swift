@@ -56,8 +56,12 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
         return TrashResult(bytes: item.size, recoveryPath: "/Users/tester/.Trash/" + (item.path as NSString).lastPathComponent)
     }
 
-    func remove(_ item: FileIdentity) throws -> RemovalResult {
+    /// Asks `protection` about one made-up entry inside a folder, the way the real walk asks about every entry.
+    func remove(_ item: FileIdentity, protection: RemovalProtection) throws -> RemovalResult {
         try act(item, .remove(item.path))
+        if item.kind == .directory, let why = protection(item.path + "/nested") {
+            return RemovalResult(freedBytes: 0, kept: [KeptEntry(path: item.path + "/nested", reason: .protected(why))])
+        }
         return locked { partial[item.path] } ?? RemovalResult(freedBytes: item.size)
     }
 }
@@ -155,6 +159,15 @@ struct ExecutorRevalidationTests {
         let (report, _) = try await run(exec, p)
         #expect(results(report)[file.path] == .skipped(.protected("Protected in Settings")))
         #expect(fs.ops.isEmpty)
+    }
+
+    @Test func theLiveProtectionRulesReachEveryEntryOfARemoval() async throws {
+        let fs = FakeFS([folder])
+        let p = try plan([.init(candidate("d", [.file(folder)]), .permanentDelete)])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected(paths: [folder.path + "/nested"]))
+        let (report, _) = try await run(exec, p)
+        #expect(results(report)[folder.path] == .partiallyDone(
+            freedBytes: 0, kept: [KeptEntry(path: folder.path + "/nested", reason: .protected("Protected in Settings"))], damaged: []))
     }
 
     @Test func alreadyDeletedIsReportedAsMissing() async throws {

@@ -69,8 +69,12 @@ public struct KeptEntry: Sendable, Hashable {
         case changedAfterReview
         /// Another volume mounted inside the folder; never entered.
         case otherVolume
+        /// Became protected during the removal (checked again right before each entry is deleted).
+        case protected(String)
         /// Holds entries that were kept for another reason, so it couldn't be removed.
         case notEmpty
+        /// The removal's private staging folder couldn't be removed afterwards; `path` says where it is.
+        case stagingLeftBehind
         /// The system refused (locked, no permission, unreadable folder, …).
         case failed(String)
     }

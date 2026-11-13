@@ -208,8 +208,9 @@ private struct DigestWriter {
     }
 }
 
-/// The person's go-ahead for one exact plan. Only an `ApprovalLedger` can make one (the initializer is internal to
-/// Core), and only that ledger accepts it, once. See `ApprovalLedger` for who may ask the ledger to issue one.
+/// A recorded go-ahead for one exact plan. Only an `ApprovalLedger` can make one (the initializer is internal to
+/// Core), and only that ledger accepts it, once. It records who the caller said approved; it is not proof that they
+/// did (see `ApprovalLedger`).
 public struct CleanupApproval: Sendable, Hashable {
     public enum Approver: Sendable, Hashable {
         /// The person pressed the button in the app's review sheet showing this plan.
@@ -264,17 +265,23 @@ public struct CleanupApproval: Sendable, Hashable {
     }
 }
 
-/// Issues approvals and accepts each one exactly once. What it guarantees:
+/// Issues approvals and accepts each one exactly once.
 ///
-/// * **Trusted creation.** `CleanupApproval` has no public initializer and this type is `package`-only, so code
-///   outside MacCleanerKit (the app, CLI and MCP code) can't make an approval at all; it can only ask
-///   `CleanupExecutor.approve`, which the app calls from the four flows named by `CleanupApproval.Approver`, each
-///   after a person (or an enabled policy) approved the very plan it showed. An AI client's `confirm: true` reaches
-///   none of them. A standing policy can only approve what policies may cover (see `IssueRefusal`).
+/// **What it does NOT do: verify that a person (or an enabled policy) approved anything.** `approvedBy` is a label the
+/// caller supplies. The ledger is a record of an approval claim, not proof of human authorization. Making sure that
+/// `CleanupExecutor.approve` is called only right after a real confirmation (review sheet, terminal prompt on a TTY,
+/// Mac Cleaner's own window for MCP) or for an enabled, in-scope automation policy is an integration requirement
+/// that is NOT met yet: M01-04b must meet it before the executor removes anything for the app, CLI or MCP.
+///
+/// What it does guarantee:
+///
+/// * **Creation only inside MacCleanerKit.** `CleanupApproval` has no public initializer and this type is
+///   `package`-only, so code outside MacCleanerKit (the app, CLI and MCP code) can't make an approval except through
+///   `CleanupExecutor.approve`. A standing policy can only approve what policies may cover (see `IssueRefusal`).
 /// * **Plan binding.** An approval names the plan's digest; any other plan is refused.
 /// * **Expiry.** Lifetimes are positive and at most `maxLifetime`; an approval is valid in `[issued, expires)`.
 /// * **Single use.** `redeem` consumes the approval whatever the result (fail closed: a refused approval can't be
-///   retried, the person approves again). The ledger is `~Copyable`, so its state can't be duplicated to replay one.
+///   retried, the caller approves again). The ledger is `~Copyable`, so its state can't be duplicated to replay one.
 /// * **Per process.** The ledger lives in memory in one process and approvals are never serialized. The app, each
 ///   `--cli` run and each `--mcp` server are separate processes with separate ledgers: an approval made in one can't
 ///   be redeemed in another (`notIssued`), and none survives a restart. So the CLI's terminal prompt and the MCP

@@ -144,7 +144,7 @@ public struct LocalFileSystem: CleanupFileSystem {
 
     // MARK: - Permanent removal
 
-    public func remove(_ item: FileIdentity) throws -> RemovalResult {
+    public func remove(_ item: FileIdentity, protection: RemovalProtection) throws -> RemovalResult {
         let parent = try Parent(of: item)
         defer { parent.close() }
         _ = try parent.statChecked(item)
@@ -154,19 +154,22 @@ public struct LocalFileSystem: CleanupFileSystem {
         beforeMove?(item.path)
         guard renameatx_np(parent.fd, parent.name, staging.fd, Staging.slot, UInt32(RENAME_EXCL)) == 0 else {
             let code = errno
-            staging.remove()
-            if code == ENOENT { throw FileSystemRefusal.missing }
-            throw PlatformError("move", item.path, code)
+            throw discard(staging, item, code == ENOENT ? FileSystemRefusal.missing : PlatformError("move", item.path, code))
         }
 
-        // What was moved is now reachable only through the private staging folder. Is it the reviewed item?
+        // What was moved is now reachable only through the private staging folder. Is it the reviewed item, and
+        // may it still go?
         var s = stat()
         guard fstatat(staging.fd, Staging.slot, &s, AT_SYMLINK_NOFOLLOW) == 0 else {
             throw PlatformError(message: "\(item.path) was moved to \(staging.itemPath) but couldn't be checked there")
         }
         if let m = item.mismatch(against: FileIdentity(path: item.path, stat: s)) {
             try putBack(staging, parent, item, otherwise: "\(item.path) changed while it was being removed")
-            throw FileSystemRefusal.changed(m)
+            throw discard(staging, item, FileSystemRefusal.changed(m))
+        }
+        if let why = protection(item.path) {
+            try putBack(staging, parent, item, otherwise: "\(item.path) became protected while it was being removed")
+            throw discard(staging, item, FileSystemRefusal.protected(why))
         }
 
         var result = RemovalResult()
@@ -174,10 +177,10 @@ public struct LocalFileSystem: CleanupFileSystem {
             guard unlinkat(staging.fd, Staging.slot, 0) == 0 else {
                 let code = errno
                 try putBack(staging, parent, item, otherwise: "\(item.path) couldn't be deleted")
-                throw PlatformError("delete", item.path, code)
+                throw discard(staging, item, PlatformError("delete", item.path, code))
             }
-            staging.remove()
             result.freedBytes = Self.freed(s)
+            report(staging, into: &result)
             return result
         }
 
@@ -186,39 +189,59 @@ public struct LocalFileSystem: CleanupFileSystem {
         guard fd >= 0, fstat(fd, &opened) == 0, opened.st_dev == s.st_dev, opened.st_ino == s.st_ino else {
             if fd >= 0 { Darwin.close(fd) }
             try putBack(staging, parent, item, otherwise: "\(item.path) couldn't be opened")
-            throw PlatformError(message: "\(item.path) couldn't be opened for removal; nothing was deleted")
+            throw discard(staging, item, PlatformError(message: "\(item.path) couldn't be opened for removal; nothing was deleted"))
         }
         var kept: [(rel: String, reason: KeptEntry.Reason)] = []
-        Self.removeContents(of: fd, rel: "", device: s.st_dev, cutoff: item.capturedAtNanos,
-                            freed: &result.freedBytes, kept: &kept)
+        Self.removeContents(of: fd, rel: "", root: item.path, device: s.st_dev, cutoff: item.capturedAtNanos,
+                            protection: protection, freed: &result.freedBytes, kept: &kept)
         Darwin.close(fd)
 
-        if unlinkat(staging.fd, Staging.slot, AT_REMOVEDIR) == 0 {
-            staging.remove()
+        // The folder itself goes last, and only if it may still go.
+        if let why = protection(item.path) {
+            kept.append(("", .protected(why)))
+        } else if unlinkat(staging.fd, Staging.slot, AT_REMOVEDIR) == 0 {
             result.freedBytes += Self.freed(s)
+            report(staging, into: &result)
             return result
+        } else if kept.isEmpty {
+            kept.append(("", .failed(String(cString: strerror(errno)))))
         }
-        if kept.isEmpty { kept.append(("", .failed(String(cString: strerror(errno))))) }
         // Something stays: put the folder back under its own name so what was kept is where it was.
         let base: String
         if renameatx_np(staging.fd, Staging.slot, parent.fd, parent.name, UInt32(RENAME_EXCL)) == 0 {
-            staging.remove()
             base = item.path
         } else {
             base = staging.itemPath   // its name was taken meanwhile; say where it is
         }
         result.kept = kept.map { KeptEntry(path: base + $0.rel, reason: $0.reason) }
+        report(staging, into: &result)
         return result
     }
 
     /// Moves the staged item back to its own name. If the name was taken meanwhile, says where the item is.
     private func putBack(_ staging: Staging, _ parent: Parent, _ item: FileIdentity, otherwise what: String) throws {
-        if renameatx_np(staging.fd, Staging.slot, parent.fd, parent.name, UInt32(RENAME_EXCL)) == 0 {
-            staging.remove()
-            return
-        }
+        guard renameatx_np(staging.fd, Staging.slot, parent.fd, parent.name, UInt32(RENAME_EXCL)) != 0 else { return }
         throw PlatformError(message: "\(what), and something new took its name. Nothing was deleted; "
                             + "the item is at \(staging.itemPath)")
+    }
+
+    /// Removes the staging folder; if it can't be removed, the result says where it was left.
+    private func report(_ staging: Staging, into result: inout RemovalResult) {
+        if let leftover = staging.remove() { result.kept.append(KeptEntry(path: leftover, reason: .stagingLeftBehind)) }
+    }
+
+    /// The error to throw after giving up: `error`, unless the staging folder can't be removed, in which case an
+    /// error that also says where it was left (so a leftover is never silent).
+    private func discard(_ staging: Staging, _ item: FileIdentity, _ error: Error) -> Error {
+        guard let leftover = staging.remove() else { return error }
+        let what: String
+        switch error {
+        case FileSystemRefusal.missing: what = "\(item.path) was gone; nothing was deleted."
+        case FileSystemRefusal.changed: what = "\(item.path) changed since it was reviewed; nothing was deleted."
+        case FileSystemRefusal.protected(let why): what = "\(item.path) is protected (\(why)); nothing was deleted."
+        default: what = "\(error)."
+        }
+        return PlatformError(message: what + " Mac Cleaner's work folder couldn't be removed and is at \(leftover)")
     }
 
     /// After an open of `item` failed: a refusal when it is gone or changed, else the system error.
@@ -240,9 +263,11 @@ public struct LocalFileSystem: CleanupFileSystem {
         nanos(s.st_birthtimespec) > cutoff || nanos(s.st_ctimespec) > cutoff
     }
 
-    /// Deletes what is inside the open folder, entry by entry through descriptors. Keeps (and records) entries
-    /// created or changed after `cutoff`, other volumes, and whatever the system refuses to delete.
-    private static func removeContents(of fd: Int32, rel: String, device: dev_t, cutoff: Int64,
+    /// Deletes what is inside the open folder, entry by entry through descriptors. Keeps (and records) entries that
+    /// are protected now (asked right before each deletion, by original path `root + rel`), created or changed after
+    /// `cutoff`, on other volumes, or that the system refuses to delete. A kept entry keeps its folders too.
+    private static func removeContents(of fd: Int32, rel: String, root: String, device: dev_t, cutoff: Int64,
+                                       protection: RemovalProtection,
                                        freed total: inout Int64, kept: inout [(rel: String, reason: KeptEntry.Reason)]) {
         guard let names = names(in: fd) else { kept.append((rel, .failed("couldn't list its contents"))); return }
         for name in names {
@@ -252,6 +277,7 @@ public struct LocalFileSystem: CleanupFileSystem {
                 if errno != ENOENT { kept.append((childRel, .failed(String(cString: strerror(errno))))) }
                 continue
             }
+            if let why = protection(root + childRel) { kept.append((childRel, .protected(why))); continue }
             if s.st_dev != device { kept.append((childRel, .otherVolume)); continue }
             if changedAfter(s, cutoff) { kept.append((childRel, .changedAfterReview)); continue }
             if s.st_mode & S_IFMT == S_IFDIR {
@@ -263,11 +289,15 @@ public struct LocalFileSystem: CleanupFileSystem {
                     continue
                 }
                 let before = kept.count
-                removeContents(of: child, rel: childRel, device: device, cutoff: cutoff, freed: &total, kept: &kept)
+                removeContents(of: child, rel: childRel, root: root, device: device, cutoff: cutoff,
+                               protection: protection, freed: &total, kept: &kept)
                 Darwin.close(child)
-                if unlinkat(fd, name, AT_REMOVEDIR) == 0 { total += freed(s) }
+                if let why = protection(root + childRel) { kept.append((childRel, .protected(why))) }
+                else if unlinkat(fd, name, AT_REMOVEDIR) == 0 { total += freed(s) }
                 else if kept.count > before { kept.append((childRel, .notEmpty)) }
                 else { kept.append((childRel, .failed(String(cString: strerror(errno))))) }
+            } else if let why = protection(root + childRel) {
+                kept.append((childRel, .protected(why)))
             } else if unlinkat(fd, name, 0) == 0 {
                 total += freed(s)
             } else {
@@ -383,6 +413,7 @@ private struct Staging {
     let fd: Int32
     let parentFD: Int32
     let name: String
+    let path: String
     let itemPath: String
 
     init(in parent: Parent) throws {
@@ -392,14 +423,19 @@ private struct Staging {
         fd = openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {
             let code = errno
-            unlinkat(parent.fd, name, AT_REMOVEDIR)
-            throw PlatformError("open", parent.path + "/" + name, code)
+            let left = unlinkat(parent.fd, name, AT_REMOVEDIR) == 0 ? "" : " (it was left there)"
+            throw PlatformError(message: "\(PlatformError("open", parent.path + "/" + name, code))\(left)")
         }
-        itemPath = parent.path + "/" + name + "/" + Self.slot
+        path = parent.path + "/" + name
+        itemPath = path + "/" + Self.slot
     }
 
     func close() { Darwin.close(fd) }
 
-    /// Removes the staging folder if it is empty; a non-empty one is left for the person (its path is reported).
-    func remove() { unlinkat(parentFD, name, AT_REMOVEDIR) }
+    /// Removes the staging folder. nil when it is gone; otherwise its path, which the caller must report (it is
+    /// never removed when something is still in it).
+    func remove() -> String? {
+        if unlinkat(parentFD, name, AT_REMOVEDIR) == 0 || errno == ENOENT { return nil }
+        return path
+    }
 }

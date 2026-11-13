@@ -8,7 +8,13 @@ import Foundation
 public enum FileSystemRefusal: Error, Sendable, Hashable {
     case missing
     case changed(IdentityMismatch)
+    /// Protected by the time it was reached (re-checked after it was moved out of reach, before deleting).
+    case protected(String)
 }
+
+/// The protection rules for one removal, asked again for every entry right before it is deleted: nil when the path
+/// (its original location, never a staging path) may go; otherwise why not. Must read the rules as they are now.
+public typealias RemovalProtection = @Sendable (String) -> String?
 
 public struct TrashResult: Sendable, Hashable {
     /// Space it took on disk, measured right before the move.
@@ -43,8 +49,10 @@ public protocol CleanupFileSystem: Sendable {
     /// The folder's direct entries now. Throws `FileSystemRefusal` when the folder isn't `folder` any more.
     func entries(of folder: FileIdentity) throws -> [FileIdentity]
     func moveToTrash(_ item: FileIdentity) throws -> TrashResult
-    /// Removes the item permanently; a folder with everything in it, without crossing into other volumes.
-    func remove(_ item: FileIdentity) throws -> RemovalResult
+    /// Removes the item permanently; a folder with everything in it, without crossing into other volumes. Every
+    /// entry is checked with `protection` right before it is deleted; a refused entry is kept with everything in
+    /// it, and so are the folders holding it (fail closed).
+    func remove(_ item: FileIdentity, protection: RemovalProtection) throws -> RemovalResult
 }
 
 /// The protection rules as they are at execution time (something may have been protected after review).

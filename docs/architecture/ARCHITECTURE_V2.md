@@ -51,7 +51,7 @@ All types are `Sendable` value types.
 | `ScanOutcome<Item>` | `items`, `inaccessible: [AccessProblem]`, `partialErrors`, `wasCancelled`, `isComplete`, `warnings`. |
 | `CleanupPlan` | ordered candidates + dispositions + a `digest` (SHA-256) over ids, module, **risk**, disposition and target *identities* (every reviewed folder entry; a command's executable, arguments and **consequence**), not just paths. Display text (title, explanation, sizes) is left out. |
 | `CleanupApproval` | `planDigest`, `approvedBy: .userInApp / .userInTerminal / .userViaMCPPrompt / .standingPolicy(AutomationPolicy.id, version)`, `expires`, single-use nonce. An agent cannot mint one. |
-| `ApprovalLedger` | The only maker of `CleanupApproval` (its initializer is internal to Core) and the only place one is accepted. Owned by the executor; `issue` is reachable only from the trusted flows (review sheet, terminal prompt on a TTY, `HumanApproval` window for MCP, an enabled `AutomationPolicy`). `redeem` checks issued here, unused, same plan digest, inside `[issued, expires)`, and consumes the approval whatever the result (fail closed). |
+| `ApprovalLedger` | The only maker of `CleanupApproval` (its initializer is internal to Core) and the only place one is accepted. Owned by the executor. `redeem` checks issued here, unused, same plan digest, inside `[issued, expires)`, and consumes the approval whatever the result (fail closed). It does **not** verify that a person approved: the `Approver` is the caller's label, so only calling `CleanupExecutor.approve` from the trusted flows (review sheet, TTY prompt, `HumanApproval` window for MCP, an enabled `AutomationPolicy`) makes it true. That is an open requirement for M01-04b. |
 | `AutomationPolicy` | A standing, opt-in authorization for unattended runs (scheduled safe clean). See §3a. |
 | `CleanupReport` / `ItemOutcome` | per-target `.removed(bytes)`, `.trashed(recoveryURL)`, `.skipped(reason)`, `.failed(error)`, `.partiallyDone(done, kept, damaged)`; totals split into *freed* vs *moved to Trash*. A report never rounds a partial outcome up to success or down to "nothing happened". |
 | `ProtectionPolicy` | merges hard-coded structural/sensitive roots, user protection, scan exclusions, module exclusions; one case-insensitive comparison; documented precedence: **hard-coded > user protected > module exclusion > scan exclusion**. |
@@ -73,8 +73,10 @@ trashes, overwrites or quarantines anything. The app, CLI, MCP and scheduler all
 3. Perform the disposition without a check-then-delete-by-path race (M01-04a, `LocalFileSystem`): a permanent
    removal first renames the item (relative to its open parent, `RENAME_EXCL`) into a private 0700 staging folder,
    re-checks its identity there and moves it back if it isn't the reviewed item; only then deletes it through
-   descriptors (`openat`/`unlinkat`). Below a folder, entries created or changed after the identity was captured
-   (birth/status-change time) and other volumes are kept and reported. Trash moves are reversible, so they are
+   descriptors (`openat`/`unlinkat`). Protection is asked again for every entry, by its original path, right before
+   it is deleted, and for the folder itself before it goes; a protected entry is kept with the folders holding it.
+   Below a folder, entries created or changed after the identity was captured (birth/status-change time) and other
+   volumes are kept and reported. A staging folder that can't be removed is always reported by path. Trash moves are reversible, so they are
    checked after the move and moved straight back on a mismatch.
 4. Emit `itemFinished` with the true outcome. No aggregate "success" unless every item succeeded.
 5. Append the item to the open `CleanupSession` in persistence.

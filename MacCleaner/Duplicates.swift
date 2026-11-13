@@ -140,6 +140,19 @@ enum DupEngine {
     typealias ReadChunk = (FileHandle, Int) throws -> Data
     static let systemRead: ReadChunk = { h, n in try h.read(upToCount: n) ?? Data() }
 
+    /// Reads exactly `count` bytes, continuing after short reads. Fewer bytes back means the file ended;
+    /// nil means a read failed.
+    static func readExactly(_ h: FileHandle, _ count: Int, read: ReadChunk) -> Data? {
+        var out = Data()
+        out.reserveCapacity(count)
+        while out.count < count {
+            guard let d = try? read(h, count - out.count) else { return nil }
+            if d.isEmpty { break }
+            out.append(d.prefix(count - out.count))
+        }
+        return out
+    }
+
     static func identical(_ a: URL, _ b: URL, size: Int64, read: ReadChunk = systemRead) -> Bool {
         var sa = stat(), sb = stat()
         guard lstat(a.path, &sa) == 0, lstat(b.path, &sb) == 0,
@@ -149,15 +162,17 @@ enum DupEngine {
               !(sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) else { return false }
         guard let ha = try? FileHandle(forReadingFrom: a), let hb = try? FileHandle(forReadingFrom: b) else { return false }
         defer { try? ha.close(); try? hb.close() }
-        // Any read error, or a short read on either side, means "not proven identical".
+        // Compare exactly `size` bytes. Short reads are continued; a read error, or either file ending early
+        // (truncated) or going on past `size` (grown), means "not proven identical".
         var compared: Int64 = 0
-        while true {
-            guard let da = try? read(ha, 1 << 20), let db = try? read(hb, 1 << 20) else { return false }
-            if da != db { return false }
-            if da.isEmpty { return compared == size }
-            compared += Int64(da.count)
-            if compared > size { return false }
+        while compared < size {
+            let want = Int(min(Int64(1 << 20), size - compared))
+            guard let da = readExactly(ha, want, read: read), let db = readExactly(hb, want, read: read),
+                  da.count == want, db.count == want, da == db else { return false }
+            compared += Int64(want)
         }
+        guard let ea = readExactly(ha, 1, read: read), let eb = readExactly(hb, 1, read: read) else { return false }
+        return ea.isEmpty && eb.isEmpty
     }
 
     private static func uniqueLocalFiles(_ files: [URL]) -> [URL] {
@@ -178,18 +193,14 @@ enum DupEngine {
         var hasher = SHA256()
         let chunk = 64 * 1024
         if size > Int64(chunk * 2) {
-            guard let head = try? read(h, chunk), head.count == chunk else { return nil }
+            guard let head = readExactly(h, chunk, read: read), head.count == chunk else { return nil }
             hasher.update(data: head)
             guard (try? h.seek(toOffset: UInt64(size) - UInt64(chunk))) != nil,
-                  let tail = try? read(h, chunk), tail.count == chunk else { return nil }
+                  let tail = readExactly(h, chunk, read: read), tail.count == chunk else { return nil }
             hasher.update(data: tail)
         } else {
-            var got = 0
-            while got < Int(size) {
-                guard let d = try? read(h, Int(size) - got), !d.isEmpty else { return nil }
-                hasher.update(data: d)
-                got += d.count
-            }
+            guard let all = readExactly(h, Int(size), read: read), all.count == Int(size) else { return nil }
+            hasher.update(data: all)
         }
         return hex(hasher.finalize())
     }

@@ -792,31 +792,88 @@ enum SelfTest {
 
         print("Duplicates: read failures never count as a match (SAFE-05)")
         let rfA = sandbox.appendingPathComponent("dup-read-a"), rfB = sandbox.appendingPathComponent("dup-read-b")
-        var rfData = dupData; rfData[0] = 7
+        let rfC = sandbox.appendingPathComponent("dup-read-c")
+        var rfData = Data((0..<2_500_000).map { UInt8(($0 * 31 + 7) % 251) })      // > 2 chunks of 1 MB
+        rfData[0] = 7
         fm.createFile(atPath: rfA.path, contents: rfData)
-        var rfOther = rfData; rfOther[299_999] ^= 1                      // same size, different content
-        fm.createFile(atPath: rfB.path, contents: rfOther)
-        struct ReadFailed: Error {}
-        let failing: DupEngine.ReadChunk = { _, _ in throw ReadFailed() }
-        let short: DupEngine.ReadChunk = { h, n in try h.read(upToCount: min(n, 1000)).map { _ in Data() } ?? Data() }
+        fm.createFile(atPath: rfB.path, contents: rfData)                         // a real copy
+        var rfOther = rfData; rfOther[2_400_000] ^= 1                            // same size, one byte differs
+        fm.createFile(atPath: rfC.path, contents: rfOther)
         let size = Int64(rfData.count)
+        struct ReadFailed: Error {}
+        /// Real reads cut into odd, non-empty pieces (1 byte to ~70 KB), varying call by call — the kind of
+        /// short reads a network or FUSE file system can return. Different pieces for the two files.
+        final class Fragmenter: @unchecked Sendable {
+            private let lock = NSLock(); private var n = 0
+            let sizes = [1, 7, 4093, 65_536, 13, 70_001, 512, 3]
+            func read(_ h: FileHandle, _ want: Int) throws -> Data {
+                lock.lock(); n += 1; let piece = sizes[n % sizes.count]; lock.unlock()
+                return try h.read(upToCount: min(want, piece)) ?? Data()
+            }
+        }
+        let frag = Fragmenter()
+        let fragmented: DupEngine.ReadChunk = { h, n in try frag.read(h, n) }
+        /// Gives a few real pieces, then fails (an I/O error part-way through).
+        final class FailLater: @unchecked Sendable {
+            private let lock = NSLock(); private var n = 0
+            func read(_ h: FileHandle, _ want: Int) throws -> Data {
+                lock.lock(); n += 1; let k = n; lock.unlock()
+                if k > 3 { throw ReadFailed() }
+                return try h.read(upToCount: min(want, 1000)) ?? Data()
+            }
+        }
+        let failing: DupEngine.ReadChunk = { _, _ in throw ReadFailed() }
+        let cancelNever = DupEngine.Cancel()
+        let sysA = DupEngine.fullHash(rfA, size: size, cancel: cancelNever)
+        check("valid partial reads: copies are still recognised as identical",
+              DupEngine.identical(rfA, rfB, size: size, read: fragmented))
+        check("valid partial reads: files differing in one byte are still told apart",
+              !DupEngine.identical(rfA, rfC, size: size, read: fragmented))
+        check("valid partial reads: hashes equal the ones from whole reads",
+              sysA != nil && DupEngine.fullHash(rfA, size: size, cancel: cancelNever, read: fragmented) == sysA
+              && DupEngine.partialHash(rfA, size: size, read: fragmented) == DupEngine.partialHash(rfA, size: size)
+              && DupEngine.partialHash(rfA, size: 100_000, read: fragmented) == DupEngine.partialHash(rfA, size: 100_000))
         check("identical() is false when both files fail to read (used to be true)",
               !DupEngine.identical(rfA, rfB, size: size, read: failing))
-        check("identical() is false when reads stop short of the size",
-              !DupEngine.identical(rfA, rfB, size: size, read: short))
-        check("identical() still says different files differ and copies match",
-              !DupEngine.identical(rfA, rfB, size: size)
-              && DupEngine.identical(rfA, { fm.createFile(atPath: rfB.path, contents: rfData); return rfB }(), size: size))
+        let later1 = FailLater(), later2 = FailLater(), later3 = FailLater()
+        check("a read error after some good reads never gives a match or a hash",
+              !DupEngine.identical(rfA, rfB, size: size, read: { h, n in try later1.read(h, n) })
+              && DupEngine.fullHash(rfA, size: size, cancel: cancelNever, read: { h, n in try later2.read(h, n) }) == nil
+              && DupEngine.partialHash(rfA, size: size, read: { h, n in try later3.read(h, n) }) == nil)
         check("hashes are nil on a read error, so unreadable files are never grouped",
               DupEngine.partialHash(rfA, size: size, read: failing) == nil
-              && DupEngine.fullHash(rfA, size: size, cancel: DupEngine.Cancel(), read: failing) == nil
+              && DupEngine.fullHash(rfA, size: size, cancel: cancelNever, read: failing) == nil
               && DupEngine.partialHash(rfA, size: 1000, read: failing) == nil)
+        // Truncated: the file is cut short while it is being compared or hashed.
+        let rfT = sandbox.appendingPathComponent("dup-read-t")
+        fm.createFile(atPath: rfT.path, contents: rfData)
+        var truncated = false
+        let truncating: DupEngine.ReadChunk = { h, n in
+            if !truncated { truncated = true; truncate(rfT.path, 1_000_000) }
+            return try h.read(upToCount: n) ?? Data()
+        }
+        let truncDiffers = !DupEngine.identical(rfA, rfT, size: size, read: truncating)
+        fm.createFile(atPath: rfT.path, contents: rfData); truncated = false
+        let truncHash = DupEngine.fullHash(rfT, size: size, cancel: cancelNever, read: truncating)
+        fm.createFile(atPath: rfT.path, contents: rfData); truncated = false
+        let truncPartial = DupEngine.partialHash(rfT, size: size, read: truncating)
+        check("a file truncated during the compare or hash is rejected", truncDiffers && truncHash == nil && truncPartial == nil)
         check("hashes are nil when the file is shorter than its listed size",
-              DupEngine.fullHash(rfA, size: size + 1, cancel: DupEngine.Cancel()) == nil
-              && DupEngine.partialHash(rfA, size: size, read: short) == nil)
-        check("hashes of identical readable files still match",
-              DupEngine.fullHash(rfA, size: size, cancel: DupEngine.Cancel()) != nil
-              && DupEngine.fullHash(rfA, size: size, cancel: DupEngine.Cancel()) == DupEngine.fullHash(rfB, size: size, cancel: DupEngine.Cancel())
+              DupEngine.fullHash(rfA, size: size + 1, cancel: cancelNever) == nil
+              && DupEngine.partialHash(sandbox.appendingPathComponent("dup-read-a"), size: 100_000_000) == nil)
+        check("a file that grew past its scanned size is not called identical",
+              { () -> Bool in
+                  let g = sandbox.appendingPathComponent("dup-read-g")
+                  fm.createFile(atPath: g.path, contents: rfData)
+                  let grow: DupEngine.ReadChunk = { h, n in
+                      if let fh = try? FileHandle(forWritingTo: g) { fh.seekToEndOfFile(); fh.write(Data([1])); try? fh.close() }
+                      return try h.read(upToCount: n) ?? Data()
+                  }
+                  return !DupEngine.identical(rfA, g, size: size, read: grow)
+              }())
+        check("identical readable copies still match with ordinary reads",
+              DupEngine.identical(rfA, rfB, size: size) && !DupEngine.identical(rfA, rfC, size: size)
+              && DupEngine.fullHash(rfB, size: size, cancel: cancelNever) == sysA
               && DupEngine.partialHash(rfA, size: size) == DupEngine.partialHash(rfB, size: size))
 
         print("Audit P2 fixes (weekly clean scope)")

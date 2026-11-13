@@ -54,11 +54,39 @@ public enum SkipReason: Sendable, Hashable {
     case protected(String)
     /// It isn't the item that was reviewed any more.
     case changed(IdentityMismatch)
+    /// Already gone when its turn came.
     case missing
     /// An entry that appeared in a reviewed folder after review. Left alone: the person never saw it.
     case addedAfterReview
     /// The person cancelled before this item.
     case cancelled
+}
+
+/// Something a removal left in place, and why.
+public struct KeptEntry: Sendable, Hashable {
+    public enum Reason: Sendable, Hashable {
+        /// Created or changed after the item was reviewed (or a folder holding such an entry).
+        case changedAfterReview
+        /// Another volume mounted inside the folder; never entered.
+        case otherVolume
+        /// Became protected during the removal (checked again right before each entry is deleted).
+        case protected(String)
+        /// Holds entries that were kept for another reason, so it couldn't be removed.
+        case notEmpty
+        /// The removal's private staging folder couldn't be removed afterwards; `path` says where it is.
+        case stagingLeftBehind
+        /// The system refused (locked, no permission, unreadable folder, …).
+        case failed(String)
+    }
+
+    /// Where it is now.
+    public let path: String
+    public let reason: Reason
+
+    public init(path: String, reason: Reason) {
+        self.path = path
+        self.reason = reason
+    }
 }
 
 /// What happened to one target.
@@ -69,9 +97,10 @@ public struct ItemOutcome: Sendable, Hashable {
         case trashed(bytes: Int64, recoveryPath: String)
         case skipped(SkipReason)
         case failed(String)
-        /// Stopped part-way: `freedBytes` are gone, the `kept` paths are untouched, the `damaged` paths are still
-        /// there but changed (an overwrite that failed part-way). Never reported as success or as nothing done.
-        case partiallyDone(freedBytes: Int64, kept: [String], damaged: [String])
+        /// Stopped part-way: `freedBytes` are gone, the `kept` entries are untouched (each with why), the `damaged`
+        /// paths are still there but changed (an overwrite that failed part-way). Never reported as success or as
+        /// nothing done.
+        case partiallyDone(freedBytes: Int64, kept: [KeptEntry], damaged: [String])
     }
 
     public let candidateID: String

@@ -69,3 +69,30 @@ module then isn't visible to the app ("no such module 'MacCleanerCore'" on a fre
 26.3 locally). Every command-line build goes through `scripts/xcbuild.sh`, which sets one absolute `SYMROOT` for
 both. `scripts/clean-build-check.sh` builds and tests the committed HEAD in a brand-new worktree, the way CI does.
 Building in the Xcode app (scheme/workspace build) is unaffected.
+
+### D-013 Removal moves the item out of reach before deleting it (2026-11-13)
+A path check followed by a path-based delete can be raced by another process swapping the item. macOS has no
+"unlink only if this inode" call. **Decision:** `LocalFileSystem.remove` renames the item (relative to its open
+parent, `RENAME_EXCL`) into a private 0700 staging folder with a random name, re-checks the identity there, moves it
+back on a mismatch, and only then deletes through descriptors. Paths are opened with `O_NOFOLLOW_ANY`, so a symlink
+anywhere in the path is refused; callers pass resolved paths. **Consequence:** a removal needs write access to the
+parent (it already did). A staging folder that can't be removed is reported in the result (or in the error), never
+dropped silently; a crash mid-removal can still leave a `.maccleaner-rm-*` folder next to the item, which nothing
+cleans up yet. Protection is asked again for each entry right before it is deleted, so something protected during
+a long removal is kept, with the folders holding it (fail closed).
+
+### D-014 Nothing below a folder newer than its review is deleted (2026-11-13)
+A folder's own identity doesn't change when entries are added deep inside it. **Decision:** `FileIdentity` records
+when it was captured; removing a folder keeps every entry below it whose birth or status-change time is later
+(an unknown capture time keeps everything), and folder-contents targets act only on their reviewed entries.
+**Consequence:** caches an app is writing to are often removed only partly; the report says what was kept and why.
+
+### D-015 Approvals are made only by the executor, used once, and never leave the process (2026-11-13)
+**Decision:** `ApprovalLedger` is `package`-only and `~Copyable`; `CleanupApproval` has no public initializer. Code
+outside MacCleanerKit gets an approval only from `CleanupExecutor.approve`, called from the four trusted flows.
+Approvals are in memory and never serialized, so one made in the app can't be used by a `--cli` or `--mcp` process
+(each has its own executor and ledger), and none survives a restart. **Consequence:** the CLI prompt and the MCP
+confirmation window must approve inside the process that executes (they already do).
+**Not guaranteed:** the ledger does not verify that a person or an enabled policy approved. `approve(plan, by:)`
+trusts its caller's `Approver` label; the ledger is a record of a claim, not proof of human authorization. Only
+calling it from the trusted flows makes the label true, and that is an open requirement for M01-04b.

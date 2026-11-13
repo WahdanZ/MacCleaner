@@ -204,11 +204,13 @@ private struct DigestWriter {
         string(f.kind.rawValue)
         int(UInt64(bitPattern: f.size))
         int(UInt64(bitPattern: f.modificationNanos))
+        int(UInt64(bitPattern: f.capturedAtNanos))
     }
 }
 
-/// The person's go-ahead for one exact plan. Only an `ApprovalLedger` can make one (the initializer is internal to
-/// Core), and only that ledger accepts it, once. See `ApprovalLedger` for who may ask the ledger to issue one.
+/// A recorded go-ahead for one exact plan. Only an `ApprovalLedger` can make one (the initializer is internal to
+/// Core), and only that ledger accepts it, once. It records who the caller said approved; it is not proof that they
+/// did (see `ApprovalLedger`).
 public struct CleanupApproval: Sendable, Hashable {
     public enum Approver: Sendable, Hashable {
         /// The person pressed the button in the app's review sheet showing this plan.
@@ -219,6 +221,15 @@ public struct CleanupApproval: Sendable, Hashable {
         case userViaMCPPrompt
         /// An enabled, versioned automation policy whose scope covers every entry of the plan.
         case standingPolicy(id: String, version: Int)
+    }
+
+    /// Why no approval was issued.
+    public enum IssueRefusal: Error, Sendable, Hashable {
+        /// Zero, negative or longer than the ledger's maximum lifetime.
+        case invalidLifetime
+        /// A standing policy may approve only regenerable items deleted permanently, never commands, Trash moves,
+        /// overwrites or anything that needs review.
+        case outsidePolicyScope(candidateID: String)
     }
 
     public enum Refusal: Error, Sendable, Hashable {
@@ -254,29 +265,60 @@ public struct CleanupApproval: Sendable, Hashable {
     }
 }
 
-/// Issues approvals and accepts each one exactly once. The cleanup executor owns the only ledger (M01-04) and
-/// exposes `issue` only to the trusted approval flows named by `CleanupApproval.Approver`, each of which calls it
-/// after a person (or an enabled policy) approved the very plan it showed. An AI client's `confirm: true` reaches
-/// none of them. Redeeming consumes the approval whatever the result: an approval presented with a changed plan
-/// or too late is gone, and the person must approve again (fail closed).
-public struct ApprovalLedger: Sendable {
+/// Issues approvals and accepts each one exactly once.
+///
+/// **What it does NOT do: verify that a person (or an enabled policy) approved anything.** `approvedBy` is a label the
+/// caller supplies. The ledger is a record of an approval claim, not proof of human authorization. Making sure that
+/// `CleanupExecutor.approve` is called only right after a real confirmation (review sheet, terminal prompt on a TTY,
+/// Mac Cleaner's own window for MCP) or for an enabled, in-scope automation policy is an integration requirement
+/// that is NOT met yet: M01-04b must meet it before the executor removes anything for the app, CLI or MCP.
+///
+/// What it does guarantee:
+///
+/// * **Creation only inside MacCleanerKit.** `CleanupApproval` has no public initializer and this type is
+///   `package`-only, so code outside MacCleanerKit (the app, CLI and MCP code) can't make an approval except through
+///   `CleanupExecutor.approve`. A standing policy can only approve what policies may cover (see `IssueRefusal`).
+/// * **Plan binding.** An approval names the plan's digest; any other plan is refused.
+/// * **Expiry.** Lifetimes are positive and at most `maxLifetime`; an approval is valid in `[issued, expires)`.
+/// * **Single use.** `redeem` consumes the approval whatever the result (fail closed: a refused approval can't be
+///   retried, the caller approves again). The ledger is `~Copyable`, so its state can't be duplicated to replay one.
+/// * **Per process.** The ledger lives in memory in one process and approvals are never serialized. The app, each
+///   `--cli` run and each `--mcp` server are separate processes with separate ledgers: an approval made in one can't
+///   be redeemed in another (`notIssued`), and none survives a restart. So the CLI's terminal prompt and the MCP
+///   server's own confirmation window must each approve inside the process that executes.
+package struct ApprovalLedger: ~Copyable, Sendable {
+    package typealias Approver = CleanupApproval.Approver
+
+    package typealias IssueRefusal = CleanupApproval.IssueRefusal
+
+    package static let maxLifetime: TimeInterval = 3600
+
     private var outstanding: [UUID: CleanupApproval] = [:]
     /// Consumed nonces, kept until their approval would have expired so a replay says `alreadyUsed`.
     private var consumed: [UUID: Date] = [:]
 
-    public init() {}
+    package init() {}
 
-    public mutating func issue(for plan: CleanupPlan, approvedBy: Approver, at now: Date,
-                               lifetime: TimeInterval) -> CleanupApproval {
+    package mutating func issue(for plan: CleanupPlan, approvedBy: Approver, at now: Date,
+                                lifetime: TimeInterval) throws(IssueRefusal) -> CleanupApproval {
+        guard lifetime > 0, lifetime <= Self.maxLifetime else { throw .invalidLifetime }
+        if case .standingPolicy = approvedBy {
+            for e in plan.entries {
+                let c = e.candidate
+                let files = c.targets.allSatisfy { if case .command = $0 { return false }; return true }
+                guard c.risk == .safeRegenerable, e.disposition == .permanentDelete, files else {
+                    throw .outsidePolicyScope(candidateID: c.id)
+                }
+            }
+        }
+        prune(at: now)
         let a = CleanupApproval(plan: plan, approvedBy: approvedBy, issued: now, lifetime: lifetime, nonce: UUID())
         outstanding[a.nonce] = a
         return a
     }
 
-    public typealias Approver = CleanupApproval.Approver
-
     /// nil when `approval` authorizes `plan` now; it is then used up. Any result consumes an issued approval.
-    public mutating func redeem(_ approval: CleanupApproval, for plan: CleanupPlan, at now: Date) -> CleanupApproval.Refusal? {
+    package mutating func redeem(_ approval: CleanupApproval, for plan: CleanupPlan, at now: Date) -> CleanupApproval.Refusal? {
         defer { prune(at: now) }
         if consumed[approval.nonce] != nil { return .alreadyUsed }
         guard let issued = outstanding[approval.nonce], issued == approval else { return .notIssued }
@@ -286,10 +328,10 @@ public struct ApprovalLedger: Sendable {
     }
 
     /// Approvals issued and not yet presented.
-    public var outstandingCount: Int { outstanding.count }
+    package var outstandingCount: Int { outstanding.count }
 
     /// Forgets expired approvals and the used nonces whose approval has expired.
-    public mutating func prune(at now: Date) {
+    package mutating func prune(at now: Date) {
         outstanding = outstanding.filter { $0.value.expires > now }
         consumed = consumed.filter { $0.value > now }
     }

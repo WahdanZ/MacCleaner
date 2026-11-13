@@ -106,6 +106,16 @@ struct CleanupPlanTests {
         #expect(a.digest != relinked.digest)
     }
 
+    @Test func digestCoversTheSnapshotTime() {
+        func at(_ t: Int64) -> CleanupPlan {
+            let f = ident()
+            return plan([.init(candidate(targets: [.file(FileIdentity(path: f.path, device: f.device, inode: f.inode, kind: f.kind,
+                                                                       size: f.size, modificationNanos: f.modificationNanos,
+                                                                       capturedAtNanos: t))]), .permanentDelete)])
+        }
+        #expect(at(1).digest != at(2).digest)
+    }
+
 
     @Test func digestCoversDispositionTargetFormAndOrder() {
         let x = candidate("x"), y = candidate("y", targets: [.file(ident(inode: 7))])
@@ -198,53 +208,74 @@ struct ApprovalLedgerTests {
     let p = plan([.init(candidate(), .permanentDelete)])
     let t0 = Date(timeIntervalSince1970: 1_000_000)
 
-    @Test func anIssuedApprovalWorksOnceForItsPlan() {
+    @Test func anIssuedApprovalWorksOnceForItsPlan() throws {
         var ledger = ApprovalLedger()
-        let a = ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 60)
+        let a = try ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 60)
         #expect(a.planDigest == p.digest && a.expires == t0 + 60)
         #expect(ledger.redeem(a, for: p, at: t0 + 59) == nil)
         #expect(ledger.redeem(a, for: p, at: t0 + 59) == .alreadyUsed)
         #expect(ledger.outstandingCount == 0)
     }
 
-    @Test func anApprovalNotIssuedHereIsRefused() {
+    @Test func anApprovalNotIssuedHereIsRefused() throws {
         var mine = ApprovalLedger(), other = ApprovalLedger()
-        let foreign = other.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 60)
+        let foreign = try other.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 60)
         #expect(mine.redeem(foreign, for: p, at: t0) == .notIssued)
         // Made outside a ledger (only possible inside Core; the initializer isn't public).
         let forged = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 60, nonce: UUID())
         #expect(mine.redeem(forged, for: p, at: t0) == .notIssued)
     }
 
-    @Test func aTamperedCopyIsRefused() {
+    @Test func aTamperedCopyIsRefused() throws {
         var ledger = ApprovalLedger()
-        let a = ledger.issue(for: p, approvedBy: .userViaMCPPrompt, at: t0, lifetime: 60)
+        let a = try ledger.issue(for: p, approvedBy: .userViaMCPPrompt, at: t0, lifetime: 60)
         let copy = CleanupApproval(plan: p, approvedBy: .userInApp, issued: t0, lifetime: 600, nonce: a.nonce)
         #expect(ledger.redeem(copy, for: p, at: t0) == .notIssued)
     }
 
-    @Test func aChangedPlanOrLateUseIsRefusedAndUsesItUp() {
+    @Test func aChangedPlanOrLateUseIsRefusedAndUsesItUp() throws {
         var ledger = ApprovalLedger()
         let swapped = plan([.init(candidate(targets: [.file(ident(inode: 101))]), .permanentDelete)])
-        let a = ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
+        let a = try ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
         #expect(ledger.redeem(a, for: swapped, at: t0) == .planChanged)
         #expect(ledger.redeem(a, for: p, at: t0) == .alreadyUsed)       // fail closed: approve again
 
-        let b = ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
+        let b = try ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
         #expect(ledger.redeem(b, for: p, at: t0 + 60) == .expired)
         #expect(ledger.redeem(b, for: p, at: t0 + 60) == .notIssued)    // used up and past expiry: forgotten
 
-        let c = ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
+        let c = try ledger.issue(for: p, approvedBy: .userInTerminal, at: t0, lifetime: 60)
         ledger.prune(at: t0 + 61)
         #expect(ledger.redeem(c, for: p, at: t0 + 61) == .notIssued)    // expired unused approvals are dropped
     }
 
-    @Test func zeroLifetimeNeverAuthorizes() {
+    @Test func lifetimeMustBePositiveAndBounded() {
         var ledger = ApprovalLedger()
-        let a = ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 0)
-        #expect(ledger.redeem(a, for: p, at: t0) != nil)
-        let b = ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: -5)
-        #expect(ledger.redeem(b, for: p, at: t0) != nil)
+        #expect(throws: ApprovalLedger.IssueRefusal.invalidLifetime) { try ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: 0) }
+        #expect(throws: ApprovalLedger.IssueRefusal.invalidLifetime) { try ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: -5) }
+        #expect(throws: ApprovalLedger.IssueRefusal.invalidLifetime) {
+            try ledger.issue(for: p, approvedBy: .userInApp, at: t0, lifetime: ApprovalLedger.maxLifetime + 1)
+        }
+        #expect(ledger.outstandingCount == 0)
+    }
+
+    @Test func aStandingPolicyCoversOnlyRegenerablePermanentDeletes() throws {
+        var ledger = ApprovalLedger()
+        let policy = CleanupApproval.Approver.standingPolicy(id: "safe-clean", version: 1)
+        _ = try ledger.issue(for: p, approvedBy: policy, at: t0, lifetime: 60)
+        let refused: [(CleanupPlan, String)] = [
+            (plan([.init(candidate("r", risk: .reviewRequired), .permanentDelete)]), "r"),
+            (plan([.init(candidate("t"), .trash)]), "t"),
+            (plan([.init(candidate("o", targets: [.file(ident(kind: .file))]), .overwriteThenDelete)]), "o"),
+            (plan([.init(candidate("c", targets: [.command(simctl)]), .command)]), "c"),
+        ]
+        for (q, id) in refused {
+            #expect(throws: ApprovalLedger.IssueRefusal.outsidePolicyScope(candidateID: id)) {
+                try ledger.issue(for: q, approvedBy: policy, at: t0, lifetime: 60)
+            }
+        }
+        // A person may approve the same plans.
+        for (q, _) in refused { _ = try ledger.issue(for: q, approvedBy: .userInApp, at: t0, lifetime: 60) }
     }
 
     @Test func validityWindowIsHalfOpen() {
@@ -254,10 +285,10 @@ struct ApprovalLedgerTests {
         #expect(a.refusal(for: p, at: t0 - 1) == .expired)
     }
 
-    @Test func eachApprovalHasItsOwnNonceAndApprover() {
+    @Test func eachApprovalHasItsOwnNonceAndApprover() throws {
         var ledger = ApprovalLedger()
-        let a = ledger.issue(for: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), at: t0, lifetime: 60)
-        let b = ledger.issue(for: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), at: t0, lifetime: 60)
+        let a = try ledger.issue(for: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), at: t0, lifetime: 60)
+        let b = try ledger.issue(for: p, approvedBy: .standingPolicy(id: "safe-clean", version: 1), at: t0, lifetime: 60)
         #expect(a.nonce != b.nonce)
         #expect(a.approvedBy != .standingPolicy(id: "safe-clean", version: 2))
         #expect(ledger.outstandingCount == 2)
@@ -293,7 +324,7 @@ struct CleanupReportTests {
 
     @Test func aPartialRemovalIsNeitherSuccessNorNothing() {
         let r = CleanupReport(planDigest: "d", outcomes: [outcome(.removed(bytes: 100)),
-                                                         outcome(.partiallyDone(freedBytes: 30, kept: ["/a"], damaged: []))],
+                                                         outcome(.partiallyDone(freedBytes: 30, kept: [KeptEntry(path: "/a", reason: .changedAfterReview)], damaged: []))],
                               wasCancelled: false)
         #expect(!r.allSucceeded)
         #expect(r.freedBytes == 130)

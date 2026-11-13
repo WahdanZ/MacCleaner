@@ -123,7 +123,7 @@ enum DupEngine {
             for f in same {
                 if cancel.isSet { return [] }
                 meter.update(current: f.path) { _ in }
-                if let h = fullHash(f, cancel: cancel) { byFull[h, default: []].append(f) }
+                if let h = fullHash(f, size: size, cancel: cancel) { byFull[h, default: []].append(f) }
             }
             for (h, dup) in byFull where dup.count > 1 {
                 out.append(DupGroup(id: "\(size)-\(h)", size: size, files: dup.sorted { $0.path < $1.path }))
@@ -136,7 +136,11 @@ enum DupEngine {
     /// True if `a` and `b` are still two different files with the same `size` and byte-for-byte the same content.
     /// Run right before a copy goes to the Trash, because either file may have changed since the scan.
     /// iCloud placeholders count as "not the same" (reading them would download them).
-    static func identical(_ a: URL, _ b: URL, size: Int64) -> Bool {
+    /// Reads up to `count` bytes. Replaceable only so the self-test can simulate read failures.
+    typealias ReadChunk = (FileHandle, Int) throws -> Data
+    static let systemRead: ReadChunk = { h, n in try h.read(upToCount: n) ?? Data() }
+
+    static func identical(_ a: URL, _ b: URL, size: Int64, read: ReadChunk = systemRead) -> Bool {
         var sa = stat(), sb = stat()
         guard lstat(a.path, &sa) == 0, lstat(b.path, &sb) == 0,
               (sa.st_mode & S_IFMT) == S_IFREG, (sb.st_mode & S_IFMT) == S_IFREG,
@@ -145,11 +149,14 @@ enum DupEngine {
               !(sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) else { return false }
         guard let ha = try? FileHandle(forReadingFrom: a), let hb = try? FileHandle(forReadingFrom: b) else { return false }
         defer { try? ha.close(); try? hb.close() }
+        // Any read error, or a short read on either side, means "not proven identical".
+        var compared: Int64 = 0
         while true {
-            let da = (try? ha.read(upToCount: 1 << 20)) ?? Data()
-            let db = (try? hb.read(upToCount: 1 << 20)) ?? Data()
+            guard let da = try? read(ha, 1 << 20), let db = try? read(hb, 1 << 20) else { return false }
             if da != db { return false }
-            if da.isEmpty { return true }
+            if da.isEmpty { return compared == size }
+            compared += Int64(da.count)
+            if compared > size { return false }
         }
     }
 
@@ -163,30 +170,45 @@ enum DupEngine {
         }
     }
 
-    private static func partialHash(_ url: URL, size: Int64) -> String? {
+    /// Hash of the first and last 64 KB (or the whole file when small). nil on any read error or short read,
+    /// so unreadable files are never grouped together.
+    static func partialHash(_ url: URL, size: Int64, read: ReadChunk = systemRead) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }
         var hasher = SHA256()
         let chunk = 64 * 1024
-        if let d = try? h.read(upToCount: chunk) { hasher.update(data: d) }
         if size > Int64(chunk * 2) {
-            try? h.seek(toOffset: UInt64(size) - UInt64(chunk))
-            if let d = try? h.read(upToCount: chunk) { hasher.update(data: d) }
-        } else if let d = try? h.readToEnd() {
-            hasher.update(data: d)
+            guard let head = try? read(h, chunk), head.count == chunk else { return nil }
+            hasher.update(data: head)
+            guard (try? h.seek(toOffset: UInt64(size) - UInt64(chunk))) != nil,
+                  let tail = try? read(h, chunk), tail.count == chunk else { return nil }
+            hasher.update(data: tail)
+        } else {
+            var got = 0
+            while got < Int(size) {
+                guard let d = try? read(h, Int(size) - got), !d.isEmpty else { return nil }
+                hasher.update(data: d)
+                got += d.count
+            }
         }
         return hex(hasher.finalize())
     }
 
-    private static func fullHash(_ url: URL, cancel: Cancel) -> String? {
+    /// SHA-256 of the whole file. nil on any read error or if it isn't exactly `size` bytes.
+    static func fullHash(_ url: URL, size: Int64, cancel: Cancel, read: ReadChunk = systemRead) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }
         var hasher = SHA256()
-        while let d = try? h.read(upToCount: 4 << 20), !d.isEmpty {
+        var total: Int64 = 0
+        while true {
             if cancel.isSet { return nil }
+            guard let d = try? read(h, 4 << 20) else { return nil }
+            if d.isEmpty { break }
             hasher.update(data: d)
+            total += Int64(d.count)
+            if total > size { return nil }
         }
-        return hex(hasher.finalize())
+        return total == size ? hex(hasher.finalize()) : nil
     }
 
     private static func hex<D: Sequence>(_ d: D) -> String where D.Element == UInt8 {

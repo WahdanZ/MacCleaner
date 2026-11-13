@@ -790,6 +790,35 @@ enum SelfTest {
         check("duplicates: identical copies are recognised right before trashing", sameBefore)
         check("duplicates: an edited, deleted or hard-linked kept copy stops the trash", !sameAfterEdit && !sameAfterDelete && !hardLink)
 
+        print("Duplicates: read failures never count as a match (SAFE-05)")
+        let rfA = sandbox.appendingPathComponent("dup-read-a"), rfB = sandbox.appendingPathComponent("dup-read-b")
+        var rfData = dupData; rfData[0] = 7
+        fm.createFile(atPath: rfA.path, contents: rfData)
+        var rfOther = rfData; rfOther[299_999] ^= 1                      // same size, different content
+        fm.createFile(atPath: rfB.path, contents: rfOther)
+        struct ReadFailed: Error {}
+        let failing: DupEngine.ReadChunk = { _, _ in throw ReadFailed() }
+        let short: DupEngine.ReadChunk = { h, n in try h.read(upToCount: min(n, 1000)).map { _ in Data() } ?? Data() }
+        let size = Int64(rfData.count)
+        check("identical() is false when both files fail to read (used to be true)",
+              !DupEngine.identical(rfA, rfB, size: size, read: failing))
+        check("identical() is false when reads stop short of the size",
+              !DupEngine.identical(rfA, rfB, size: size, read: short))
+        check("identical() still says different files differ and copies match",
+              !DupEngine.identical(rfA, rfB, size: size)
+              && DupEngine.identical(rfA, { fm.createFile(atPath: rfB.path, contents: rfData); return rfB }(), size: size))
+        check("hashes are nil on a read error, so unreadable files are never grouped",
+              DupEngine.partialHash(rfA, size: size, read: failing) == nil
+              && DupEngine.fullHash(rfA, size: size, cancel: DupEngine.Cancel(), read: failing) == nil
+              && DupEngine.partialHash(rfA, size: 1000, read: failing) == nil)
+        check("hashes are nil when the file is shorter than its listed size",
+              DupEngine.fullHash(rfA, size: size + 1, cancel: DupEngine.Cancel()) == nil
+              && DupEngine.partialHash(rfA, size: size, read: short) == nil)
+        check("hashes of identical readable files still match",
+              DupEngine.fullHash(rfA, size: size, cancel: DupEngine.Cancel()) != nil
+              && DupEngine.fullHash(rfA, size: size, cancel: DupEngine.Cancel()) == DupEngine.fullHash(rfB, size: size, cancel: DupEngine.Cancel())
+              && DupEngine.partialHash(rfA, size: size) == DupEngine.partialHash(rfB, size: size))
+
         print("Audit P2 fixes (weekly clean scope)")
         func autoTarget(_ id: String, _ action: CleanAction) -> CleanTarget {
             CleanTarget(id: id, category: .devCache, name: id, path: id, note: "", action: action, sizeBytes: 4096, exists: true)

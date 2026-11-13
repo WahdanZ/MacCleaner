@@ -117,7 +117,8 @@ Swift 6 diagnostics already emitted in Swift 5 mode (baseline build): `Insights.
   `~/.cache/maccleaner-selftest-*`) and removes them unconditionally, and it rewrites the real
   `ProtectedPaths` defaults (restored in `defer`). See RISK-003.
 * It can be run against a throwaway home: `CFFIXED_USER_HOME=<dir> "Mac Cleaner" --selftest` relocates
-  `homeDirectoryForCurrentUser` and `UserDefaults` (verified on this host).
+  `homeDirectoryForCurrentUser` (verified on this host). It does **not** relocate `UserDefaults`: `cfprefsd`
+  still writes `~/Library/Preferences` (verified), so settings need their own isolation.
 
 ## 8. Baseline measurements (audit host, M-series, macOS 26.0)
 
@@ -129,8 +130,9 @@ Swift 6 diagnostics already emitted in Swift 5 mode (baseline build): `Insights.
 
 The two failures under a relocated home are fixture-environment issues, not product regressions:
 `Trash refuses a file reached through a linked folder` needs `~/Library/Keychains` to exist, and
-`Storage Map keeps a non-ASCII name exactly as stored` fails only under the long scratch home path (not yet
-diagnosed; tracked as RISK-014). App startup, scan latency and memory were not measured in this pass.
+`Storage Map keeps a non-ASCII name exactly as stored` compared full paths, which differ as `/tmp/…` vs
+`/private/tmp/…` (same folder) when home is under `/private` (RISK-014, fixed in M00-03).
+App startup, scan latency and memory were not measured in this pass.
 
 ## 9. Pull requests
 

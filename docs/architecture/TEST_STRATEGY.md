@@ -12,7 +12,9 @@ Tests must never read or modify the developer's real home, settings or Trash.
 
 * `scripts/selftest.sh` creates a fresh `mktemp -d` home, pre-creates the standard folders, and runs
   `CFFIXED_USER_HOME=<that dir> "Mac Cleaner" --selftest`. Foundation then resolves
-  `homeDirectoryForCurrentUser` and `UserDefaults` inside it (verified on macOS 26).
+  `homeDirectoryForCurrentUser` inside it (verified on macOS 26). `UserDefaults` is **not** moved
+  (`cfprefsd` keeps writing `~/Library/Preferences`), so the self-test points `ProtectedPaths.store` at a
+  throwaway domain (`io.github.wahdanz.maccleaner.selftest`) that it empties at the end.
 * `SelfTest.run` refuses to run when the home it sees is the account's real home (from `getpwuid`), unless
   `MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1` is set explicitly.
 * New fixtures are created with `withIntermediateDirectories: false` under a unique name and removed only if

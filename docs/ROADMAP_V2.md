@@ -22,7 +22,7 @@ Status values: `todo` · `in progress` · `in review` · `done` · `blocked`.
 | M00-03 | Self-test isolation (RISK-003) | Self-test refuses real home; `scripts/selftest.sh`; CI uses it; fixtures unique | in review |
 | M00-04 | MCP human approval + identity digest (RISK-004) | Confirm without Mac Cleaner-owned human approval refused; `empty_trash` digest includes listed item identities; replaced-at-same-path item refused | todo |
 | M00-05 | Simulators review-only (RISK-005) | `xcode.sims` not recommended, review row says app data is lost | todo |
-| M00-06 | RISK-014 long-path Storage Map check | Root cause found; fixed or fixture corrected | todo |
+| M00-06 | RISK-014 Storage Map check under `/private` home | Root cause: `/tmp` vs `/private/tmp` spelling; check compares name bytes + identity (done in M00-03) | in review |
 | M00-07 | Release baseline (RISK-008) | Hardened runtime in project Release config; release job fails if signing expected but missing; doc for `.sig` | todo |
 
 **Verification.** `scripts/selftest.sh` locally and in CI; Release build; CLI/MCP smoke.

@@ -1,9 +1,13 @@
 import CryptoKit
 import Foundation
 
-/// `Mac Cleaner --selftest`: checks every safety rule. Creates only throwaway files under
-/// ~/.maccleaner-selftest and ~/.cache/maccleaner-selftest-*, removes them afterwards,
-/// and restores the Protected list. Exit code 0 = all passed.
+/// `Mac Cleaner --selftest`: checks every safety rule. Exit code 0 = all passed.
+///
+/// Run it with `scripts/selftest.sh`, which gives it a fresh, empty home folder (`CFFIXED_USER_HOME`).
+/// It refuses to run against your real home folder unless MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1 is set.
+/// Even then it only creates folders with a unique name per run (~/.maccleaner-selftest-<run>,
+/// ~/.cache/maccleaner-selftest-<run>-*), never reuses one that already exists, and keeps the Protected
+/// list in a throwaway settings domain instead of yours.
 enum SelfTest {
     private static var passed = 0
     private static var failed: [String] = []
@@ -13,20 +17,54 @@ enum SelfTest {
         print((ok ? "  ✓ " : "  ✗ ") + name)
     }
 
+    /// The account's real home folder (from the user database; CFFIXED_USER_HOME doesn't change it).
+    static var accountHome: URL? {
+        guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else { return nil }
+        return URL(fileURLWithPath: String(cString: dir)).resolvingSymlinksInPath().standardizedFileURL
+    }
+
     static func run() -> Bool {
         let fm = FileManager.default
         let home = SafetyGuard.home
+        if home.path == accountHome?.path && ProcessInfo.processInfo.environment["MACCLEANER_SELFTEST_ALLOW_REAL_HOME"] != "1" {
+            print("""
+            Refusing to run the self-test in your real home folder (\(home.path)).
+            Run scripts/selftest.sh, which uses a throwaway home folder, or set
+            MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1 to run here anyway.
+            """)
+            return false
+        }
         let h = { (rel: String) in home.appendingPathComponent(rel) }
-        let sandbox = h(".maccleaner-selftest")
-        let cacheLink = h(".cache/maccleaner-selftest-link")
-        let cacheItem = h(".cache/maccleaner-selftest-item")
+        let runUUID = UUID().uuidString.lowercased()
+        let runID = runUUID.prefix(8)
+        let sandbox = h(".maccleaner-selftest-\(runID)")
+        let cacheLink = h(".cache/maccleaner-selftest-\(runID)-link")
+        let cacheItem = h(".cache/maccleaner-selftest-\(runID)-item")
+        // Only ever work in folders this run created: if a name is taken, stop before touching anything.
+        let madeCacheFolder = !fm.fileExists(atPath: h(".cache").path)
+            && (try? fm.createDirectory(at: h(".cache"), withIntermediateDirectories: false)) != nil
+        guard (try? fm.createDirectory(at: sandbox, withIntermediateDirectories: false)) != nil,
+              !fm.fileExists(atPath: cacheLink.path), !fm.fileExists(atPath: cacheItem.path) else {
+            print("Self-test setup failed: \(sandbox.path) couldn't be created as a new folder. Nothing was changed.")
+            return false
+        }
+        // The Protected list lives in memory for this run: nothing is written to the user's settings.
+        let realStore = ProtectedPaths.store
+        let realProtectedBefore = realStore.object(forKey: ProtectedPaths.key) as? [String]
+        ProtectedPaths.store = MemorySettings()
         let savedProtected = ProtectedPaths.all
         defer {
-            ProtectedPaths.set(savedProtected)
+            ProtectedPaths.store = realStore
             try? fm.removeItem(at: sandbox)
             try? fm.removeItem(at: cacheLink)
             try? fm.removeItem(at: cacheItem)
+            if madeCacheFolder { try? fm.removeItem(at: h(".cache")) }   // only if this run made it (and left it empty)
         }
+        print("Isolation")
+        ProtectedPaths.set([h("selftest-sentinel-\(runID)").path])
+        check("the Protected list used by the tests is not the user's",
+              ProtectedPaths.all.count == 1 && (realStore.object(forKey: ProtectedPaths.key) as? [String]) == realProtectedBefore)
+        ProtectedPaths.set(savedProtected)
         try? fm.createDirectory(at: sandbox.appendingPathComponent("keep/inner"), withIntermediateDirectories: true)
         fm.createFile(atPath: sandbox.appendingPathComponent("keep/inner/file.txt").path, contents: Data("x".utf8))
         fm.createFile(atPath: sandbox.appendingPathComponent("loose.txt").path, contents: Data("x".utf8))
@@ -95,7 +133,9 @@ enum SelfTest {
 
         print("Trash and Put Back")
         ProtectedPaths.set(savedProtected)
-        let rt = sandbox.appendingPathComponent("roundtrip.txt")
+        // The one test that uses the real Trash (trashItem always uses the volume's Trash, whatever the home
+        // folder): a file this run created, with a per-run name, put back right away.
+        let rt = sandbox.appendingPathComponent("roundtrip-\(runID).txt")
         fm.createFile(atPath: rt.path, contents: Data("roundtrip".utf8))
         let trashErr = AppEngine.trash(rt, source: "Self-test")
         let entry = TrashLog.shared.present().first { $0.original == rt.path }
@@ -283,26 +323,20 @@ enum SelfTest {
         check("daily: due again the next day", daily.isDue(now: at(19, 10, 5), lastRun: at(18, 10, 1), armedAt: at(1, 0), calendar: utc))
 
         print("Settings migration (old app ID)")
-        let oldName = "maccleaner.selftest.old", newName = "maccleaner.selftest.new"
-        UserDefaults.standard.setPersistentDomain([ProtectedPaths.key: ["/a/keep", "/b/keep"], "appearance": "dark",
-                                                   "NSWindow Frame x": "1"], forName: oldName)
-        UserDefaults.standard.removePersistentDomain(forName: newName)
-        if let target = UserDefaults(suiteName: newName) {
+        do {
+            let old: [String: Any] = [ProtectedPaths.key: ["/a/keep", "/b/keep"], "appearance": "dark", "NSWindow Frame x": "1"]
+            let target = MemorySettings()
             target.set(["/c/mine"], forKey: ProtectedPaths.key)
             target.set("light", forKey: "appearance")
-            SettingsMigration.migrate(fromDomain: oldName, to: target)
+            SettingsMigration.migrate(old: { old }, to: target)
             check("protected paths are merged, none dropped",
                   Set(target.stringArray(forKey: ProtectedPaths.key) ?? []) == ["/a/keep", "/b/keep", "/c/mine"])
             check("settings already set under the new ID win", target.string(forKey: "appearance") == "light")
             check("system window keys are not copied", target.object(forKey: "NSWindow Frame x") == nil)
             target.removeObject(forKey: ProtectedPaths.key)
-            check("runs only once", SettingsMigration.migrate(fromDomain: oldName, to: target) == 0
+            check("runs only once", SettingsMigration.migrate(old: { old }, to: target) == 0
                   && target.stringArray(forKey: ProtectedPaths.key) == nil)
-        } else {
-            check("test settings domain available", false)
         }
-        UserDefaults.standard.removePersistentDomain(forName: oldName)
-        UserDefaults.standard.removePersistentDomain(forName: newName)
 
         print("Insights")
         let cal = Calendar.current
@@ -376,7 +410,13 @@ enum SelfTest {
         let reference = (try? fm.contentsOfDirectory(at: fx.appendingPathComponent("a"), includingPropertiesForKeys: nil))?
             .first { $0.lastPathComponent == nfc }   // what the FileManager walk reported for the same file
         let nameOK = listed.map { Array($0.name.utf8) == Array(nfc.utf8) } ?? false
-        let pathOK = listed.map { Array($0.url.path.utf8) == Array((reference?.path ?? "").utf8) } ?? false
+        // The file name must keep its stored bytes; the folder part may be spelled /tmp or /private/tmp
+        // (same folder), so the two paths are compared by the file they reach.
+        let pathOK = listed.map { l -> Bool in
+            guard let r = reference, Array(l.url.lastPathComponent.utf8) == Array(r.lastPathComponent.utf8) else { return false }
+            var a = stat(), b = stat()
+            return lstat(l.url.path, &a) == 0 && lstat(r.path, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino
+        } ?? false
         check("Storage Map keeps a non-ASCII name exactly as stored", nameOK && pathOK)
         if !(nameOK && pathOK) {
             let form = { (t: String?) -> String in
@@ -384,6 +424,7 @@ enum SelfTest {
                 return t == t.precomposedStringWithCanonicalMapping && Array(t.utf8) == Array(t.precomposedStringWithCanonicalMapping.utf8) ? "NFC" : "NFD"
             }
             print("    name \(form(listed?.name)), path \(form(listed?.url.path)), FileManager path \(form(reference?.path))")
+            print("    map path: \(listed?.url.path ?? "missing")\n    FileManager path: \(reference?.path ?? "missing")")
         }
         check("Storage Map lists a 1.5 MB file with its date",
               map.children.contains { $0.name == "big.bin" && !$0.isDirectory && $0.modified != nil && $0.size >= 1_500_000 })
@@ -587,8 +628,8 @@ enum SelfTest {
         // Three throwaway caches: one outside the allow-list (blocked), one allowed, and one allowed when the
         // review is built but protected before Clear runs. Only the allowed one may be deleted.
         let ccBlocked = sandbox.appendingPathComponent("appcache-blocked")
-        let ccAllowed = h(".cache/maccleaner-selftest-appcache")
-        let ccLater = h(".cache/maccleaner-selftest-appcache-later")
+        let ccAllowed = h(".cache/maccleaner-selftest-\(runID)-appcache")
+        let ccLater = h(".cache/maccleaner-selftest-\(runID)-appcache-later")
         defer { try? fm.removeItem(at: ccAllowed); try? fm.removeItem(at: ccLater) }
         for u in [ccBlocked, ccAllowed, ccLater] {
             try? fm.createDirectory(at: u, withIntermediateDirectories: true)
@@ -842,6 +883,9 @@ enum SelfTest {
         let stubborn = Shell.run("/bin/sh", ["-c", "trap '' TERM; sleep 20"], timeout: 1)
         check("a tool that ignores SIGTERM is killed", Date().timeIntervalSince(started) < 8 && (stubborn.output ?? "").contains("timed out"))
 
+        print("Isolation (end)")
+        check("the user's own Protected list is unchanged after all tests",
+              (realStore.object(forKey: ProtectedPaths.key) as? [String]) == realProtectedBefore)
         print("\n\(passed) passed, \(failed.count) failed")
         if !failed.isEmpty { print("FAILED:\n" + failed.map { "  - " + $0 }.joined(separator: "\n")) }
         return failed.isEmpty

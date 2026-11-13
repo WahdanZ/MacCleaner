@@ -26,7 +26,7 @@ xcodebuild -project MacCleaner.xcodeproj -target MacCleaner -configuration Relea
 
 APP="build/Release/Mac Cleaner.app"
 echo "--- self-test"
-"$APP/Contents/MacOS/Mac Cleaner" --selftest > /dev/null && echo "self-test passed"
+scripts/selftest.sh "$APP" > /dev/null && echo "self-test passed"
 codesign --verify --strict --deep "$APP"
 codesign -d --entitlements - "$APP" 2>/dev/null | grep -q apple-events || { echo "entitlements missing"; exit 1; }
 

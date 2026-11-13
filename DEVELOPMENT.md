@@ -35,10 +35,10 @@ You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project use
 **Run the self-test on its own:**
 
 ```bash
-"build/Release/Mac Cleaner.app/Contents/MacOS/Mac Cleaner" --selftest
+scripts/selftest.sh "build/Release/Mac Cleaner.app"
 ```
 
-It runs 199 checks (the safety rules, the audit fixes, the scheduled clean timing, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one) using throwaway files in `~/.maccleaner-selftest` and `~/.cache/maccleaner-selftest-*`, cleans up after itself, and restores your protected list.
+It runs about 200 checks (the safety rules, the audit fixes, the scheduled clean timing, the Insights forecast and history math, the updater's version, release, signature, checksum and swap logic, and the fast folder walk against the old one). The script gives it a fresh, empty home folder (`CFFIXED_USER_HOME` set to a `mktemp -d` folder that is deleted afterwards), so it never reads or changes your own files. The Protected list is kept in a throwaway settings domain for the run. Run directly (`--selftest`) it refuses to start in your real home folder unless `MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1` is set.
 
 > Ad-hoc signed builds get a new signature on every rebuild, so macOS may ask for Full Disk Access again after each build. A Developer ID build avoids that (see [Releasing](#releasing)).
 

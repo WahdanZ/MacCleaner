@@ -110,10 +110,16 @@ enum SettingsMigration {
 
     /// Returns how many settings were copied.
     @discardableResult
-    static func migrate(fromDomain: String = oldDomain, to new: UserDefaults = .standard) -> Int {
+    static func migrate(fromDomain: String = oldDomain, to new: SettingsStore = UserDefaults.standard) -> Int {
+        migrate(old: { UserDefaults.standard.persistentDomain(forName: fromDomain) }, to: new)
+    }
+
+    /// `old` is read only if the migration hasn't run yet.
+    @discardableResult
+    static func migrate(old readOld: () -> [String: Any]?, to new: SettingsStore) -> Int {
         guard !new.bool(forKey: doneKey) else { return 0 }
         new.set(true, forKey: doneKey)
-        guard let old = UserDefaults.standard.persistentDomain(forName: fromDomain), !old.isEmpty else { return 0 }
+        guard let old = readOld(), !old.isEmpty else { return 0 }
         var copied = 0
         for (k, v) in old where !k.hasPrefix("NS") && k != ProtectedPaths.key && new.object(forKey: k) == nil {
             new.set(v, forKey: k)

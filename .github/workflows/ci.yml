@@ -27,6 +27,9 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Core tests (Swift 6 package)
+        run: swift test --package-path Packages/MacCleanerKit
+
       - name: Build (Release, ad-hoc signed)
         run: |
           set -o pipefail

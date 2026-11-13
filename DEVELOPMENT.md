@@ -32,6 +32,14 @@ cd MacCleaner
 
 You can also open `MacCleaner.xcodeproj` in Xcode and press Run. The project uses a synchronized folder, so new `.swift` files in `MacCleaner/` are picked up automatically.
 
+**Core package tests.** The pure rules (what may be deleted or trashed, user protection) live in the local package `Packages/MacCleanerKit` (`MacCleanerCore`, Swift 6 language mode) and have their own tests:
+
+```bash
+swift test --package-path Packages/MacCleanerKit
+```
+
+They need no files and no home folder. CI runs them before building the app.
+
 **Run the self-test on its own:**
 
 ```bash

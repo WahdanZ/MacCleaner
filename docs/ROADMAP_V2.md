@@ -35,7 +35,7 @@ Status values: `todo` · `in progress` · `in review (#N)` = open PR, **not on `
 | Task | Deliverable | Acceptance |
 |---|---|---|
 | M01-01 | Performance baseline | Launch, Junk scan, Storage Map, duplicates, menu-bar idle recorded in `CURRENT_STATE.md` |
-| M01-02 | `MacCleanerKit` package + `Core` + XCTest | Guards and `ProtectionPolicy` with injected home; ≥ the current guard checks as XCTests |
+| M01-02 | `MacCleanerKit` package + `Core` + tests — **in review** | Guards and `ProtectionPolicy` with injected home; ≥ the current guard checks as package tests (Swift Testing) |
 | M01-03 | `FileIdentity`, `ScanOutcome`, `CleanupPlan`, `CleanupApproval`, `ProgressEvent` | Unit tests; `Sendable` |
 | M01-04 | `CleanupExecutor` actor | Revalidation tests: identity swap, symlink swap, newly protected → skipped and reported |
 | M01-05 | Strict concurrency `complete`, fix diagnostics | 0 concurrency warnings; every `@unchecked Sendable` justified |

@@ -130,6 +130,9 @@ enum SelfTest {
               (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
         check("Shredder refuses protected (same rule)", ShredEngine.reason(keep) != nil)
         check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
+        check("a protected folder hides what is inside it in any letter case (RISK-012)",
+              ProtectedPaths.isInsideProtected(URL(fileURLWithPath: keep.path.uppercased() + "/inner"))
+              && ProtectedPaths.isInsideProtected(keep.appendingPathComponent("inner")))
 
         print("Trash and Put Back")
         ProtectedPaths.set(savedProtected)

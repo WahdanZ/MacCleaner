@@ -55,3 +55,11 @@ with licence review. Mac Sai is a feature reference only; no code copied.
 The scheduled safe clean cannot ask anyone. **Decision:** it runs only under an explicit, versioned, revocable
 `AutomationPolicy` with a narrow scope fixed in code (safe regenerable files only, no commands, no review items,
 nothing privileged). Widening the scope requires the user to re-enable it. CLI/MCP can't create or widen it.
+
+### D-012 The package starts in Swift 6 mode, tested with Swift Testing, linked statically
+`Packages/MacCleanerKit` uses `swift-tools-version: 6.0`, so `MacCleanerCore` compiles in Swift 6 language mode from
+its first line while the app target stays in Swift 5 mode until M01-12. Tests use Swift Testing (`swift test`; ships
+with the Xcode 16+ toolchains on CI and locally). The library is a static product linked into the one app binary,
+so the bundle, signature and CLI/MCP entry points are unchanged. The app keeps `SafetyGuard`, `TrashGuard` and
+`ProtectedPaths` as thin wrappers that resolve paths on the Mac and call the pure rules (`PermanentDeleteRules`,
+`TrashRules`, `UserProtection`), so no call site changed.

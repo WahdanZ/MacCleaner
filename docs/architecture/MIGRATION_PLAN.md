@@ -51,6 +51,7 @@ Re-run the Stage A measurements after Stage C and after Stage D. A change that r
 |---|---|---|
 | M01-02 (#32) | Create `Packages/MacCleanerKit` with `MacCleanerCore`; move `ProtectionPolicy` (pure parts of `SafetyGuard`/`TrashGuard`/`ProtectedPaths` with injected home). `ByteText` stays in the app for now | Swift Testing for guards; self-test still green |
 | M01-03 | Core contracts: `FileIdentity` (value + match rule), `CleanupRisk`, `Disposition`, `CleanupTarget`, `CleanupCandidate`, `CleanupPlan` (+ identity digest incl. risk and command consequence), `CleanupApproval` + `ApprovalLedger` (single use), `ScanOutcome`, `ItemOutcome`, `CleanupReport`, `ProgressEvent`. Not used by the app yet | package tests |
-| M01-04 | `CleanupExecutor` + `FileIdentity` capture in `Platform`; Shredder and Trash moves go through it | adversarial fixtures |
+| M01-04a | `MacCleanerPlatform` (`LocalFileSystem`: identity capture, staged descriptor-relative removal, checked Trash moves) and `MacCleanerFeatures` (`CleanupExecutor`). The app doesn't use them yet | fake-file-system and real-disk adversarial tests |
+| M01-04b | `AppEngine.trash` callers and the Shredder go through the executor | self-test, CLI/MCP checks |
 | after M01-04 | `Persistence`: `HistoryStore` → sessions | migration test from v1 `history.json` |
 | M01-06… | One module per PR onto the executor: caches, projects, SDKs, apps, duplicates, system data | per-module tests |

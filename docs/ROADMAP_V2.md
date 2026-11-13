@@ -36,8 +36,9 @@ Status values: `todo` · `in progress` · `in review (#N)` = open PR, **not on `
 |---|---|---|
 | M01-01 | Performance baseline — **done (#33)** | Launch, Junk scan, Storage Map, duplicates, menu-bar idle recorded in `CURRENT_STATE.md` |
 | M01-02 | `MacCleanerKit` package + `Core` + tests — **done (#32)** | Guards and `ProtectionPolicy` with injected home; ≥ the current guard checks as package tests (Swift Testing) |
-| M01-03 | `FileIdentity`, `ScanOutcome`, `CleanupPlan`, `CleanupApproval`, `ProgressEvent` — **in review** | Unit tests; `Sendable` |
-| M01-04 | `CleanupExecutor` actor | Revalidation tests: identity swap, symlink swap, newly protected → skipped and reported |
+| M01-03 | `FileIdentity`, `ScanOutcome`, `CleanupPlan`, `CleanupApproval`, `ProgressEvent` — **done (#34)** | Unit tests; `Sendable` |
+| M01-04a | `CleanupExecutor` actor + `Platform` file operations, unused by the app — **in review** | Revalidation tests: identity swap, symlink swap, newly protected → skipped and reported; real-disk adversarial tests |
+| M01-04b | Trash moves (`AppEngine.trash`, 13 callers) and the Shredder go through the executor | Self-test and CLI/MCP unchanged; existing Trash restore keeps working |
 | M01-05 | Strict concurrency `complete`, fix diagnostics | 0 concurrency warnings; every `@unchecked Sendable` justified |
 | M01-06…11 | Move caches, projects, SDKs, apps, duplicates, system data onto executor | Per-module tests; UI unchanged (screenshots compared) |
 | M01-12 | Swift 6 mode: Core → Persistence → Platform → Features → app | Builds and all tests green after each |

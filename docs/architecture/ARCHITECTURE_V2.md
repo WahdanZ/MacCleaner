@@ -68,8 +68,14 @@ trashes, overwrites or quarantines anything. The app, CLI, MCP and scheduler all
 
 1. `ProtectionPolicy.check(target)` — refuse protected/structural/sensitive.
 2. `FileIdentity.recapture(path)` must equal the planned identity (device, inode, type; size/mtime for files).
+   No symlink is followed anywhere in the path (`O_NOFOLLOW_ANY` / `AT_SYMLINK_NOFOLLOW_ANY`).
    Symlinks are never followed unless the plan targeted the link itself.
-3. Perform the disposition with `O_NOFOLLOW`/`openat`-style operations where the platform allows.
+3. Perform the disposition without a check-then-delete-by-path race (M01-04a, `LocalFileSystem`): a permanent
+   removal first renames the item (relative to its open parent, `RENAME_EXCL`) into a private 0700 staging folder,
+   re-checks its identity there and moves it back if it isn't the reviewed item; only then deletes it through
+   descriptors (`openat`/`unlinkat`). Below a folder, entries created or changed after the identity was captured
+   (birth/status-change time) and other volumes are kept and reported. Trash moves are reversible, so they are
+   checked after the move and moved straight back on a mismatch.
 4. Emit `itemFinished` with the true outcome. No aggregate "success" unless every item succeeded.
 5. Append the item to the open `CleanupSession` in persistence.
 

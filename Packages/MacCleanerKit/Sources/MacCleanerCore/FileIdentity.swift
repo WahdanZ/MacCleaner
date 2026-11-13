@@ -22,9 +22,13 @@ public struct FileIdentity: Sendable, Hashable {
     public let linkCount: UInt32
     /// st_flags (uchg, restricted, …). Recorded for the executor; not part of the match.
     public let flags: UInt32
+    /// When this identity was captured (ns since 1970). Removing a folder never deletes anything below it that was
+    /// created or changed after this moment: such entries were not part of what the person reviewed. Not part of
+    /// the match. 0 (unknown) keeps everything below a folder.
+    public let capturedAtNanos: Int64
 
     public init(path: String, device: UInt64, inode: UInt64, kind: Kind, size: Int64, modificationNanos: Int64,
-                linkCount: UInt32 = 1, flags: UInt32 = 0) {
+                linkCount: UInt32 = 1, flags: UInt32 = 0, capturedAtNanos: Int64 = 0) {
         self.path = path
         self.device = device
         self.inode = inode
@@ -33,11 +37,13 @@ public struct FileIdentity: Sendable, Hashable {
         self.modificationNanos = modificationNanos
         self.linkCount = linkCount
         self.flags = flags
+        self.capturedAtNanos = capturedAtNanos
     }
 
     /// nil when `current` (captured again at execution time) is the same item that was planned; otherwise how it
     /// differs. Same item = same path, kind, device and inode; for a file also the same size and modification time.
-    /// A folder's size and time change whenever something inside it changes, so they are not compared.
+    /// A folder's size and time change whenever something inside it changes, so they are not compared (what is
+    /// below a folder is judged entry by entry against `capturedAtNanos` when it is removed).
     public func mismatch(against current: FileIdentity) -> IdentityMismatch? {
         if current.kind != kind { return .kindChanged(from: kind, to: current.kind) }
         if current.path != path || current.device != device || current.inode != inode { return .replaced }

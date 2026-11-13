@@ -32,8 +32,9 @@ public actor CleanupExecutor {
     /// the caller must call it only from the flow where it did, right after the person confirmed this plan — the
     /// review sheet (`.userInApp`), the terminal prompt on a TTY (`.userInTerminal`), Mac Cleaner's own confirmation
     /// window for an MCP request (`.userViaMCPPrompt`) — or from the scheduler for an enabled policy whose scope
-    /// covers the plan (`.standingPolicy`). Enforcing that is M01-04b's job (unmet until then). The approval works
-    /// once, in this process, until it expires.
+    /// covers the plan (`.standingPolicy`), or for one folder Mac Cleaner made itself, with that operation's own
+    /// proof (`.appOwned`, which the ledger limits to one Trash move of one folder). The approval works once, in this
+    /// process, until it expires.
     public func approve(_ plan: CleanupPlan, by approver: CleanupApproval.Approver,
                         lifetime: TimeInterval = CleanupExecutor.defaultLifetime) throws(CleanupApproval.IssueRefusal) -> CleanupApproval {
         try ledger.issue(for: plan, approvedBy: approver, at: now(), lifetime: lifetime)

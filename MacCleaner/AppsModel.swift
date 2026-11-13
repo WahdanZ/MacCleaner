@@ -510,9 +510,11 @@ final class AppsModel {
         phase = .working
         if isRunning(a), !(await quit(a)) { phase = .done; return }
         let r = await Task.detached { AppEngine.uninstall(a, picked: picked, trash: trash) }.value
-        if r.appRemoved {
-            apps.removeAll { $0.id == a.id }
-            HistoryStore.shared.add("\(a.name) Uninstalled", bytes: r.bytes, symbol: "square.grid.2x2", outcome: .trashed)
+        if r.appRemoved { apps.removeAll { $0.id == a.id } }
+        // History says "moved to the Trash" only for what got there (#41): an app left in the password step's staging
+        // folder isn't, and the message says where it is.
+        if let title = r.historyTitle(appName: a.name) {
+            HistoryStore.shared.add(title, bytes: r.bytes, symbol: "square.grid.2x2", outcome: .trashed)
         }
         selectedID = visible.first?.id
         message = (r.summary(appName: a.name), !(r.errors.isEmpty && r.appRemoved))
@@ -564,10 +566,20 @@ enum AdminGuard {
 /// Synchronous app actions shared by the window and the MCP server. Call off the main thread.
 enum AppEngine {
     struct UninstallResult: Sendable {
+        /// The app bundle left its place (moved by Mac Cleaner, to the Trash or into the password step's staging folder).
         var appRemoved = false
+        /// The app bundle reached the Trash. False when it is still in the staging folder (`adminNote` says where).
+        var appInTrash = false
         var bytes: Int64 = 0
         var errors: [String] = []
         var adminNote = ""
+
+        /// The History entry for this uninstall (recorded as moved to the Trash, `bytes`), or nil for none. It names
+        /// the app only when the app bundle reached the Trash; otherwise only leftovers that did (#41).
+        func historyTitle(appName: String) -> String? {
+            if appInTrash { return "\(appName) Uninstalled" }
+            return bytes > 0 ? "\(appName) leftovers" : nil
+        }
 
         func summary(appName: String) -> String {
             if errors.isEmpty && appRemoved {
@@ -602,19 +614,6 @@ enum AppEngine {
             for _ in 0..<15 where alive(pids) { Thread.sleep(forTimeInterval: 0.2) }
         }
         return !alive(pids)
-    }
-
-    /// Every "Move to Trash" in the app goes through here: re-checks protection, moves the item,
-    /// and logs where it came from so it can be put back.
-    @discardableResult
-    static func trash(_ url: URL, size: Int64? = nil, source: String = "Mac Cleaner", restorable: Bool = true) -> String? {
-        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
-        if let why = ProtectedPaths.reason(url) { return why }
-        let bytes = size ?? Scanner.allocatedSize(url)
-        let dest: URL
-        do { dest = try AppCleanup.trashMover(url) } catch { return error.localizedDescription }
-        TrashLog.shared.record(original: url.path, trashed: dest.path, size: bytes, source: source, restorable: restorable)
-        return nil
     }
 
     /// How "Clear cache" treats one cache folder. `blocked` is nil when it may go.

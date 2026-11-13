@@ -1,5 +1,6 @@
 import Foundation
 import MacCleanerCore
+import MacCleanerPlatform
 
 /// Runs the system part of an uninstall through macOS's own administrator prompt
 /// (`osascript … with administrator privileges`). Files go to a folder in your Trash.
@@ -9,9 +10,31 @@ import MacCleanerCore
 /// swap it (that folder is sticky, so nobody else can rename it). The script then hands you only that one folder
 /// (`chown` without `-R`) and prints its path. The items inside keep their system owner: a recursive `chown` as root
 /// would also change the owner of any file that something had hard-linked into a moved folder. The app then moves the
-/// folder to the Trash with the normal API (the Trash itself is privacy-protected even for root).
+/// folder to the Trash through the cleanup executor (AppOwnedTrash.trashStaging), only if it still holds exactly the
+/// items reported moved (the Trash itself is privacy-protected even for root).
 enum AdminStep {
-    enum Result { case ok(staging: URL, report: Report), cancelled, failed(String) }
+    enum Result { case ok(Staging), cancelled, failed(String) }
+
+    /// What one run of the privileged step produced, as proof for moving its staging folder to the Trash: the folder
+    /// the script made (checked right after it ran: the `mktemp` name, a real folder you own, closed to everyone
+    /// else, and its identity), your uid, and the entries the folder may hold — for each item the script reported
+    /// MOVED (verified as the reviewed item), its staging name and reviewed identity. Only `staging(fromOutput:)`
+    /// makes one (the initializer is fileprivate), so nothing else can name a folder to be moved as app-owned.
+    struct Staging: Sendable {
+        let folder: FileIdentity
+        let uid: uid_t
+        /// Staging name ("<index>-<name>") → the reviewed identity of the item moved there.
+        let expected: [String: FileIdentity]
+        let report: Report
+        var url: URL { URL(fileURLWithPath: folder.path, isDirectory: true) }
+
+        fileprivate init(folder: FileIdentity, uid: uid_t, expected: [String: FileIdentity], report: Report) {
+            self.folder = folder
+            self.uid = uid
+            self.expected = expected
+            self.report = report
+        }
+    }
 
     /// What the privileged step reported per item (indexes into the items it was given).
     struct Report: Equatable, Sendable {
@@ -132,7 +155,7 @@ enum AdminStep {
             if l.url.path.hasPrefix("/Library/Audio/Plug-Ins/HAL/") { onVerified += " A=1;" }
             let item = l.url.standardizedFileURL
             let src = q(item.path), dir = q(item.deletingLastPathComponent().path)
-            let staged = "\"$D\"" + q("/\(i)-" + item.lastPathComponent)
+            let staged = "\"$D\"" + q("/" + stagedName(i, l))
             let present = { (p: String) in "{ [ -e \(p) ] || [ -L \(p) ]; }" }
             lines.append("if [ -d \(dir) ] && [ ! -L \(dir) ] && [ \"$(/usr/bin/stat -f %u \(dir))\" = \(parentOwner) ]"
                          + " && \(present(src)); then"
@@ -178,14 +201,28 @@ enum AdminStep {
             .replacingOccurrences(of: "\"", with: "\\\"") + "\"" + (admin ? " with administrator privileges" : "")
     }
 
+    /// The name item `i` gets inside the staging folder.
+    static func stagedName(_ i: Int, _ l: AppLeftover) -> String { "\(i)-" + l.url.standardizedFileURL.lastPathComponent }
+
+    /// The result of a finished script run over `items`: its staging folder, checked now, with the entries it may
+    /// hold. `.failed` (nothing to move) when the folder isn't exactly what the script makes. The only maker of
+    /// `Staging`; called by `run` and, on a script run as you, by the self-test.
+    static func staging(fromOutput output: String?, items: [AppLeftover], uid: uid_t) -> Result {
+        let lost = "The password step finished, but its staging folder could not be checked, so it was not sent to the Trash. Look in \(stagingParent) for a folder named \(stagingPrefix)…."
+        guard let url = parseStaging(output), isTrustedStaging(url, uid: uid),
+              let folder = try? LocalFileSystem().identity(at: url.path), folder.kind == .directory else { return .failed(lost) }
+        let report = Report.parse(output)
+        var expected: [String: FileIdentity] = [:]
+        for i in report.moved.sorted() where items.indices.contains(i) {
+            guard items[i].receipt == nil, let reviewed = items[i].identity else { continue }
+            expected[stagedName(i, items[i])] = reviewed
+        }
+        return .ok(Staging(folder: folder, uid: uid, expected: expected, report: report))
+    }
+
     static func run(_ items: [AppLeftover], uid: uid_t) -> Result {
         let r = Shell.run("/usr/bin/osascript", ["-e", appleScript(script(items, uid: uid))], timeout: 600)
-        if r.status == 0 {
-            guard let staging = parseStaging(r.output), isTrustedStaging(staging, uid: uid) else {
-                return .failed("The password step finished, but its staging folder could not be checked, so it was not sent to the Trash. Look in \(stagingParent) for a folder named \(stagingPrefix)….")
-            }
-            return .ok(staging: staging, report: Report.parse(r.output))
-        }
+        if r.status == 0 { return staging(fromOutput: r.output, items: items, uid: uid) }
         let out = r.output ?? ""
         if out.contains("-128") || out.lowercased().contains("cancel") { return .cancelled }
         return .failed(out.trimmingCharacters(in: .whitespacesAndNewlines))

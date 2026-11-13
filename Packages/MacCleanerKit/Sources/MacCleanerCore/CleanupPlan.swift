@@ -224,6 +224,19 @@ public struct CleanupApproval: Sendable, Hashable {
         case nonInteractiveOverride
         /// An enabled, versioned automation policy whose scope covers every entry of the plan.
         case standingPolicy(id: String, version: Int)
+        /// Mac Cleaner moving to the Trash one folder it made itself, as part of an operation the person already
+        /// started (`AppOwnedKind`). Nobody is asked again, so the ledger allows exactly one `.trash` of one folder
+        /// of that kind's module and nothing else; the app may issue it only with the operation's own proof that the
+        /// folder is the one it made (see the app's AppOwnedTrash).
+        case appOwned(AppOwnedKind)
+    }
+
+    /// What Mac Cleaner made that it may move to the Trash itself. The raw value is the plan module it must use.
+    public enum AppOwnedKind: String, Sendable, Hashable, CaseIterable {
+        /// The folder the uninstall password step moved system items into.
+        case adminStaging = "admin-staging"
+        /// The usage skill folder Mac Cleaner installed for an AI assistant.
+        case installedSkill = "installed-skill"
     }
 
     /// Why no approval was issued.
@@ -233,6 +246,8 @@ public struct CleanupApproval: Sendable, Hashable {
         /// A standing policy may approve only regenerable items deleted permanently, never commands, Trash moves,
         /// overwrites or anything that needs review.
         case outsidePolicyScope(candidateID: String)
+        /// An app-owned approval may cover only one entry: a `.trash` of exactly one folder, in its kind's module.
+        case outsideAppOwnedScope(String)
     }
 
     public enum Refusal: Error, Sendable, Hashable {
@@ -280,7 +295,8 @@ public struct CleanupApproval: Sendable, Hashable {
 ///
 /// * **Creation only inside MacCleanerKit.** `CleanupApproval` has no public initializer and this type is
 ///   `package`-only, so code outside MacCleanerKit (the app, CLI and MCP code) can't make an approval except through
-///   `CleanupExecutor.approve`. A standing policy can only approve what policies may cover (see `IssueRefusal`).
+///   `CleanupExecutor.approve`. A standing policy can only approve what policies may cover, and an app-owned approval
+///   only one Trash move of one folder of its kind (see `IssueRefusal`).
 /// * **Plan binding.** An approval names the plan's digest; any other plan is refused.
 /// * **Expiry.** Lifetimes are positive and at most `maxLifetime`; an approval is valid in `[issued, expires)`.
 /// * **Single use.** `redeem` consumes the approval whatever the result (fail closed: a refused approval can't be
@@ -312,6 +328,15 @@ package struct ApprovalLedger: ~Copyable, Sendable {
                 guard c.risk == .safeRegenerable, e.disposition == .permanentDelete, files else {
                     throw .outsidePolicyScope(candidateID: c.id)
                 }
+            }
+        }
+        if case .appOwned(let kind) = approvedBy {
+            guard plan.entries.count == 1 else { throw .outsideAppOwnedScope("it must name exactly one item") }
+            let e = plan.entries[0], c = e.candidate
+            guard e.disposition == .trash else { throw .outsideAppOwnedScope("\(c.id) isn't a Trash move") }
+            guard c.module == kind.rawValue else { throw .outsideAppOwnedScope("\(c.id) belongs to \(c.module), not \(kind.rawValue)") }
+            guard c.targets.count == 1, case .file(let f) = c.targets[0], f.kind == .directory else {
+                throw .outsideAppOwnedScope("\(c.id) must name exactly one folder")
             }
         }
         prune(at: now)

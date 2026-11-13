@@ -1524,6 +1524,7 @@ extension SelfTest {
               && fm.fileExists(atPath: later.path))
         _ = putBack(shown)
         trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
+        sharedFileLocking(dir: dir)
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
@@ -1574,6 +1575,7 @@ extension SelfTest {
         check("the interrupted batch's moved item can be put back",
               putBack(i1) && (try? String(contentsOf: i1, encoding: .utf8)) == "first")
 
+        #if MACCLEANER_TEST_HOOKS
         // Killed (SIGKILL) right after the first move was recorded, in a separate process.
         let k1 = file("killed-1", "first"), k2 = file("killed-2", "second")
         let child = Process()
@@ -1590,6 +1592,9 @@ extension SelfTest {
               !fm.fileExists(atPath: k1.path) && entries(k1) == 1 && fm.fileExists(atPath: k2.path))
         check("Put Back restores the first move after the crash",
               putBack(k1) && (try? String(contentsOf: k1, encoding: .utf8)) == "first")
+        #else
+        print("  - SIGKILL crash test: runs in the test-hooks build only (scripts/build-test-hooks.sh, then the self-test)")
+        #endif
 
         // A record that can't be written stops the run and is reported, never shown as a recoverable success.
         let f1 = file("unrecorded-1", "reviewed"), f2 = file("unrecorded-2", "reviewed")
@@ -1610,8 +1615,52 @@ extension SelfTest {
         check("the unrecorded file was where the report said", fm.fileExists(atPath: f1.path))
     }
 
-    /// `--selftest-child <task> ...`: work the self-test runs in a separate process. Refuses unless started by the
-    /// self-test (MACCLEANER_SELFTEST_CHILD=1) in a throwaway home folder.
+    // MARK: Shared files: checked writes need the lock
+
+    static func sharedFileLocking(dir: URL) {
+        let fm = FileManager.default
+        struct Row: Codable { let n: Int }
+        func count(_ f: URL) -> Int { (SharedFile.read(f) as [Row]).count }
+
+        // The lock file can't be opened (a folder is in its place).
+        let noLock = dir.appendingPathComponent("no-lock.json")
+        try? fm.createDirectory(atPath: noLock.path + ".lock", withIntermediateDirectories: true)
+        let refused = SharedFile.commit(noLock) { (rows: inout [Row]) in rows.append(Row(n: 1)); return true }
+        check("a checked write fails, writing nothing, when the lock file can't be opened",
+              !refused && !fm.fileExists(atPath: noLock.path))
+        check("a Trash log record fails the same way (so the run stops and says so)",
+              !TrashLog(file: noLock).record(original: "/x", trashed: "/y", size: 1, source: "Self-test", restorable: true)
+              && !fm.fileExists(atPath: noLock.path))
+        SharedFile.update(noLock) { (rows: inout [Row]) in rows.append(Row(n: 1)); return true }
+        check("existing unchecked writers keep their old behavior (written without the lock)", count(noLock) == 1)
+
+        // The lock can't be taken (flock fails).
+        let noFlock = dir.appendingPathComponent("no-flock.json")
+        let realLock = SharedFile.lockCall
+        SharedFile.lockCall = { _, _ in errno = ENOLCK; return -1 }
+        let refused2 = SharedFile.commit(noFlock) { (rows: inout [Row]) in rows.append(Row(n: 1)); return true }
+        SharedFile.lockCall = realLock
+        check("a checked write fails, writing nothing, when the lock can't be taken", !refused2 && !fm.fileExists(atPath: noFlock.path))
+
+        // Many writers at once (separate open lock files conflict, like separate processes): nothing is lost.
+        let busy = dir.appendingPathComponent("busy.json")
+        let failures = Box(0)
+        DispatchQueue.concurrentPerform(iterations: 12) { w in
+            for i in 0..<25 {
+                if w % 3 == 0 {
+                    SharedFile.update(busy) { (rows: inout [Row]) in rows.append(Row(n: w * 100 + i)); return true }
+                } else if !SharedFile.commit(busy, { (rows: inout [Row]) in rows.append(Row(n: w * 100 + i)); return true }) {
+                    failures.mutate { $0 += 1 }
+                }
+            }
+        }
+        check("concurrent checked and unchecked writers lose no entry", count(busy) == 300 && failures.value == 0)
+    }
+
+    #if MACCLEANER_TEST_HOOKS
+    /// `--selftest-child <task> ...`: work the self-test runs in a separate process. Compiled only into the
+    /// test-hooks build, never into Release. Even there it refuses unless started by the self-test
+    /// (MACCLEANER_SELFTEST_CHILD=1) in a throwaway home folder.
     static func child(_ args: [String]) -> Int32 {
         guard ProcessInfo.processInfo.environment["MACCLEANER_SELFTEST_CHILD"] == "1",
               SafetyGuard.home.path != accountHome?.path else {
@@ -1627,4 +1676,5 @@ extension SelfTest {
         _ = wait { await AppCleanup.moveToTrash(a, source: "Self-test") }
         return 4   // not reached when the first move succeeds
     }
+    #endif
 }

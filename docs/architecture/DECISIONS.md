@@ -22,14 +22,17 @@ is the only code allowed to remove/trash/overwrite/quarantine. Modules migrate o
 confirms require a Mac Cleaner-owned human confirmation (native alert or MCP elicitation). CLI keeps its TTY
 prompt. **Consequence:** headless MCP use can preview but not delete — intended.
 
-### D-005 Shredder deletes file-by-file, never recursively
-**Decision:** each file is unlinked only after its own overwrite and flush succeeded; folders are `rmdir`-ed
-only when empty. **Consequence:** a failure leaves a partly shredded folder (already-shredded files gone, the
-rest intact) instead of an un-overwritten deletion. Reported to the user.
+### D-005 Shredder deletes file-by-file, through open folders and a private staging folder
+**Decision:** plan at review; work through folder descriptors; move each file into a private 0700 staging
+folder and verify before overwriting; unlink only after overwrite + flush + identity check; overwrite growth
+seen through the still-open file; folders removed only when empty. **Consequence:** no rollback once
+overwriting starts, so results are partial-aware (kept / damaged). Not atomic against a hostile same-user
+process; documented rather than claimed.
 
-### D-006 Test isolation via `CFFIXED_USER_HOME`
-**Decision:** the self-test runs in a throwaway home set through `CFFIXED_USER_HOME` and refuses the real home
-by default. Cheaper than making every guard injectable immediately; XCTest (M01) adds injection.
+### D-006 Test isolation via `CFFIXED_USER_HOME` + in-memory settings
+**Decision:** the self-test runs in a throwaway home set through `CFFIXED_USER_HOME`, refuses the real home by
+default, and keeps settings in memory (`CFFIXED_USER_HOME` does not redirect `cfprefsd`). Cheaper than making
+every guard injectable immediately; XCTest (M01) adds injection.
 
 ### D-007 No separate menu bar helper yet
 The menu bar lives in the app. A launch-at-login helper adds a second signed executable and IPC.
@@ -47,3 +50,8 @@ analysis; any thinning is limited to unsigned or user-owned, ad-hoc-signed bundl
 ### D-010 No third-party dependencies by default
 System frameworks cover SQLite, crypto (CryptoKit), Keychain, IOKit. Any dependency needs a decision entry
 with licence review. Mac Sai is a feature reference only; no code copied.
+
+### D-011 Unattended cleanup needs a standing policy, not per-run approval
+The scheduled safe clean cannot ask anyone. **Decision:** it runs only under an explicit, versioned, revocable
+`AutomationPolicy` with a narrow scope fixed in code (safe regenerable files only, no commands, no review items,
+nothing privileged). Widening the scope requires the user to re-enable it. CLI/MCP can't create or widen it.

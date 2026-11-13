@@ -21,7 +21,7 @@ Mac Sai (`iliyami/MacSai`) was used only as a feature reference; no code was rea
 | CLEAN-07 | Cleanup history + restore | **Partial** | `HistoryStore` records title/bytes/outcome; Put Back exists for items Mac Cleaner trashed (`TrashLog`). No sessions, targets, errors or recovery locations (RISK-013). |
 | CLEAN-08 | Folder exclusions | **Partial** | Global protected paths (`ProtectedPaths`, Settings › Protection), honoured by every guard. No scan-only or per-module exclusions; precedence undocumented. |
 | CLEAN-09 | Universal Clipboard archives | **Missing** | No reference to `useractivityd/shared-pasteboard`. |
-| CLEAN-10 | Incomplete scan reporting | **Missing / Unsafe** | Full Disk Access banner exists (`AccessBanner`, `SysReport.needsFDA`), but enumerators swallow errors (RISK-006). |
+| CLEAN-10 | Incomplete scan reporting | **Missing / Unsafe** (open on `main`) | Full Disk Access banner exists (`AccessBanner`, `SysReport.needsFDA`), but enumerators swallow errors (RISK-006). |
 
 ## B. Applications
 
@@ -52,7 +52,7 @@ Mac Sai (`iliyami/MacSai`) was used only as a feature reference; no code was rea
 | PERF-02 | Maintenance tasks | **Missing** | |
 | PERF-03 | Resource hogs | **Missing** | |
 | PERF-04 | File associations | **Missing** | |
-| PERF-05 | Scheduling | **Partial** | Daily/weekly safe clean with catch-up after sleep, low-disk alerts (`AutoSchedule`, `AutomationModel`, #17). Scheduled scans (non-destructive) and run history missing. |
+| PERF-05 | Scheduling | **Partial** | Daily/weekly safe clean with catch-up after sleep, low-disk alerts (`AutoSchedule`, `AutomationModel`, #17). Scope enforced in `AutoClean.select`/`narrowed`, but no explicit versioned automation policy (RISK-017). Scheduled scans (non-destructive) and run history missing. |
 
 ## E. Storage & Files
 
@@ -63,7 +63,7 @@ Mac Sai (`iliyami/MacSai`) was used only as a feature reference; no code was rea
 | FILE-03 | APFS clone consolidation | **Missing** | No `clonefile` use. |
 | FILE-04 | Universal binary analysis | **Missing** | |
 | FILE-05 | Binary thinning | **Missing** | Will be restricted by design (DECISIONS D-009). |
-| FILE-06 | Shredder | **Unsafe → fixed in M00-01** | RISK-001. |
+| FILE-06 | Shredder | **Unsafe on `main`** | RISK-001; fix in open PR #26. |
 
 ## F. Menu bar & health
 

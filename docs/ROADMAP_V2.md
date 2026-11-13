@@ -4,7 +4,7 @@ Baseline commit `8b483b2`. Architecture: `docs/architecture/ARCHITECTURE_V2.md`.
 Feature status: `FEATURE_MATRIX.md`. Each task is one small PR unless noted. Release engineering, tests and docs
 are continuous in every milestone.
 
-Status values: `todo` · `in progress` · `in review` · `done` · `blocked`.
+Status values: `todo` · `in progress` · `in review (#N)` = open PR, **not on `main`** · `done` = merged · `blocked`.
 
 ---
 
@@ -16,13 +16,13 @@ Status values: `todo` · `in progress` · `in review` · `done` · `blocked`.
 
 | Task | Deliverable | Acceptance | Status |
 |---|---|---|---|
-| M00-00 | Audit docs + planning docs | 10 docs in `docs/` with commit SHA | in review |
-| M00-01 | Shredder fail-closed (RISK-001) | Failed write/flush/oversize/changed/unreadable folder → no unlink of un-overwritten data; self-test checks for each | in review |
-| M00-02 | Duplicate read failures (RISK-002) | Read error/short read never groups or confirms identity; self-test with unreadable files | in review |
-| M00-03 | Self-test isolation (RISK-003) | Self-test refuses real home; `scripts/selftest.sh`; CI uses it; fixtures unique | in review |
+| M00-00 | Audit docs + planning docs | 10 docs in `docs/` with commit SHA | in review (#25) |
+| M00-01 | Shredder fail-closed + races (RISK-001) | No un-overwritten data deleted; growth, replacement, folder/parent swaps, edits after review handled; partial results reported; residual limits documented | in review (#26) |
+| M00-02 | Duplicate read failures (RISK-002) | Errors, truncation, growth never match; valid short reads still match; no scan slowdown | in review (#27) |
+| M00-03 | Self-test isolation (RISK-003) | Refuses real home; temp home; in-memory settings; user's list verified unchanged; concurrent runs pass | in review (#28) |
 | M00-04 | MCP human approval + identity digest (RISK-004) | Confirm without Mac Cleaner-owned human approval refused; `empty_trash` digest includes listed item identities; replaced-at-same-path item refused | todo |
 | M00-05 | Simulators review-only (RISK-005) | `xcode.sims` not recommended, review row says app data is lost | todo |
-| M00-06 | RISK-014 Storage Map check under `/private` home | Root cause: `/tmp` vs `/private/tmp` spelling; check compares name bytes + identity (done in M00-03) | in review |
+| M00-06 | RISK-014 Storage Map check under `/private` home | Root cause: `/tmp` vs `/private/tmp` spelling; check compares name bytes + identity | in review (#28) |
 | M00-07 | Release baseline (RISK-008) | Hardened runtime in project Release config; release job fails if signing expected but missing; doc for `.sig` | todo |
 
 **Verification.** `scripts/selftest.sh` locally and in CI; Release build; CLI/MCP smoke.
@@ -41,6 +41,7 @@ Status values: `todo` · `in progress` · `in review` · `done` · `blocked`.
 | M01-05 | Strict concurrency `complete`, fix diagnostics | 0 concurrency warnings; every `@unchecked Sendable` justified |
 | M01-06…11 | Move caches, projects, SDKs, apps, duplicates, system data onto executor | Per-module tests; UI unchanged (screenshots compared) |
 | M01-12 | Swift 6 mode: Core → Persistence → Platform → Features → app | Builds and all tests green after each |
+| M01-13 | `AutomationPolicy` (RISK-017) | Scheduled clean runs only under an explicit, versioned, revocable policy; a code change that adds a category does not widen an enabled policy; runs recorded with `approvedBy: .standingPolicy` |
 
 ## M02 — Cleanup and recovery
 

@@ -131,7 +131,7 @@ Swift 6 diagnostics already emitted in Swift 5 mode (baseline build): `Insights.
 The two failures under a relocated home are fixture-environment issues, not product regressions:
 `Trash refuses a file reached through a linked folder` needs `~/Library/Keychains` to exist, and
 `Storage Map keeps a non-ASCII name exactly as stored` compared full paths, which differ as `/tmp/…` vs
-`/private/tmp/…` (same folder) when home is under `/private` (RISK-014, fixed in M00-03).
+`/private/tmp/…` (same folder) when home is under `/private` (RISK-014; fix in open PR #28).
 App startup, scan latency and memory were not measured in this pass.
 
 ## 9. Pull requests
@@ -140,3 +140,5 @@ App startup, scan latency and memory were not measured in this pass.
   #16 (admin staging P0), #17 (menu bar panel + schedule), #18 (P2 audit fixes), #24 (docs).
 * Closed unmerged, superseded by #15: #11, #12, #13, #14.
 * Open: #22 (Dependabot, `actions/upload-pages-artifact` 5.0.0).
+* Opened from this audit (not merged; `main` still has the defects): #25 (these docs), #26 (Shredder,
+  RISK-001), #27 (Duplicates, RISK-002), #28 (self-test isolation, RISK-003/014).

@@ -11,7 +11,9 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
    `reviewRequired`, `potentialUserData`, `privileged` items are never preselected, never part of
    "Select all safe", never run by the scheduler.
 3. **Human approval.** Approval comes from a person: the Review sheet, the terminal y/N, or a Mac Cleaner-owned
-   confirmation for MCP. An AI agent's `confirm: true` is a request, not an approval.
+   confirmation for MCP. An AI agent's `confirm: true` is a request, not an approval. The only exception is the
+   scheduled safe clean, which runs under a separate, explicitly enabled, narrow **automation policy**
+   (`ARCHITECTURE_V2.md` §3a), never under an agent's request.
 4. **Revalidate at execution.** Protection rules and the target's filesystem identity are re-checked
    immediately before each item. A changed, replaced or newly protected target is skipped and reported.
 5. **Never follow unexpected links.** Symlinks are acted on as links, never traversed into, unless the plan
@@ -20,6 +22,8 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
    the destructive step for that item does not happen.
 7. **Honest results.** Report per-item outcome. "Freed" counts only permanent deletions; Trash moves are
    "moved to Trash (not freed until emptied)". Never claim permanently deleted data can be restored.
+   **Not everything can be rolled back:** a folder deleted part-way, or a file whose overwrite started, cannot
+   be restored. Such outcomes are reported as partial (what was done, what was kept, what was damaged).
 8. **Unreadable ≠ empty.** A folder that could not be read is reported as inaccessible, never as 0 bytes or
    "nothing found".
 9. **Tests never touch real user data.** Fixtures live in a fresh temporary home; see `TEST_STRATEGY.md`.
@@ -34,27 +38,45 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
 | Shredder | overwrite + delete | home only, regular files only, no hard links, every folder readable, every file ≤ 4 GB and writable; per-file overwrite → flush → unlink |
 | Admin step | privileged uninstall | random 0700 staging dir, root-owned parent re-check, `mv -n`, chown staging dir only |
 
-## 3. Shredder semantics (after M00-01)
+## 3. Shredder semantics (PR #26, open — not on `main` yet)
 
-* The whole item is planned first. It is refused untouched if any folder inside can't be read, any entry is
-  not a regular file / directory / symlink, any file is a hard link, locked, unwritable, or larger than 4 GB.
-* Symlinks inside a folder are removed as links; their targets are never opened.
-* Each file is opened with `O_NOFOLLOW`, checked to be the same inode and still single-linked, overwritten
-  with zeros, flushed with `F_FULLFSYNC` (falling back to `fsync`), and **only then** unlinked.
-* If any overwrite fails, that file and everything not yet processed are kept; folders are removed only when
-  empty. The result lists what was shredded and what was kept.
+* **Plan at review.** When an item is added, it is listed without following links and every entry's identity
+  is recorded (device, inode, type; size and modification time for files). It is refused untouched if any
+  folder can't be read completely, any entry is a hard link, locked, unwritable, over 4 GB, a pipe/socket/device,
+  or the item itself is a link. Shredding executes this reviewed plan.
+* **Work through open folders.** The item's folder is opened once and checked against the plan; everything else
+  is relative to open folder descriptors (`openat`, `fstatat`, `renameat`, `unlinkat`, no link following).
+* **Move, check, act.** Each file or link is moved into a private staging folder (random name, mode 0700, same
+  folder as the item) and checked there. If it isn't the planned object, it is moved back with `RENAME_EXCL`
+  (never replacing anything) and kept. Files changed since review are kept.
+* **Overwrite → `F_FULLFSYNC` → final identity check → unlink → re-check through the still-open file:** data
+  another process appended meanwhile is overwritten before closing.
+* **Stop at the first failure.** Already-shredded files are gone; the failed file and the rest stay in place.
+  A file whose overwrite started is reported as **damaged**. Folders are removed only when empty (`rmdir`), so
+  a swapped folder can never cause data loss.
+* **Residual limits (not atomic):** macOS has no "unlink only if unchanged" call. A process of the same user
+  that already holds the file open can still write after the last re-check (a warning is shown if growth is
+  seen), and could in principle find and alter the staging folder. These require a hostile same-user process,
+  which can delete the user's files anyway.
 * **Limits (shown in the UI and here):** on APFS and SSDs, an overwrite cannot guarantee the old blocks are
   gone — copy-on-write writes new blocks, snapshots (Time Machine local snapshots) and clones may keep the old
   data, and SSD wear levelling remaps blocks. FileVault (full-disk encryption) is the effective protection.
   Mac Cleaner never promises unrecoverability.
 
-## 4. Duplicates semantics (after M00-02)
+## 4. Duplicates semantics (PR #27, open — not on `main` yet)
 
-* Grouping: size → head/tail hash → full SHA-256. Any read error or short read excludes the file from grouping.
+* Grouping: size → head/tail hash → full SHA-256. Short (non-empty) reads are continued until the needed byte
+  count; any read error, or a file that ends before its listed size, excludes the file from grouping.
 * Before moving a copy to the Trash: both files must still be distinct regular local files of the scanned size,
-  and a byte-for-byte compare of exactly `size` bytes must succeed without error.
+  exactly `size` bytes must compare equal, and both must end there (not truncated, not grown).
 
-## 5. Simulators and command targets
+## 5. Unattended runs
+
+The scheduled safe clean runs under the automation policy (`ARCHITECTURE_V2.md` §3a): opt-in, narrow fixed scope,
+same guards and revalidation, recorded as a session, revocable. It never runs command targets, review items,
+Trash-only items or privileged steps.
+
+## 6. Simulators and command targets
 
 `simctl delete unavailable`, `simctl runtime delete`, `docker … prune` are **command targets**: never
 recommended, never scheduled, always reviewed with a description of what is lost (device app data, images,

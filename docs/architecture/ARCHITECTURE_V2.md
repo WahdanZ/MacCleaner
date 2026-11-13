@@ -50,8 +50,9 @@ All types are `Sendable` value types.
 | `Disposition` | `.trash`, `.permanentDelete`, `.overwriteThenDelete`, `.quarantine`, `.command` — separate from risk. |
 | `ScanOutcome<Item>` | `items`, `inaccessible: [AccessProblem]`, `partialErrors`, `wasCancelled`, `isComplete`, `warnings`. |
 | `CleanupPlan` | ordered candidates + dispositions + a `planDigest` over *identities*, not just paths. |
-| `CleanupApproval` | `planDigest`, `approvedBy: .userInApp / .userInTerminal / .userViaMCPPrompt`, `expires`, single-use nonce. An agent cannot mint one. |
-| `CleanupReport` / `ItemOutcome` | per-target `.removed(bytes)`, `.trashed(recoveryURL)`, `.skipped(reason)`, `.failed(error)`; totals split into *freed* vs *moved to Trash*. |
+| `CleanupApproval` | `planDigest`, `approvedBy: .userInApp / .userInTerminal / .userViaMCPPrompt / .standingPolicy(AutomationPolicy.id, version)`, `expires`, single-use nonce. An agent cannot mint one. |
+| `AutomationPolicy` | A standing, opt-in authorization for unattended runs (scheduled safe clean). See §3a. |
+| `CleanupReport` / `ItemOutcome` | per-target `.removed(bytes)`, `.trashed(recoveryURL)`, `.skipped(reason)`, `.failed(error)`, `.partiallyDone(done, kept, damaged)`; totals split into *freed* vs *moved to Trash*. A report never rounds a partial outcome up to success or down to "nothing happened". |
 | `ProtectionPolicy` | merges hard-coded structural/sensitive roots, user protection, scan exclusions, module exclusions; one case-insensitive comparison; documented precedence: **hard-coded > user protected > module exclusion > scan exclusion**. |
 | `ProgressEvent` | `scanStarted(module)`, `moduleProgress`, `itemsDiscovered`, `accessProblem`, `cleanupStarted`, `itemFinished(ItemOutcome)`, `finished(report)`, `cancelled`. Delivered as `AsyncStream<ProgressEvent>`. |
 
@@ -71,8 +72,32 @@ trashes, overwrites or quarantines anything. The app, CLI, MCP and scheduler all
 4. Emit `itemFinished` with the true outcome. No aggregate "success" unless every item succeeded.
 5. Append the item to the open `CleanupSession` in persistence.
 
-Cancellation is checked between items; an item in flight is completed or rolled back, never half-done
-(the Shredder's per-file overwrite-then-unlink is the model, see `SAFETY_MODEL.md`).
+Cancellation is checked between items. **Not every operation can be rolled back**, so the executor promises a
+truthful result, not atomicity:
+
+* Moves (Trash, quarantine, staging) are atomic per item (`rename`) and reversible.
+* Permanent deletion of a folder is a sequence of per-entry steps; if it stops part-way, the entries already
+  deleted are gone and the report lists exactly what was kept.
+* Overwriting (Shredder) is destructive the moment it starts: a file whose overwrite fails part-way is kept
+  but its content is damaged, and the report says so (`damaged`). There is no undo.
+* `.partiallyDone` is a first-class outcome in UI, CLI, MCP and history.
+
+### 3a. Unattended runs: the automation policy
+
+The scheduled safe clean (#17) runs with nobody present, so it cannot use per-run approval. It runs under a
+separate **`AutomationPolicy`**, which the user turns on explicitly in Settings › Automation:
+
+* **Narrow scope, fixed by code:** only `safeRegenerable` file/folder targets in an allow-list of categories
+  (today: `AutoClean.select` / `AutoClean.narrowed` — tool caches, logs except crash reports, caches of apps
+  that are not running). Never command targets (simulators, Docker, `tmutil`), never review-required or
+  potential-user-data items, never Trash-only items, never anything privileged.
+* **Versioned:** the policy records which categories it covers. A new app version that adds a category does not
+  extend an existing policy; the user must re-enable it after seeing the new scope.
+* **Same executor, same guards:** protection, exclusions and identity revalidation apply exactly as in an
+  interactive run; anything changed or protected is skipped.
+* **Recorded:** each run is a history session with `approvedBy: .standingPolicy`, listing every item.
+* **Revocable:** turning it off cancels future runs; it never runs again until turned back on.
+* The CLI and MCP cannot create or widen a policy.
 
 ## 4. Actors and isolation
 

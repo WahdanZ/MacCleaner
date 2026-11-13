@@ -13,8 +13,13 @@ Tests must never read or modify the developer's real home, settings or Trash.
 * `scripts/selftest.sh` creates a fresh `mktemp -d` home, pre-creates the standard folders, and runs
   `CFFIXED_USER_HOME=<that dir> "Mac Cleaner" --selftest`. Foundation then resolves
   `homeDirectoryForCurrentUser` inside it (verified on macOS 26). `UserDefaults` is **not** moved
-  (`cfprefsd` keeps writing `~/Library/Preferences`), so the self-test points `ProtectedPaths.store` at a
-  throwaway domain (`io.github.wahdanz.maccleaner.selftest`) that it empties at the end.
+  (`cfprefsd` keeps writing `~/Library/Preferences`, and removing a domain leaves an empty plist), so the
+  self-test keeps settings in memory (`MemorySettings` behind `ProtectedPaths.store`) and writes nothing there.
+  It checks that the user's own Protected list is unchanged; the script checks it again from outside and fails
+  if any self-test settings file appears. (PR #28)
+* Exception: the Trash round-trip check must use the real Trash (`trashItem` ignores the relocated home). It uses
+  a per-run file it created and puts it back immediately (RISK-016).
+* Concurrent runs are supported (verified: 4 at once, all passing).
 * `SelfTest.run` refuses to run when the home it sees is the account's real home (from `getpwuid`), unless
   `MACCLEANER_SELFTEST_ALLOW_REAL_HOME=1` is set explicitly.
 * New fixtures are created with `withIntermediateDirectories: false` under a unique name and removed only if

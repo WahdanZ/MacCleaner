@@ -17,7 +17,7 @@ Mac Sai (`iliyami/MacSai`) was used only as a feature reference; no code was rea
 | CLEAN-03 | Mail attachments | **Partial** | Apple Mail size only, in System Data (`SystemData.swift`, `SysItem.Section.mail`). No per-attachment discovery; Outlook and Spark missing. |
 | CLEAN-04 | Trash bins | **Partial** | Home Trash status/empty/Put Back (`Trash.swift`, `TrashOps`, `TrashLog`). No per-volume `.Trashes/<uid>` listing. |
 | CLEAN-05 | Project junk | **Done / Partial** | `ProjectEngine` covers Flutter/Dart, Node (+Next/Nuxt/Turbo/SvelteKit), Gradle/Android, CocoaPods, SwiftPM, Rust, Maven, Python, Go, .NET, CMake, Elixir, Terraform (`Projects.swift:35-66`). Deletion is permanent; Trash-first option missing. |
-| CLEAN-06 | Disk hogs | **Partial / Unsafe** | Docker groups, simulators, runtimes, device support, Android AVDs/SDKs (`DevSDK.swift`, `DevTools+.swift`). Unavailable simulators are preselected on `main` (RISK-005; fix in open PR #30). Docker volumes review-only status to verify in M02. |
+| CLEAN-06 | Disk hogs | **Partial / Unsafe** | Docker groups, simulators, runtimes, device support, Android AVDs/SDKs (`DevSDK.swift`, `DevTools+.swift`). Unavailable simulators are review-only since #30 (RISK-005). Docker volumes review-only status to verify in M02. |
 | CLEAN-07 | Cleanup history + restore | **Partial** | `HistoryStore` records title/bytes/outcome; Put Back exists for items Mac Cleaner trashed (`TrashLog`). No sessions, targets, errors or recovery locations (RISK-013). |
 | CLEAN-08 | Folder exclusions | **Partial** | Global protected paths (`ProtectedPaths`, Settings › Protection), honoured by every guard. No scan-only or per-module exclusions; precedence undocumented. |
 | CLEAN-09 | Universal Clipboard archives | **Missing** | No reference to `useractivityd/shared-pasteboard`. |
@@ -63,7 +63,7 @@ Mac Sai (`iliyami/MacSai`) was used only as a feature reference; no code was rea
 | FILE-03 | APFS clone consolidation | **Missing** | No `clonefile` use. |
 | FILE-04 | Universal binary analysis | **Missing** | |
 | FILE-05 | Binary thinning | **Missing** | Will be restricted by design (DECISIONS D-009). |
-| FILE-06 | Shredder | **Unsafe on `main`** | RISK-001; fix in open PR #26. |
+| FILE-06 | Shredder | **Fixed (#26)** | RISK-001 fixed on `main`. Modes/docs remain for M07. |
 
 ## F. Menu bar & health
 
@@ -85,7 +85,7 @@ Mac Sai (`iliyami/MacSai`) was used only as a feature reference; no code was rea
 | Area | Status | Evidence / gap |
 |---|---|---|
 | CLI | **Done / Refactor** | `CLI.swift`, interactive y/N for destructive commands, exits 2 without TTY. |
-| MCP | **Done / Unsafe** | 21 tools, preview_id binding (#15); human approval gap RISK-004 on `main` (fix in open PR #29). |
+| MCP | **Done / Unsafe** | 21 tools, preview_id binding (#15); human approval in Mac Cleaner's own window and identity digests (#29). |
 | Secure updates | **Done** | Ed25519 + SHA-256 + bundle/version + codesign + rollback swap (`Updates.swift`). |
 | Signing / notarization | **Partial** | Conditional on secrets (RISK-008). |
 | Localization | **Missing** | No `.xcstrings`/`.lproj`; strings are literals (SwiftUI `Text("…")` literals are localizable keys, so extraction is feasible). |

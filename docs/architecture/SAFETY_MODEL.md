@@ -38,7 +38,7 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
 | Shredder | overwrite + delete | home only, regular files only, no hard links, every folder readable, every file ≤ 4 GB and writable; per-file overwrite → flush → unlink |
 | Admin step | privileged uninstall | random 0700 staging dir, root-owned parent re-check, `mv -n`, chown staging dir only |
 
-## 3. Shredder semantics (PR #26, open — not on `main` yet)
+## 3. Shredder semantics (on `main` since #26)
 
 * **Plan at review.** When an item is added, it is listed without following links and every entry's identity
   is recorded (device, inode, type; size and modification time for files). It is refused untouched if any
@@ -65,7 +65,7 @@ whether started from the app, the menu bar, the scheduler, the CLI or MCP.
   data, and SSD wear levelling remaps blocks. FileVault (full-disk encryption) is the effective protection.
   Mac Cleaner never promises unrecoverability.
 
-## 4. Duplicates semantics (PR #27, open — not on `main` yet)
+## 4. Duplicates semantics (on `main` since #27)
 
 * Grouping: size → head/tail hash → full SHA-256. Short (non-empty) reads are continued until the needed byte
   count; any read error, or a file that ends before its listed size, excludes the file from grouping.
@@ -78,8 +78,17 @@ The scheduled safe clean runs under the automation policy (`ARCHITECTURE_V2.md` 
 same guards and revalidation, recorded as a session, revocable. It never runs command targets, review items,
 Trash-only items or privileged steps.
 
-## 6. Simulators and command targets (PR #30, open — not on `main` yet)
+## 6. Simulators and command targets (on `main` since #30)
 
 `simctl delete unavailable`, `simctl runtime delete`, `docker … prune` are **command targets**: never
 recommended, never scheduled, always reviewed with a description of what is lost (device app data, images,
 volumes). Docker volumes are review-only.
+
+## 7. MCP and CLI approval, and emptying the Trash (on `main` since #29)
+
+* A confirm from an AI client needs the person's yes in Mac Cleaner's own window (stored preview, every item,
+  Cancel default, 2-minute auto-cancel, no window → no). The CLI's typed `yes` / `--yes` is the terminal approval.
+* Digests use file identity (device, inode, type; size and time for files).
+* `empty_trash` never calls Finder. Each Trash item is approved as a snapshot of everything inside it; deletion
+  re-checks the snapshot, removes only its entries deepest first (folders only when empty) and keeps anything
+  added later. Trash folders on volumes that can't be checked are reported as not covered.

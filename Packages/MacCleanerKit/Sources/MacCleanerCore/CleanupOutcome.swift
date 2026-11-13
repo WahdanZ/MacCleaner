@@ -98,6 +98,8 @@ public struct ItemOutcome: Sendable, Hashable {
         /// Moved, recoverable from `recoveryPath`; not freed until the Trash is emptied.
         case trashed(bytes: Int64, recoveryPath: String)
         case skipped(SkipReason)
+        /// The system refused for lack of permission (may need an administrator). Nothing was changed.
+        case permissionDenied(String)
         case failed(String)
         /// Stopped part-way: `freedBytes` are gone, the `kept` entries are untouched (each with why), the `damaged`
         /// paths are still there but changed (an overwrite that failed part-way). Never reported as success or as
@@ -118,7 +120,7 @@ public struct ItemOutcome: Sendable, Hashable {
     public var succeeded: Bool {
         switch result {
         case .removed, .trashed: return true
-        case .skipped, .failed, .partiallyDone: return false
+        case .skipped, .permissionDenied, .failed, .partiallyDone: return false
         }
     }
 }

@@ -335,6 +335,20 @@ enum MCPServer {
             let picked = app.leftovers.filter { $0.include || shared }
             let digest = plan([app.bundleID, identity(app.url.path)] + picked.map { $0.receipt.map { "receipt " + $0 } ?? identity($0.url.path) })
             if !confirm {
+                // The app bundle and home-folder leftovers: the scan's identities, only if the same items are still
+                // there (else refused: list_apps again). The confirm can only approve exactly these.
+                let (bundleSnap, bundleStale) = AppCleanup.scannedSnapshot(app.url, scanned: app.identity)
+                guard let bundleSnap else {
+                    throw ToolError(description: "\(app.name): \(bundleStale ?? "it changed") (call list_apps again).")
+                }
+                var trashItems: [(id: String, title: String, item: FileIdentity, size: Int64, explanation: String)] =
+                    [(app.url.path, "\(app.name).app", bundleSnap, app.appSize, "Requested through Mac Cleaner's AI connection or command line")]
+                for l in picked where !l.needsAdmin && l.receipt == nil && TrashGuard.reason(l.url) == nil {
+                    if let snap = AppCleanup.scannedSnapshot(l.url, scanned: l.identity).identity {
+                        trashItems.append((l.id, l.url.lastPathComponent, snap, l.size, "Requested through Mac Cleaner's AI connection or command line"))
+                    }
+                }
+                let trashPlan = AppCleanup.trashPlan(trashItems, module: "uninstall")
                 return withPreview(name, digest, [
                     "preview": true, "app": app.name, "app_path": Scanner.tilde(app.url), "app_size": size(app.appSize),
                     "running": AppEngine.isRunning(app),
@@ -343,13 +357,14 @@ enum MCPServer {
                     "needs_password": picked.contains(where: \.needsAdmin),
                     "total": size(app.appSize + picked.reduce(0) { $0 + $1.size }),
                     "next": "Show this to the user. Only after an explicit yes, call uninstall_app again with confirm: true and the preview_id. If needs_password is true, macOS will show a password dialog the user must answer.",
-                ])
+                ], trashPlan: trashPlan)
             }
-            try approve(name, digest, a, approval)
+            let confirmed = try approve(name, digest, a, approval)
             if AppEngine.isRunning(app), !AppEngine.quit(app) {
                 throw ToolError(description: "\(app.name) did not quit. Ask the user to quit it, then try again.")
             }
-            let r = AppEngine.uninstall(app, picked: picked)
+            let r = AppEngine.uninstall(app, picked: picked, trash: ToolConfirmation.approveTrash(confirmed),
+                                        source: ToolConfirmation.trashSource("Uninstall \(app.name)", for: approval))
             if r.appRemoved { appCache.removeAll { $0.id == app.id } }
             return ["app_removed": r.appRemoved, "moved_to_trash": size(r.bytes), "errors": r.errors,
                     "message": r.summary(appName: app.name)]

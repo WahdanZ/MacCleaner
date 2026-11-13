@@ -183,7 +183,7 @@ enum SystemDataEngine {
             return (i.id, i.name, u, i.identity)
         }, module: "system-data", trash, source: trashSource)
         for i in trashItems where t.moved[i.id] != nil { bytes += i.size ?? 0 }
-        errors += t.errors
+        errors += t.errorTexts
         return (bytes, freed, errors, cancelled)
     }
 }

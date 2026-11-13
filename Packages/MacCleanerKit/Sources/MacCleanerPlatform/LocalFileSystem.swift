@@ -79,6 +79,16 @@ public struct LocalFileSystem: CleanupFileSystem {
         self.beforeMove = beforeMove
     }
 
+    /// A refusal for lack of permission (EACCES / EPERM, or Foundation's no-permission errors), as opposed to any
+    /// other failure.
+    public static func isPermissionError(_ error: Error) -> Bool {
+        let e = error as NSError
+        if e.domain == NSCocoaErrorDomain, [NSFileWriteNoPermissionError, NSFileReadNoPermissionError].contains(e.code) { return true }
+        if e.domain == NSPOSIXErrorDomain, [Int(EACCES), Int(EPERM)].contains(e.code) { return true }
+        if let underlying = e.userInfo[NSUnderlyingErrorKey] as? Error { return isPermissionError(underlying) }
+        return false
+    }
+
     public static func nanos(_ t: timespec) -> Int64 { Int64(t.tv_sec) * 1_000_000_000 + Int64(t.tv_nsec) }
 
     public static func nowNanos() -> Int64 {
@@ -127,7 +137,11 @@ public struct LocalFileSystem: CleanupFileSystem {
         let s = try parent.statChecked(item)
         let bytes = Self.allocated(parent, s)
         beforeMove?(item.path)
-        let dest = try trashMover(URL(fileURLWithPath: item.path))
+        let dest: URL
+        do { dest = try trashMover(URL(fileURLWithPath: item.path)) } catch {
+            if Self.isPermissionError(error) { throw FileSystemRefusal.permissionDenied("\(error.localizedDescription)") }
+            throw error
+        }
         var moved = stat()
         guard fstatat(AT_FDCWD, dest.path, &moved, AT_SYMLINK_NOFOLLOW) == 0 else {
             throw PlatformError(message: "\(item.path) was moved to the Trash at \(dest.path) but couldn't be checked there")

@@ -74,7 +74,8 @@ enum AppCleanup {
     /// record of a move that was made. If a record can't be written, the run stops there and says so. `precondition`
     /// can refuse single items right before they move.
     static func moveToTrash(_ decision: TrashApproval, source: String,
-                            precondition: CleanupExecutor.Precondition? = nil) async -> TrashRun {
+                            precondition: CleanupExecutor.Precondition? = nil,
+                            stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil) async -> TrashRun {
         let approved: ApprovedTrash
         switch decision {
         case .approved(let a): approved = a
@@ -89,16 +90,17 @@ enum AppCleanup {
             let report = try await executor.execute(
                 approved.plan, approval: approved.approval, precondition: precondition,
                 onItemFinished: { o in
-                    guard case .file(let item) = o.target, case .trashed(_, let recovery) = o.result else { return nil }
+                    guard case .file(let item) = o.target, case .trashed(_, let recovery) = o.result else { return stopAfter?(o) }
                     guard record(item.path, recovery, sizes[o.candidateID] ?? 0, source) else {
                         unrecorded.insert(o.candidateID)
                         return unrecordedStop
                     }
                     after?(o.candidateID)
-                    return nil
+                    return stopAfter?(o)
                 })
             for o in report.outcomes {
                 guard case .file = o.target else { continue }
+                run.outcomes[o.candidateID] = o.result
                 if case .trashed(_, let recovery) = o.result {
                     run.moved[o.candidateID] = sizes[o.candidateID] ?? 0
                     if unrecorded.contains(o.candidateID) {
@@ -120,11 +122,12 @@ enum AppCleanup {
     /// `moveToTrash` for synchronous code (the engines, the MCP server, the CLI): waits for it. Nothing on this path
     /// needs the main thread, so it may be called on it.
     static func moveToTrashBlocking(_ decision: TrashApproval, source: String,
-                                    precondition: CleanupExecutor.Precondition? = nil) -> TrashRun {
+                                    precondition: CleanupExecutor.Precondition? = nil,
+                                    stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil) -> TrashRun {
         let slot = RunSlot()
         let done = DispatchSemaphore(value: 0)
         Task.detached {
-            slot.run = await moveToTrash(decision, source: source, precondition: precondition)
+            slot.run = await moveToTrash(decision, source: source, precondition: precondition, stopAfter: stopAfter)
             done.signal()
         }
         done.wait()
@@ -154,25 +157,37 @@ enum AppCleanup {
     /// of `items` by id, have exactly one target whose path is that item's `.trash` URL and whose identity is the
     /// item's scanned identity, and no two entries may name the same target. A reviewed item not in the plan is
     /// reported and left alone.
-    static func engineTrash(_ items: [EngineTrashItem], module: String, _ decision: TrashApproval?,
-                            source: String) -> (moved: [String: Int64], errors: [String]) {
-        guard !items.isEmpty else { return ([:], []) }
+    static func engineTrash(_ items: [EngineTrashItem], module: String, _ decision: TrashApproval?, source: String,
+                            stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil) -> EngineTrashResult {
+        guard !items.isEmpty else { return EngineTrashResult() }
         guard let decision else {
-            return ([:], items.map { "\($0.name): it wasn't approved for the Trash, so it was left alone" })
+            return EngineTrashResult(errors: items.map { ($0.id, "\($0.name): it wasn't approved for the Trash, so it was left alone") })
         }
         let plan: CleanupPlan
         switch decision { case .approved(let a): plan = a.plan; case .refused(let p, _): plan = p }
         if let why = planMismatch(plan, items, module: module) {
-            return ([:], items.map { "\($0.name): the approved list doesn't match the items (\(why)), so nothing was moved" })
+            return EngineTrashResult(errors: items.map { ($0.id, "\($0.name): the approved list doesn't match the items (\(why)), so nothing was moved") })
         }
         let planned = Set(plan.candidates.map(\.id))
-        var errors = items.filter { !planned.contains($0.id) }.map {
-            "\($0.name): it wasn't in the reviewed list for the Trash, so it was left alone"
+        var result = EngineTrashResult()
+        result.errors = items.filter { !planned.contains($0.id) }.map {
+            ($0.id, "\($0.name): it wasn't in the reviewed list for the Trash, so it was left alone")
         }
-        let run = moveToTrashBlocking(decision, source: source)
+        let run = moveToTrashBlocking(decision, source: source, stopAfter: stopAfter)
         let names = Dictionary(items.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
-        for p in run.problems { errors.append("\(names[p.id] ?? p.id): \(p.message)") }
-        return (run.moved, errors)
+        for p in run.problems { result.errors.append((p.id, "\(names[p.id] ?? p.id): \(p.message)")) }
+        result.moved = run.moved
+        result.outcomes = run.outcomes
+        return result
+    }
+
+    /// What `engineTrash` did: moved items (by id, reviewed size), problems (by id, ready to show), and each planned
+    /// item's structured outcome (so a caller can tell a permission refusal from a safety refusal).
+    struct EngineTrashResult {
+        var moved: [String: Int64] = [:]
+        var errors: [(id: String, text: String)] = []
+        var outcomes: [String: ItemOutcome.Result] = [:]
+        var errorTexts: [String] { errors.map(\.text) }
     }
 
     /// nil when every plan entry is exactly one of `items`' Trash actions, as reviewed; otherwise what doesn't fit.
@@ -205,6 +220,7 @@ enum AppCleanup {
         case .skipped(.preconditionFailed(let why)): return why
         case .skipped(.addedAfterReview): return "it appeared after you reviewed the list, so it was left alone"
         case .skipped(.cancelled): return "cancelled"
+        case .permissionDenied(let why): return "the system refused permission (\(why))"
         case .failed(let why): return why
         case .partiallyDone: return "only partly done"
         }
@@ -249,6 +265,8 @@ struct TrashRun: Sendable {
     var moved: [String: Int64] = [:]
     /// Not moved, with why.
     var problems: [(id: String, message: String)] = []
+    /// Each planned item's outcome, by id.
+    var outcomes: [String: ItemOutcome.Result] = [:]
     var report: CleanupReport?
 }
 

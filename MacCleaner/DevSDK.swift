@@ -452,7 +452,7 @@ enum SDKEngine {
             bytes += a.size
             trashed += a.size
         }
-        errors += t.errors
+        errors += t.errorTexts
         return (bytes, trashed, errors)
     }
 

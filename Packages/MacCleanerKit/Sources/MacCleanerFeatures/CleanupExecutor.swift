@@ -127,6 +127,9 @@ public actor CleanupExecutor {
             case .missing: return skipAll(.missing)
             case .changed(let m): return skipAll(.changed(m))
             case .protected(let why): return skipAll(.protected(why))
+            case .permissionDenied(let why):
+                for r in reviewed { finish(ItemOutcome(candidateID: candidate, target: .file(r), result: .permissionDenied(why))) }
+                return
             }
         } catch {
             for r in reviewed { finish(ItemOutcome(candidateID: candidate, target: .file(r), result: .failed("\(error)"))) }
@@ -171,6 +174,7 @@ public actor CleanupExecutor {
             case .missing: return outcome(.skipped(.missing))
             case .changed(let m): return outcome(.skipped(.changed(m)))
             case .protected(let why): return outcome(.skipped(.protected(why)))
+            case .permissionDenied(let why): return outcome(.permissionDenied(why))
             }
         } catch {
             return outcome(.failed("\(error)"))

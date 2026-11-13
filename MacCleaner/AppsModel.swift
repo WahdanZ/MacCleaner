@@ -1,6 +1,7 @@
 import AppKit
 import CoreServices
 import Foundation
+import MacCleanerCore
 import MacCleanerPlatform
 import Observation
 
@@ -20,6 +21,9 @@ struct AppLeftover: Identifiable, Sendable {
     var launchSystem = false
     /// Installer receipt id (`pkgutil --forget`), no file.
     var receipt: String? = nil
+    /// What the scan found, captured when it found it. The review approves exactly this item (Trash through the
+    /// executor; the password step checks it again inside the privileged move); anything else there is refused.
+    var identity: FileIdentity? = nil
 }
 
 struct AppInfo: Identifiable, Sendable {
@@ -34,6 +38,8 @@ struct AppInfo: Identifiable, Sendable {
     var leftovers: [AppLeftover]
     /// Disposable caches for "Clear cache" (cleared through the cache allow-list).
     var caches: [AppLeftover]
+    /// The app bundle as the scan found it (see AppLeftover.identity).
+    var identity: FileIdentity? = nil
 
     var dataSize: Int64 { leftovers.reduce(0) { $0 + $1.size } }
     var cacheSize: Int64 { caches.reduce(0) { $0 + $1.size } }
@@ -141,6 +147,7 @@ enum AppScanner {
         var info = AppInfo(id: url.path, url: url, name: fileName, bundleID: id, version: version,
                            isApple: id.hasPrefix("com.apple."), appSize: Scanner.allocatedSize(url),
                            lastUsed: lastUsed(url), leftovers: [], caches: [])
+        info.identity = AppCleanup.snapshot(url)
         guard !id.isEmpty else { return info }
         let v = vendor(id)
         let vendorUnique = v.map { vv in !allIDs.contains { $0 != id && $0.hasPrefix(vv + ".") } } ?? false
@@ -169,6 +176,7 @@ enum AppScanner {
             seen.insert(u.path)
             var l = AppLeftover(id: u.path, url: u, label: label, size: Scanner.allocatedSize(u),
                                 include: include, note: note)
+            l.identity = AppCleanup.snapshot(u)
             l.needsAdmin = admin
             l.launchLabel = launch
             l.launchSystem = system
@@ -318,7 +326,9 @@ enum AppScanner {
             seen.insert(u.path)
             let size = Scanner.allocatedSize(u)
             guard size > 0 else { return }
-            out.append(AppLeftover(id: u.path, url: u, label: label, size: size, include: true, note: nil))
+            var l = AppLeftover(id: u.path, url: u, label: label, size: size, include: true, note: nil)
+            l.identity = AppCleanup.snapshot(u)
+            out.append(l)
         }
 
         add(lib.appendingPathComponent("Caches/\(id)"), "Caches")
@@ -495,11 +505,11 @@ final class AppsModel {
     /// Full uninstall: stop background jobs, app + checked leftovers → Trash,
     /// then one password prompt (macOS's own) for items outside your home folder.
     /// Uninstalls the app that was reviewed, with exactly the reviewed leftovers.
-    func uninstall(_ a: AppInfo, picked: [AppLeftover]) async {
+    func uninstall(_ a: AppInfo, picked: [AppLeftover], trash: TrashApproval?) async {
         guard uninstallBlock(a) == nil else { return }
         phase = .working
         if isRunning(a), !(await quit(a)) { phase = .done; return }
-        let r = await Task.detached { AppEngine.uninstall(a, picked: picked) }.value
+        let r = await Task.detached { AppEngine.uninstall(a, picked: picked, trash: trash) }.value
         if r.appRemoved {
             apps.removeAll { $0.id == a.id }
             HistoryStore.shared.add("\(a.name) Uninstalled", bytes: r.bytes, symbol: "square.grid.2x2", outcome: .trashed)
@@ -549,97 +559,6 @@ enum AdminGuard {
     }
 }
 
-/// Runs the system part of an uninstall through macOS's own administrator prompt
-/// (`osascript … with administrator privileges`). Files go to a folder in your Trash.
-///
-/// The root script moves the items into a new folder that only root can open: `mktemp -d` makes it in
-/// /private/var/tmp with a random name and mode 700, so no other process can create it first, put links in it or
-/// swap it (that folder is sticky, so nobody else can rename it). The script then hands you only that one folder
-/// (`chown` without `-R`) and prints its path. The items inside keep their system owner: a recursive `chown` as root
-/// would also change the owner of any file that something had hard-linked into a moved folder. The app then moves the
-/// folder to the Trash with the normal API (the Trash itself is privacy-protected even for root).
-enum AdminStep {
-    enum Result { case ok(staging: URL), cancelled, failed(String) }
-
-    /// Where the root script makes its staging folder; `mktemp` replaces the X's with random characters.
-    static let stagingParent = "/private/var/tmp"
-    static let stagingPrefix = "MacCleaner-uninstall."
-    static let stagingTemplate = stagingParent + "/" + stagingPrefix + "XXXXXXXXXX"
-
-    static func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-
-    /// The shell script the password step runs as root. Pure, so the self-test can check it.
-    /// Each item is checked again inside the script, right before it moves: its folder must still be a real folder
-    /// (not a link) owned by `parentOwner` (root). Only the self-test passes other values for `allowed`,
-    /// `parentOwner` and `chown`, to run the script as you on throwaway files.
-    static func script(_ items: [AppLeftover], uid: uid_t,
-                       allowed: (URL) -> Bool = AdminGuard.isAllowed,
-                       parentOwner: uid_t = 0, chown: String = "/usr/sbin/chown") -> String {
-        let safeName = "^[A-Za-z0-9._-]+$"
-        var lines = ["set -u",
-                     "D=$(/usr/bin/mktemp -d \(q(stagingTemplate))) || exit 1"]
-        for (i, l) in items.enumerated() {
-            if let label = l.launchLabel, label.range(of: safeName, options: .regularExpression) != nil {
-                let domain = l.launchSystem ? "system" : "gui/\(uid)"
-                lines.append("/bin/launchctl bootout \(domain)/\(label) 2>/dev/null || true")
-            }
-            if let pkg = l.receipt {
-                guard pkg.range(of: safeName, options: .regularExpression) != nil else { continue }
-                lines.append("/usr/sbin/pkgutil --forget \(pkg) >/dev/null 2>&1 || true")
-                continue
-            }
-            guard allowed(l.url) else { continue }
-            let item = l.url.standardizedFileURL
-            let src = q(item.path), dir = q(item.deletingLastPathComponent().path)
-            let dest = q("/\(i)-" + item.lastPathComponent)
-            lines.append("if [ -d \(dir) ] && [ ! -L \(dir) ] && [ \"$(/usr/bin/stat -f %u \(dir))\" = \(parentOwner) ]"
-                         + " && { [ -e \(src) ] || [ -L \(src) ]; }; then /bin/mv -n -- \(src) \"$D\"\(dest); fi")
-        }
-        if items.contains(where: { $0.url.path.hasPrefix("/Library/Audio/Plug-Ins/HAL/") }) {
-            lines.append("/usr/bin/killall coreaudiod 2>/dev/null || true")
-        }
-        // Only the staging folder itself changes owner, never anything inside it.
-        lines.append("\(q(chown)) \(uid) \"$D\" || exit 1")
-        lines.append("echo \"$D\"")
-        return lines.joined(separator: "; ")
-    }
-
-    /// The staging folder the script printed, if it is exactly what `mktemp` makes from `stagingTemplate`.
-    static func parseStaging(_ output: String?) -> URL? {
-        guard let line = output?.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-            .map({ $0.trimmingCharacters(in: .whitespaces) }).last(where: { !$0.isEmpty }) else { return nil }
-        let pattern = "^" + NSRegularExpression.escapedPattern(for: stagingParent + "/" + stagingPrefix) + "[A-Za-z0-9]{10}$"
-        guard line.range(of: pattern, options: .regularExpression) != nil else { return nil }
-        return URL(fileURLWithPath: line, isDirectory: true)
-    }
-
-    /// A real folder (not a link), owned by `uid` and closed to everyone else.
-    static func isTrustedStaging(_ url: URL, uid: uid_t) -> Bool {
-        var st = stat()
-        guard lstat(url.path, &st) == 0 else { return false }
-        return (st.st_mode & S_IFMT) == S_IFDIR && st.st_uid == uid && (st.st_mode & 0o077) == 0
-    }
-
-    /// `do shell script "…"` for osascript, with the script escaped for an AppleScript string.
-    /// `admin: false` runs it as you, without a password (the self-test uses that).
-    static func appleScript(_ script: String, admin: Bool = true) -> String {
-        "do shell script \"" + script.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\"" + (admin ? " with administrator privileges" : "")
-    }
-
-    static func run(_ items: [AppLeftover], uid: uid_t) -> Result {
-        let r = Shell.run("/usr/bin/osascript", ["-e", appleScript(script(items, uid: uid))], timeout: 600)
-        if r.status == 0 {
-            guard let staging = parseStaging(r.output), isTrustedStaging(staging, uid: uid) else {
-                return .failed("The password step finished, but its staging folder could not be checked, so it was not sent to the Trash. Look in \(stagingParent) for a folder named \(stagingPrefix)….")
-            }
-            return .ok(staging: staging)
-        }
-        let out = r.output ?? ""
-        if out.contains("-128") || out.lowercased().contains("cancel") { return .cancelled }
-        return .failed(out.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-}
 
 
 /// Synchronous app actions shared by the window and the MCP server. Call off the main thread.
@@ -696,76 +615,6 @@ enum AppEngine {
         do { dest = try AppCleanup.trashMover(url) } catch { return error.localizedDescription }
         TrashLog.shared.record(original: url.path, trashed: dest.path, size: bytes, source: source, restorable: restorable)
         return nil
-    }
-
-    /// App + picked leftovers → Trash; items outside home through one macOS password prompt.
-    static func uninstall(_ a: AppInfo, picked: [AppLeftover]) -> UninstallResult {
-        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
-        var r = UninstallResult()
-        let uid = getuid()
-        for l in picked where !l.needsAdmin {
-            if let label = l.launchLabel { _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"], timeout: 15) }
-        }
-        var adminItems = picked.filter(\.needsAdmin)
-        if let e = trash(a.url, size: a.appSize, source: "Uninstall \(a.name)") {
-            guard AdminGuard.isAllowed(a.url) else {
-                r.errors.append("\(a.name).app: \(e)")
-                return r
-            }
-            adminItems.insert(AppLeftover(id: a.url.path, url: a.url, label: "App", size: a.appSize,
-                                          include: true, note: nil, needsAdmin: true), at: 0)
-        } else {
-            r.appRemoved = true
-            r.bytes += a.appSize
-        }
-        for l in picked where !l.needsAdmin {
-            if let why = TrashGuard.reason(l.url) { r.errors.append("\(l.url.lastPathComponent): \(why)"); continue }
-            if let e = trash(l.url, size: l.size, source: "Uninstall \(a.name)") { r.errors.append("\(l.url.lastPathComponent): \(e)") } else { r.bytes += l.size }
-        }
-        guard !adminItems.isEmpty else { return r }
-        switch AdminStep.run(adminItems, uid: uid) {
-        case .ok(let staging):
-            let staged = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
-            if staged.isEmpty {
-                try? FileManager.default.removeItem(at: staging)
-            } else if let e = trash(staging, source: "Uninstall (system items)", restorable: false) {
-                r.errors.append("Moved system items to \(Scanner.tilde(staging)) but could not send it to the Trash: \(e)")
-            }
-            let still = adminItems.filter { $0.receipt == nil && FileManager.default.fileExists(atPath: $0.url.path) }
-            r.bytes += adminItems.filter { i in !still.contains { $0.id == i.id } }.reduce(0) { $0 + $1.size }
-            if !still.contains(where: { $0.url == a.url }) { r.appRemoved = true }
-            for l in still { r.errors.append("\(l.url.lastPathComponent): still there after admin step") }
-            r.adminNote = " Includes \(adminItems.count - still.count) system item(s)."
-        case .cancelled:
-            r.adminNote = " System items were kept (password prompt cancelled)."
-        case .failed(let msg):
-            r.errors.append("System items: \(msg)")
-        }
-        return r
-    }
-
-    /// Moves items outside your home folder to the Trash via one macOS password prompt
-    /// (stopping any launch jobs first). Returns removed paths and errors.
-    static func removeSystemItems(_ items: [AppLeftover]) -> (removed: [URL], errors: [String], cancelled: Bool) {
-        SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
-        guard !items.isEmpty else { return ([], [], false) }
-        switch AdminStep.run(items, uid: getuid()) {
-        case .ok(let staging):
-            var errors: [String] = []
-            let staged = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
-            if staged.isEmpty { try? FileManager.default.removeItem(at: staging) }
-            else if let e = trash(staging, source: "System items", restorable: false) { errors.append("Staging folder \(Scanner.tilde(staging)): \(e)") }
-            let fm = FileManager.default
-            let removed = items.filter { $0.receipt == nil && !fm.fileExists(atPath: $0.url.path) }.map(\.url)
-            for i in items where i.receipt == nil && fm.fileExists(atPath: i.url.path) {
-                errors.append("\(i.url.lastPathComponent): still there")
-            }
-            return (removed, errors, false)
-        case .cancelled:
-            return ([], [], true)
-        case .failed(let msg):
-            return ([], [msg], false)
-        }
     }
 
     /// How "Clear cache" treats one cache folder. `blocked` is nil when it may go.

@@ -108,31 +108,45 @@ enum ReviewBuild {
     // MARK: Apps
 
     /// `perform` gets the reviewed leftovers to remove with the app, or is not called if the app row was blocked.
-    static func uninstall(_ a: AppInfo, running: Bool, perform: @escaping ([AppLeftover]) -> Void) -> ReviewRequest {
+    /// The app bundle and the leftovers in your home folder are approved-Trash items: the plan holds the identities the
+    /// scan captured (what the sheet describes), only if the same items are still there when it opens (otherwise
+    /// blocked: scan again). Leftovers outside your home folder go through the password step, which checks their
+    /// scanned identity at the privileged move; a leftover that changed since the scan is blocked here too.
+    static func uninstall(_ a: AppInfo, running: Bool, perform: @escaping ([AppLeftover], TrashApproval?) -> Void) -> ReviewRequest {
+        let (bundleSnap, bundleStale) = AppCleanup.scannedSnapshot(a.url, scanned: a.identity)
         var items = [ReviewItem(id: a.url.path, name: "\(a.name).app", location: a.url.path, size: a.appSize,
                                 action: a.url.path.hasPrefix("/Applications/") ? .adminTrash : .trash,
-                                note: running ? "will be quit first" : nil, blocked: ProtectedPaths.reason(a.url))]
+                                note: running ? "will be quit first" : nil,
+                                blocked: ProtectedPaths.reason(a.url) ?? bundleStale, snapshot: bundleSnap)]
         for l in a.leftovers where l.include {
             if let pkg = l.receipt {
                 items.append(ReviewItem(id: "receipt:\(pkg)", name: "Installer receipt", location: pkg, size: nil,
                                         action: .command, note: "pkgutil --forget"))
                 continue
             }
-            let blocked = l.needsAdmin ? (AdminGuard.isAllowed(l.url) ? nil : "Not in an allowed system folder")
+            var blocked = l.needsAdmin ? (AdminGuard.isAllowed(l.url) ? nil : "Not in an allowed system folder")
                                        : TrashGuard.reason(l.url)
+            var snap: FileIdentity?
+            if blocked == nil {
+                let (s, stale) = AppCleanup.scannedSnapshot(l.url, scanned: l.identity)
+                blocked = stale
+                if !l.needsAdmin { snap = s }
+            }
             items.append(ReviewItem(id: l.id, name: l.label, location: l.url.path, size: l.size,
                                     action: l.needsAdmin ? .adminTrash : .trash, risk: l.note == nil ? .safe : .review,
-                                    note: l.note ?? (l.launchLabel != nil ? "background job is stopped first" : nil), blocked: blocked))
+                                    note: l.note ?? (l.launchLabel != nil ? "background job is stopped first" : nil),
+                                    blocked: blocked, snapshot: snap))
         }
         let admin = items.contains { $0.action == .adminTrash && $0.blocked == nil }
         return ReviewRequest(title: "Uninstall \(a.name)",
                              explanation: "Everything below goes to the Trash, so you can put it back."
                                 + (admin ? " Items outside your home folder need your password once." : "")
                                 + (running ? " \(a.name) is running and will be quit first." : ""),
-                             items: items, verb: "Uninstall",
-                             perform: { ok in
+                             items: items, verb: "Uninstall", perform: { _ in },
+                             trashPlan: AppCleanup.trashPlan(items, module: "uninstall"),
+                             performApproved: { ok, approval in
                                  guard ok.contains(a.url.path) else { return }
-                                 perform(a.leftovers.filter { $0.include && ok.contains($0.id) })
+                                 perform(a.leftovers.filter { $0.include && ok.contains($0.id) }, approval)
                              })
     }
 

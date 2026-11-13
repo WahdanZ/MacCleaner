@@ -13,7 +13,17 @@ enum SelfTest {
         print((ok ? "  ✓ " : "  ✗ ") + name)
     }
 
+    /// Stands in for Mac Cleaner's confirmation window during the self-test, so no real window ever appears.
+    final class ApprovalRecorder {
+        var asked: [ApprovalRequest] = []
+        var answer = true
+    }
+
     static func run() -> Bool {
+        let approvals = ApprovalRecorder()
+        let realAsk = HumanApproval.ask
+        HumanApproval.ask = { r in approvals.asked.append(r); return approvals.answer }
+        defer { HumanApproval.ask = realAsk }
         let fm = FileManager.default
         let home = SafetyGuard.home
         let h = { (rel: String) in home.appendingPathComponent(rel) }
@@ -526,6 +536,66 @@ enum SelfTest {
               (try? MCPServer.approve("empty_trash", "plan", ["preview_id": otherTool])) == nil)
         let old = MCPServer.issuePreview("clean_caches", "plan", now: Date().addingTimeInterval(-MCPServer.previewLifetime - 1))
         check("an expired preview_id is refused", (try? MCPServer.approve("clean_caches", "plan", ["preview_id": old])) == nil)
+
+        print("MCP: the person approves in Mac Cleaner's own window, for the exact files (SAFE-03)")
+        let hA = sandbox.appendingPathComponent("mcp-human.txt")
+        fm.createFile(atPath: hA.path, contents: Data("h".utf8))
+        approvals.asked = []; approvals.answer = false
+        let hPreview = (try? MCPServer.call("move_to_trash", ["paths": [hA.path]])) as? [String: Any]
+        let hID = hPreview?["preview_id"] as? String ?? ""
+        let declined = (try? MCPServer.call("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
+        check("an AI confirm the person declines in Mac Cleaner's window changes nothing",
+              declined && fm.fileExists(atPath: hA.path) && approvals.asked.count == 1)
+        check("the window lists exactly the previewed item, with Mac Cleaner's own wording",
+              approvals.asked.first?.verb == "Move to Trash"
+              && approvals.asked.first?.lines.contains { $0.contains("mcp-human.txt") } == true)
+        check("a declined preview can't be confirmed again",
+              (try? MCPServer.call("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
+              && fm.fileExists(atPath: hA.path))
+        // A path that doesn't exist: the call goes through (and is skipped) without touching the real Trash.
+        let ghost = sandbox.appendingPathComponent("mcp-ghost.txt").path
+        approvals.asked = []; approvals.answer = true
+        let gID = ((try? MCPServer.call("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        check("an AI confirm the person approves goes ahead",
+              (try? MCPServer.call("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": gID])) != nil
+              && approvals.asked.count == 1)
+        approvals.asked = []; approvals.answer = false
+        let tID = ((try? MCPServer.call("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        check("a CLI confirm (the person said yes at the terminal) needs no second window",
+              (try? MCPServer.call("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": tID], approval: .terminal)) != nil
+              && approvals.asked.isEmpty)
+        // Same path, different file: replaced (new inode) or edited (size/time) between preview and confirm.
+        approvals.asked = []; approvals.answer = true
+        let hR = sandbox.appendingPathComponent("mcp-replaced.txt")
+        fm.createFile(atPath: hR.path, contents: Data("v1".utf8))
+        let rID = ((try? MCPServer.call("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        try? fm.removeItem(at: hR)
+        fm.createFile(atPath: hR.path, contents: Data("v2".utf8))
+        check("a file replaced at the same path after the preview is refused before anyone is asked",
+              (try? MCPServer.call("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": rID])) == nil
+              && (try? String(contentsOf: hR, encoding: .utf8)) == "v2" && approvals.asked.isEmpty)
+        let eID = ((try? MCPServer.call("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        if let fh = try? FileHandle(forWritingTo: hR) { fh.seekToEndOfFile(); fh.write(Data("more".utf8)); try? fh.close() }
+        check("a file edited after the preview is refused",
+              (try? MCPServer.call("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": eID])) == nil
+              && fm.fileExists(atPath: hR.path) && approvals.asked.isEmpty)
+        let idDir = sandbox.appendingPathComponent("mcp-dir")
+        try? fm.createDirectory(at: idDir, withIntermediateDirectories: true)
+        let dirBefore = MCPServer.identity(idDir.path)
+        fm.createFile(atPath: idDir.appendingPathComponent("new.txt").path, contents: Data("x".utf8))
+        check("a folder keeps its identity when files inside change (its contents are re-checked when run)",
+              MCPServer.identity(idDir.path) == dirBefore && dirBefore != MCPServer.identity(hR.path)
+              && MCPServer.identity(sandbox.appendingPathComponent("nope").path).hasSuffix("|missing"))
+        // The real window is never shown off the main thread (or without a screen): it answers no.
+        var offMain = true
+        let done = DispatchSemaphore(value: 0)
+        Thread {
+            offMain = HumanApproval.askWithDialog(ApprovalRequest(tool: "move_to_trash", verb: "Move to Trash", lines: []))
+            done.signal()
+        }.start()
+        done.wait()
+        check("the confirmation window answers no when it can't be shown (not on the main thread)", !offMain)
+        approvals.asked = []; approvals.answer = true
 
         print("Audit fixes: Shredder")
         func shredDir(_ name: String, file: String = "f.txt", text: String = "secret") -> (URL, URL) {

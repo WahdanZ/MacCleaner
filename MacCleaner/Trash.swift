@@ -94,6 +94,15 @@ enum TrashOps {
     }
 
     /// POSIX paths of everything in your Trash, via Finder (nil if Finder access was denied).
+    /// Every item in the Trash by path: read directly (needs Full Disk Access) or asked from Finder.
+    /// nil when neither works, so callers never act on a guess.
+    static func exactPaths(useFinder: Bool) -> [String]? {
+        if let kids = try? FileManager.default.contentsOfDirectory(at: trashURL, includingPropertiesForKeys: nil) {
+            return kids.filter { $0.lastPathComponent != ".DS_Store" }.map(\.path).sorted()
+        }
+        return useFinder ? finderTrashPaths()?.sorted() : nil
+    }
+
     static func finderTrashPaths() -> [String]? {
         let js = """
         var t = Application("Finder").trash.items();

@@ -1720,6 +1720,16 @@ extension SelfTest {
         check("classify: skipped (missing) removes the row, counts nothing",
               c(.skipped(.missing), .gone).disposition == .remove && c(.skipped(.missing), .gone).countedBytes == 0
               && c(.skipped(.missing), .gone).message.contains("no longer there"))
+        let missingOther = c(.skipped(.missing), .other), missingUnknown = c(.skipped(.missing), .unknown)
+        let missingSame = c(.skipped(.missing), .same)
+        check("classify: skipped (missing) with a different item now at the path blocks the row, never removes it",
+              missingOther.disposition == .block(ShredReview.otherItemNote) && missingOther.countedBytes == 0
+              && !missingOther.removedAnything && missingOther.message.contains("different item"))
+        check("classify: skipped (missing) when the path can't be checked blocks the row, never removes it",
+              missingUnknown.disposition == .block(ShredReview.unknownItemNote) && missingUnknown.countedBytes == 0
+              && missingUnknown.message.contains("Couldn't check"))
+        check("classify: skipped (missing) with the reviewed item back at the path keeps the row",
+              missingSame.disposition == .keep && missingSame.countedBytes == 0 && !missingSame.removedAnything)
         let changed = c(.skipped(.changed(.replaced)), .same)
         check("classify: skipped (changed) keeps the row and counts nothing", changed.disposition == .keep && changed.countedBytes == 0 && !changed.removedAnything)
         let unexpected = c(.trashed(bytes: 9, recoveryPath: "/x"), .gone)
@@ -1920,6 +1930,33 @@ extension SelfTest {
                       text(x8) == "a new file that must survive" && m8.items.first?.blocked == ShredReview.otherItemNote
                       && m8.message?.text.contains("different item") == true)
             } else { check("replaced root: plan was built", false) }
+
+            // 8b. Missing at execution, then a different item appeared at the path: the row stays, blocked, untouched
+            let x8b = make("t8b/x.txt", "reviewed")
+            let rows8b = ShredReview.snapshots([(id: x8b.path, url: x8b)])
+            if let plan8b = ReviewBuild.shred(rows: rows8b, perform: { _, _ in }).trashPlan, let target8b = plan8b.candidates.first?.targets.first {
+                let m8b = ShredderModel()
+                m8b.add([x8b])
+                try? fm.removeItem(at: x8b)
+                make("t8b/x.txt", "appeared after the item went missing")
+                let out = ItemOutcome(candidateID: plan8b.candidates[0].id, target: target8b, result: .skipped(.missing))
+                let rep8b = CleanupReport(planDigest: plan8b.digest, outcomes: [out], wasCancelled: false)
+                let states8b = ShredderModel.rootStates(report: rep8b, plan: plan8b)
+                let before8b = shredRecords().count
+                m8b.finish(report: rep8b, plan: plan8b, rootStates: states8b, freeBefore: 0, freeAfter: 0)
+                check("missing at execution, then a different item at the path: the row stays, blocked, and the new item is untouched",
+                      states8b[plan8b.candidates[0].id] == .other && m8b.items.count == 1
+                      && m8b.items.first?.blocked == ShredReview.otherItemNote
+                      && text(x8b) == "appeared after the item went missing"
+                      && m8b.message?.text.contains("different item") == true && shredRecords().count == before8b)
+                // The same outcome with the path still empty removes the row.
+                try? fm.removeItem(at: x8b)
+                let m8c = ShredderModel()
+                m8c.add([x8b])
+                m8c.finish(report: rep8b, plan: plan8b, rootStates: ShredderModel.rootStates(report: rep8b, plan: plan8b), freeBefore: 0, freeAfter: 0)
+                check("missing at execution with the path still empty: the row is removed",
+                      m8c.items.isEmpty && m8c.message?.text.contains("no longer there") == true)
+            } else { check("missing then replaced: plan was built", false) }
 
             // 9. Gone, but its work folder is left behind
             let d9 = make("t9/item/a.txt")

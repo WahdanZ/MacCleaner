@@ -196,7 +196,17 @@ enum ShredReview {
 
         case .skipped(let why):
             switch why {
-            case .missing: return notShredded("no longer there", .remove)
+            case .missing:
+                // Remove the row only when the path is still empty: an item that appeared there since is not the
+                // reviewed one, and must stay listed (blocked) rather than vanish from the screen.
+                switch rootState {
+                case .gone: return notShredded("no longer there", .remove)
+                case .same: return notShredded("no longer there when shredding started", .keep)
+                case .other, .unknown:
+                    var r = notShredded("no longer there", .block(note(for: rootState)))
+                    r.message += " \(note(for: rootState))."
+                    return r
+                }
             case .changed: return notShredded("it changed since it was reviewed", .keep)
             case .protected(let r): return notShredded("protected now: \(r)", .keep)
             case .addedAfterReview: return notShredded("it changed since it was reviewed", .keep)

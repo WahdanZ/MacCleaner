@@ -109,6 +109,45 @@ public actor CleanupExecutor {
         case .command:
             finish(ItemOutcome(candidateID: candidate, target: target,
                                result: .failed("Tool commands don't run through the cleanup executor yet; nothing was run")))
+        case .tree(let parent, let root, let entries):
+            finish(overwrite(parent, root, entries, disposition, candidate: candidate, target: target, precondition: precondition))
+        }
+    }
+
+    /// A reviewed item, overwritten and deleted: exactly the approved `.tree` target (the plan it came from was just
+    /// redeemed against its approval), never anything found on disk that isn't in it. Protection and the caller's
+    /// precondition are asked for the item first, then its identity is checked; the file system re-checks every
+    /// entry itself (identity, link count, flags, protection) and stops at the first that doesn't match.
+    private func overwrite(_ parent: FileIdentity, _ root: FileIdentity, _ entries: [FileIdentity], _ disposition: Disposition,
+                           candidate: String, target: CleanupTarget, precondition: Precondition?) -> ItemOutcome {
+        func outcome(_ r: ItemOutcome.Result, warnings: [String] = [], removedFiles: Int? = nil) -> ItemOutcome {
+            ItemOutcome(candidateID: candidate, target: target, result: r, warnings: warnings, removedFiles: removedFiles)
+        }
+        // CleanupPlan.init already refuses a tree with any other disposition; this never guesses.
+        guard disposition == .overwriteThenDelete else {
+            return outcome(.failed("A reviewed item can only be overwritten and deleted; nothing was changed"))
+        }
+        if let why = protection.refusal(path: root.path, disposition: .overwriteThenDelete) { return outcome(.skipped(.protected(why))) }
+        if let why = precondition?(candidate, root) { return outcome(.skipped(.preconditionFailed(why))) }
+        let rules = protection
+        do {
+            guard let current = try fileSystem.identity(at: root.path) else { return outcome(.skipped(.missing)) }
+            if let m = root.mismatch(against: current) { return outcome(.skipped(.changed(m))) }
+            let r = try fileSystem.overwriteAndRemove(parent: parent, root: root, entries: entries,
+                                                      protection: { rules.refusal(path: $0, disposition: .overwriteThenDelete) })
+            let result: ItemOutcome.Result = r.isComplete
+                ? .removed(bytes: r.estimatedFreedBytes)
+                : .partiallyDone(freedBytes: r.estimatedFreedBytes, kept: r.kept, damaged: r.damaged)
+            return outcome(result, warnings: r.warnings, removedFiles: r.filesOverwritten)
+        } catch let refusal as FileSystemRefusal {
+            switch refusal {
+            case .missing: return outcome(.skipped(.missing))
+            case .changed(let m): return outcome(.skipped(.changed(m)))
+            case .protected(let why): return outcome(.skipped(.protected(why)))
+            case .permissionDenied(let why): return outcome(.permissionDenied(why))
+            }
+        } catch {
+            return outcome(.failed("\(error)"))
         }
     }
 
@@ -154,7 +193,10 @@ public actor CleanupExecutor {
         func outcome(_ r: ItemOutcome.Result) -> ItemOutcome { ItemOutcome(candidateID: candidate, target: .file(item), result: r) }
         switch disposition {
         case .trash, .permanentDelete: break
-        case .overwriteThenDelete, .quarantine, .command:
+        case .overwriteThenDelete:
+            // Only a reviewed `.tree` is ever overwritten (CleanupPlan.init refuses anything else).
+            return outcome(.failed("Only a reviewed item (a tree target) is overwritten and deleted; nothing was changed"))
+        case .quarantine, .command:
             return outcome(.failed("\(disposition.rawValue) isn't done by the cleanup executor yet; nothing was changed"))
         }
         if let why = protection.refusal(path: item.path, disposition: disposition) { return outcome(.skipped(.protected(why))) }

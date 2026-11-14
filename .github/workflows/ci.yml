@@ -44,7 +44,9 @@ jobs:
 
       # The budget only goes down: any Swift warning not in scripts/warnings-baseline.txt fails the build.
       - name: Warning budget
-        run: scripts/check-warnings.sh
+        run: |
+          scripts/test-check-warnings.sh
+          scripts/check-warnings.sh
 
       - name: Safety self-test (throwaway home folder)
         run: scripts/selftest.sh "$APP"

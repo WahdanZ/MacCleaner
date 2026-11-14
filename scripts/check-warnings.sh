@@ -5,13 +5,14 @@
 # The baseline lists every accepted warning as "<file>: <message>" (no line numbers, so edits that move code
 # don't break it; a message that repeats in a file is listed once per occurrence; a line may give alternative
 # wordings from different Xcode versions as "<file>: <msg> || <file>: <msg>"). New warnings fail the check.
-# Warnings that disappeared are reported so the baseline can shrink; remove those lines in the same PR.
+# A baseline entry whose warning no longer occurs also fails: remove it in the same PR, so a warning that is
+# fixed and later reintroduced fails instead of being waved through by a stale entry.
 # Never add a line to make a new warning pass: fix the warning, or record why in the PR and docs/architecture/DECISIONS.md.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIST=0; [[ "${1:-}" == "--list" ]] && { LIST=1; shift; }
 LOG="${1:-$ROOT/build/xcodebuild.log}"
-BASE="$ROOT/scripts/warnings-baseline.txt"
+BASE="${WARNINGS_BASELINE:-$ROOT/scripts/warnings-baseline.txt}"   # the override is for scripts/test-check-warnings.sh
 [[ -f "$LOG" ]] || { echo "no build log at $LOG (run scripts/xcbuild.sh first)" >&2; exit 2; }
 CURRENT="$(mktemp)"; trap 'rm -f "$CURRENT" "$CURRENT".base "$CURRENT".raw "$CURRENT".canon' EXIT
 # Compiler warnings only; the AppIntents metadata notice is not a Swift diagnostic.
@@ -28,9 +29,17 @@ awk -F' \\|\\| ' 'NR==FNR { for (i=2;i<=NF;i++) alias[$i]=$1; next } { print (($
 NEW="$(comm -13 "$CURRENT.base" "$CURRENT.canon")"
 GONE="$(comm -23 "$CURRENT.base" "$CURRENT.canon")"
 TOTAL=$(wc -l < "$CURRENT" | tr -d ' ')
-[[ -z "$GONE" ]] || { echo "Warnings fixed since the baseline (remove these lines from scripts/warnings-baseline.txt):"; echo "$GONE" | sed 's/^/  - /'; }
+FAIL=0
+if [[ -n "$GONE" ]]; then
+  echo "Baseline warnings that no longer occur (remove these lines from scripts/warnings-baseline.txt in this PR):" >&2
+  echo "$GONE" | sed 's/^/  - /' >&2
+  echo "A stale entry would let the same warning come back unnoticed, so the budget must shrink with the code." >&2
+  FAIL=1
+fi
 if [[ -n "$NEW" ]]; then
   echo "NEW compiler warnings (not in scripts/warnings-baseline.txt):" >&2; echo "$NEW" | sed 's/^/  + /' >&2
-  echo "Fix them; the warning budget only goes down." >&2; exit 1
+  echo "Fix them; the warning budget only goes down." >&2
+  FAIL=1
 fi
-echo "Warning budget OK: $TOTAL warning(s), all in the baseline."
+(( FAIL == 0 )) || exit 1
+echo "Warning budget OK: $TOTAL warning(s), all in the baseline, none stale."

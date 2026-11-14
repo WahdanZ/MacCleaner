@@ -37,6 +37,7 @@ enum ToolConfirmation {
     /// items. Waits for the executor (the MCP server and the CLI are synchronous).
     static func approveTrash(_ confirmed: MCPServer.ConfirmedPreview) -> TrashApproval? {
         guard let plan = confirmed.trashPlan else { return nil }
+        if let why = AppCleanup.nonTrashRefusal(plan) { return .refused(plan: plan, reason: why) }
         let approver = approver(for: confirmed.approvedBy)
         let slot = ApprovalSlot()
         let done = DispatchSemaphore(value: 0)

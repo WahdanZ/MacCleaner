@@ -64,22 +64,26 @@ struct ShredSnapshotTests {
         link(box.path("f.txt"), box.path("elsewhere/alias2"))
         #expect(refusal(box, "f.txt")?.contains("hard link") == true)
         #expect(text(box, "elsewhere/alias") == "keep" && text(box, "elsewhere/alias2") == "keep too")
+        #expect(text(box, "item/a") == "keep" && text(box, "f.txt") == "keep too")   // nothing was changed
     }
 
     @Test func lockedUnreadableHugeSpecialAndLinkItemsAreRefused() throws {   // #3, #10, #11, #12, #21
         let box = try Sandbox()
         try box.file("locked/a"); chflags(box.path("locked/a"), UInt32(UF_IMMUTABLE))
-        #expect(refusal(box, "locked")?.contains("locked") == true)
-        try box.file("unreadable/sub/x"); chmod(box.path("unreadable/sub"), 0)
+        #expect(refusal(box, "locked")?.contains("locked") == true && text(box, "locked/a") == "data")
+        try box.file("unreadable/f", "G"); try box.file("unreadable/sub/x", "H"); chmod(box.path("unreadable/sub"), 0)
         #expect(refusal(box, "unreadable")?.contains("can't be read") == true)
         chmod(box.path("unreadable/sub"), 0o755)
-        try box.file("huge/big", "")
+        #expect(text(box, "unreadable/f") == "G" && text(box, "unreadable/sub/x") == "H")   // untouched
+        try box.file("huge/small", "small"); try box.file("huge/big", "")
         truncate(box.path("huge/big"), LocalFileSystem.maxShredFileSize + 1)   // sparse
         #expect(refusal(box, "huge")?.contains("4 GB") == true)
-        try box.dir("fifo"); mkfifo(box.path("fifo/pipe"), 0o600)
-        #expect(refusal(box, "fifo")?.contains("not a regular file") == true)
-        try box.file("target"); try box.link("ln", to: box.path("target"))
+        #expect(text(box, "huge/small") == "small" && box.exists("huge/big"))   // untouched
+        try box.file("fifo/f", "K"); mkfifo(box.path("fifo/pipe"), 0o600)
+        #expect(refusal(box, "fifo")?.contains("not a regular file") == true && text(box, "fifo/f") == "K")
+        try box.file("target", "outside"); try box.link("ln", to: box.path("target"))
         #expect(refusal(box, "ln")?.contains("link") == true)
+        #expect(text(box, "target") == "outside" && (try? FileManager.default.destinationOfSymbolicLink(atPath: box.path("ln"))) == box.path("target"))
         try box.file("unfinished/" + LocalFileSystem.shredStagingPrefix + "old/x")
         #expect(refusal(box, "unfinished")?.contains("unfinished shred") == true)
     }
@@ -110,7 +114,7 @@ struct ShredSnapshotTests {
 struct ShredExecutionTests {
     @Test func aFolderWithSubfoldersIsOverwrittenAndRemoved() throws {   // #4, §6b estimate
         let box = try Sandbox()
-        try box.file("item/a", "secret a"); try box.file("item/sub/b", "secret b")
+        try box.file("item/a", "secret a"); try box.file("item/sub/deeper/b", "secret b")
         let t = try snapshot(shredFS(), box.path("item"))
         let expected = ([box.path("item")] + t.entries.map(\.path)).reduce(0) { $0 + blocks($1) }
         let r = try shred(shredFS(), t)
@@ -156,7 +160,7 @@ struct ShredExecutionTests {
         }
         let r = try shred(shredFS(hooks), try snapshot(shredFS(), box.path("item")))
         #expect(r.damaged == [box.path("item/a")] && r.filesOverwritten == 0)
-        #expect(text(box, "item/a")?.hasPrefix("\0\0\0") == true && noStaging(box))
+        #expect(text(box, "item/a") == "\0\0\0ret data" && noStaging(box))   // the start is zeroed, the rest as it was
         if case .failed(let why) = r.kept.first?.reason { #expect(why.contains("damaged")) } else { Issue.record("kept: \(r.kept)") }
     }
 
@@ -171,9 +175,9 @@ struct ShredExecutionTests {
 
     @Test func aLinkInsideIsRemovedAndItsTargetIsUntouched() throws {   // #20
         let box = try Sandbox()
-        try box.file("outside/precious", "keep"); try box.dir("item"); try box.link("item/ln", to: box.path("outside/precious"))
+        try box.file("outside/precious", "keep"); try box.file("item/f", "J"); try box.link("item/ln", to: box.path("outside/precious"))
         let r = try shred(shredFS(), try snapshot(shredFS(), box.path("item")))
-        #expect(r.isComplete && !box.exists("item") && text(box, "outside/precious") == "keep")
+        #expect(r.isComplete && r.filesOverwritten == 1 && !box.exists("item") && text(box, "outside/precious") == "keep")
     }
 
     @Test func aStagingFolderThatCantBeRemovedIsReportedWithItsPath() throws {   // #22, §6b gone + leftover
@@ -224,7 +228,8 @@ struct ShredRaceTests {
         var st = stat(); fstat(writer, &st)
         var seen = [UInt8](repeating: 1, count: Int(st.st_size))
         _ = seen.withUnsafeMutableBytes { pread(writer, $0.baseAddress, $0.count, 0) }
-        #expect(r.isComplete && r.warnings.isEmpty && st.st_size > 12 && seen.allSatisfy { $0 == 0 })
+        #expect(r.isComplete && r.filesOverwritten == 1 && r.warnings.isEmpty && !box.exists("item/a"))
+        #expect(st.st_size == off_t(12 + tail.count) && seen.allSatisfy { $0 == 0 })
     }
 
     @Test func aTailThatCantBeOverwrittenIsAWarning() throws {   // #13 (warning path)
@@ -248,6 +253,21 @@ struct ShredRaceTests {
         let r = try shred(shredFS(hooks), try snapshot(shredFS(), box.path("item")))
         #expect(text(box, "item/a") == "new version" && r.filesOverwritten == 0)
         #expect(r.kept.first == KeptEntry(path: a, reason: .changedAfterReview) && noStaging(box))
+    }
+
+    @Test func aFileReplacedByAnAtomicSaveRightBeforeTheMoveIsPutBackUntouched() throws {   // #14, as another app saves (rename over)
+        let box = try Sandbox()
+        try box.file("item/a", "A"); try box.file("item/b", "B-old")
+        let b = box.path("item/b"), saving = box.path("item/.b.saving")
+        var hooks = ShredHooks()
+        hooks.beforeMove = { p in
+            guard p == b else { return }
+            _ = FileManager.default.createFile(atPath: saving, contents: Data("B-new".utf8))
+            _ = rename(saving, p)
+        }
+        let r = try shred(shredFS(hooks), try snapshot(shredFS(), box.path("item")))
+        #expect(!box.exists("item/a") && text(box, "item/b") == "B-new" && r.filesOverwritten == 1)
+        #expect(r.kept.first == KeptEntry(path: b, reason: .changedAfterReview) && noStaging(box))
     }
 
     @Test func aFileEditedAfterReviewIsKeptAsItIs() throws {   // #15
@@ -289,14 +309,15 @@ struct ShredRaceTests {
         let t = try snapshot(shredFS(), box.path("item"))
         let sub = box.path("item/sub"), outside = box.path("outside")
         var hooks = ShredHooks()
-        hooks.beforeStart = { try? FileManager.default.removeItem(atPath: sub); try? FileManager.default.createSymbolicLink(atPath: sub, withDestinationPath: outside) }
+        hooks.beforeStart = { try? FileManager.default.moveItem(atPath: sub, toPath: sub + "-moved"); try? FileManager.default.createSymbolicLink(atPath: sub, withDestinationPath: outside) }
         let r = try shred(shredFS(hooks), t)
         #expect(text(box, "outside/precious") == "keep" && r.kept.first == KeptEntry(path: sub, reason: .changedAfterReview))
+        #expect(text(box, "item/sub-moved/b") == "b" && noStaging(box))   // the moved folder is untouched too
     }
 
     @Test func aSubfolderSwappedForALinkMidShredLeavesTheTargetUntouched() throws {   // #18
         let box = try Sandbox()
-        try box.file("item/sub/b", "b"); try box.file("outside/precious", "keep")
+        try box.file("item/a", "a"); try box.file("item/sub/b", "b"); try box.file("outside/precious", "keep")
         let t = try snapshot(shredFS(), box.path("item"))
         let sub = box.path("item/sub"), b = box.path("item/sub/b"), outside = box.path("outside")
         var hooks = ShredHooks()
@@ -307,7 +328,8 @@ struct ShredRaceTests {
         }
         let r = try shred(shredFS(hooks), t)
         // The planned file was shredded through the open folder; the link and its target were left alone.
-        #expect(r.filesOverwritten == 1 && !box.exists("item/sub-moved/b") && text(box, "outside/precious") == "keep")
+        #expect(r.filesOverwritten == 2 && !box.exists("item/a") && !box.exists("item/sub-moved/b") && text(box, "outside/precious") == "keep")
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: sub)) == outside)
         #expect(r.kept.first == KeptEntry(path: sub, reason: .changedAfterReview))
     }
 

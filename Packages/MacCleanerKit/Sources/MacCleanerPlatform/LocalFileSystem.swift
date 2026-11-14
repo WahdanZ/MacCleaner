@@ -68,15 +68,18 @@ public struct LocalFileSystem: CleanupFileSystem {
 
     private let trashMover: TrashMover
     private let beforeMove: BeforeMove?
+    /// Test-only points inside `overwriteAndRemove` (see LocalFileSystem+Shred.swift). nil in the app.
+    let shredHooks: ShredHooks?
 
     /// `trashMover` is replaced only by tests, so they never touch the person's Trash.
     public init(trashMover: @escaping TrashMover = LocalFileSystem.systemTrash) {
         self.init(trashMover: trashMover, beforeMove: nil)
     }
 
-    init(trashMover: @escaping TrashMover, beforeMove: BeforeMove?) {
+    init(trashMover: @escaping TrashMover, beforeMove: BeforeMove?, shredHooks: ShredHooks? = nil) {
         self.trashMover = trashMover
         self.beforeMove = beforeMove
+        self.shredHooks = shredHooks
     }
 
     /// A refusal for lack of permission (EACCES / EPERM, or Foundation's no-permission errors), as opposed to any

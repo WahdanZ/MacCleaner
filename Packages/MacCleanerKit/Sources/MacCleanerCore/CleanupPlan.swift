@@ -59,6 +59,12 @@ public enum CleanupTarget: Sendable, Hashable {
     /// reported as `SkipReason.addedAfterReview`.
     case directoryContents(folder: FileIdentity, entries: [FileIdentity])
     case command(ToolCommand)
+    /// A whole item exactly as reviewed, for `overwriteThenDelete` only: the folder holding it (`parent`), the item
+    /// (`root`, a file or a folder) and every entry below it (`entries`: files, links and folders, captured without
+    /// following links, in `CleanupPlan.treeOrder`). Only these entries are ever touched; an entry that is not here
+    /// is never opened, moved or deleted. `CleanupPlan.init` validates the shape (see `Problem.invalidTree`), and the
+    /// digest covers every identity, including link counts and flags.
+    case tree(parent: FileIdentity, root: FileIdentity, entries: [FileIdentity])
 }
 
 /// One row the person reviews: "Xcode DerivedData, 4.2 GB". May remove several targets.
@@ -117,12 +123,14 @@ public struct CleanupPlan: Sendable, Hashable {
         /// A reviewed entry that isn't a direct child of its folder on the same volume (a mount point inside the
         /// folder is another volume and is never cleaned through it).
         case entryOutsideFolder(String)
+        /// A `.tree` target that isn't a well-formed reviewed item: candidate id and what is wrong.
+        case invalidTree(candidateID: String, reason: String)
     }
 
     public let entries: [Entry]
     /// Lower-case hex SHA-256 over, in order: each entry's id, module, risk and disposition, and each target's
     /// identity (folder-contents targets: the folder and every reviewed entry; commands: executable, arguments and
-    /// consequence).
+    /// consequence; trees: parent, item and every entry, each with its link count and flags).
     public let digest: String
 
     public init(_ entries: [Entry]) throws(Problem) {
@@ -133,7 +141,7 @@ public struct CleanupPlan: Sendable, Hashable {
             guard seen.insert(c.id).inserted else { throw .duplicateCandidate(c.id) }
             guard !c.targets.isEmpty else { throw .noTargets(c.id) }
             guard c.risk != .protected else { throw .protectedCandidate(c.id) }
-            var commands = 0
+            var commands = 0, trees = 0
             for t in c.targets {
                 switch t {
                 case .command: commands += 1
@@ -141,9 +149,20 @@ public struct CleanupPlan: Sendable, Hashable {
                 case .directoryContents(let folder, let kids):
                     guard !kids.isEmpty else { throw .emptyContents(c.id) }
                     guard kids.allSatisfy({ $0.isDirectChild(of: folder) }) else { throw .entryOutsideFolder(c.id) }
+                case .tree(let parent, let root, let kids):
+                    trees += 1
+                    if let why = Self.treeProblem(parent: parent, root: root, entries: kids) {
+                        throw .invalidTree(candidateID: c.id, reason: why)
+                    }
                 }
             }
-            let ok = e.disposition == .command ? commands == c.targets.count : commands == 0
+            let ok: Bool
+            switch e.disposition {
+            case .command: ok = commands == c.targets.count
+            // A tree is shredded whole and only shredded: exactly one tree target, and no tree anywhere else.
+            case .overwriteThenDelete: ok = trees == 1 && c.targets.count == 1
+            case .trash, .permanentDelete, .quarantine: ok = commands == 0 && trees == 0
+            }
             guard ok else { throw .dispositionMismatch(c.id) }
         }
         self.entries = entries
@@ -151,6 +170,50 @@ public struct CleanupPlan: Sendable, Hashable {
     }
 
     public var candidates: [CleanupCandidate] { entries.map(\.candidate) }
+
+    /// The order a `.tree` target's entries are in: by path, compared byte by byte (UTF-8), so every folder comes
+    /// before everything inside it and the order is the same everywhere.
+    public static func treeOrder(_ a: FileIdentity, _ b: FileIdentity) -> Bool {
+        a.path.utf8.lexicographicallyPrecedes(b.path.utf8)
+    }
+
+    /// nil when a `.tree` target is a well-formed reviewed item; otherwise what is wrong. The rules: the parent is a
+    /// folder and the item is directly inside it on the same volume; the item is a file or a folder (never a link);
+    /// a file item has no entries; every entry is strictly below the item, on its volume, a file, folder or link,
+    /// unique, in `treeOrder`, and directly inside the item or a folder entry (so nothing is below a link); and every
+    /// file, the item included, has exactly one link (overwriting a hard link would erase the other copy).
+    static func treeProblem(parent: FileIdentity, root: FileIdentity, entries: [FileIdentity]) -> String? {
+        guard parent.kind == .directory else { return "its parent isn't a folder" }
+        guard root.isDirectChild(of: parent) else { return "the item isn't directly inside its parent on the same volume" }
+        switch root.kind {
+        case .file:
+            guard root.linkCount == 1 else { return "the item is a hard-linked file" }
+            guard entries.isEmpty else { return "a file item has no entries" }
+        case .directory: break
+        case .symlink: return "the item is a link"
+        case .other: return "the item isn't a file or folder"
+        }
+        var folders: Set<String> = [root.path]
+        var previous: FileIdentity?
+        for e in entries {
+            if let previous, !treeOrder(previous, e) { return "entries aren't unique and in order (\(e.path))" }
+            previous = e
+            guard e.device == root.device else { return "\(e.path) is on another volume" }
+            let parentPath = (e.path as NSString).deletingLastPathComponent
+            let name = (e.path as NSString).lastPathComponent
+            guard folders.contains(parentPath), !name.isEmpty, name != ".", name != "..",
+                  e.path == parentPath + "/" + name else {
+                return "\(e.path) isn't directly inside the item or one of its folders"
+            }
+            switch e.kind {
+            case .directory: folders.insert(e.path)
+            case .file: guard e.linkCount == 1 else { return "\(e.path) is a hard-linked file" }
+            case .symlink: break
+            case .other: return "\(e.path) isn't a file, folder or link"
+            }
+        }
+        return nil
+    }
     public var estimatedBytes: Int64 { entries.reduce(0) { $0 + $1.candidate.estimatedBytes } }
 
     /// Titles, sizes and explanations are display text and are left out: rewording a row doesn't change what is
@@ -179,6 +242,14 @@ public struct CleanupPlan: Sendable, Hashable {
                     w.int(UInt64(c.arguments.count))
                     c.arguments.forEach { w.string($0) }
                     w.string(c.consequence)
+                case .tree(let parent, let root, let kids):
+                    // Link counts and flags too: the approval states that every file had one link and which flags
+                    // were set when it was reviewed. (The other target kinds keep their encoding.)
+                    w.string("tree")
+                    w.treeIdentity(parent)
+                    w.treeIdentity(root)
+                    w.int(UInt64(kids.count))
+                    kids.forEach { w.treeIdentity($0) }
                 }
             }
         }
@@ -205,6 +276,12 @@ private struct DigestWriter {
         int(UInt64(bitPattern: f.size))
         int(UInt64(bitPattern: f.modificationNanos))
         int(UInt64(bitPattern: f.capturedAtNanos))
+    }
+
+    mutating func treeIdentity(_ f: FileIdentity) {
+        identity(f)
+        int(UInt64(f.linkCount))
+        int(UInt64(f.flags))
     }
 }
 

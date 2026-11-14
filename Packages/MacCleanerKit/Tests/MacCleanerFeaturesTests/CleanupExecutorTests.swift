@@ -9,7 +9,7 @@ import MacCleanerCore
 
 /// An in-memory file system. Like the real one, every changing operation re-checks the expected identity.
 final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behind `lock`
-    enum Op: Equatable { case trash(String), remove(String) }
+    enum Op: Equatable { case trash(String), remove(String), overwrite(String) }
 
     private let lock = NSLock()
     private var items: [String: FileIdentity]
@@ -17,6 +17,7 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
     private var partial: [String: RemovalResult] = [:]
     private var failing: Set<String> = []
     private var denied: Set<String> = []
+    private var overwrites: [String: OverwriteRemovalResult] = [:]
     /// Runs inside an operation, after the executor's own check and before the fake's last-moment check.
     private var hook: (@Sendable (String) -> Void)?
 
@@ -30,6 +31,7 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
     func partially(_ path: String, _ r: RemovalResult) { locked { partial[path] = r } }
     func fail(_ path: String) { locked { _ = failing.insert(path) } }
     func denyPermission(_ path: String) { locked { _ = denied.insert(path) } }
+    func overwriteResult(_ path: String, _ r: OverwriteRemovalResult) { locked { overwrites[path] = r } }
     func onAct(_ f: @escaping @Sendable (String) -> Void) { locked { hook = f } }
 
     func identity(at path: String) throws -> FileIdentity? { locked { items[path] } }
@@ -66,6 +68,16 @@ final class FakeFS: CleanupFileSystem, @unchecked Sendable {   // all state behi
             return RemovalResult(freedBytes: 0, kept: [KeptEntry(path: item.path + "/nested", reason: .protected(why))])
         }
         return locked { partial[item.path] } ?? RemovalResult(freedBytes: item.size)
+    }
+
+    /// Asks `protection` about every entry of the tree, the way the real shred does right before each one.
+    func overwriteAndRemove(parent: FileIdentity, root: FileIdentity, entries: [FileIdentity],
+                            protection: RemovalProtection) throws -> OverwriteRemovalResult {
+        try act(root, .overwrite(root.path))
+        for e in entries { if let why = protection(e.path) { return OverwriteRemovalResult(kept: [KeptEntry(path: e.path, reason: .protected(why))]) } }
+        let files = ([root] + entries).filter { $0.kind == .file }
+        return locked { overwrites[root.path] }
+            ?? OverwriteRemovalResult(estimatedFreedBytes: files.reduce(0) { $0 + $1.size }, filesOverwritten: files.count)
     }
 }
 
@@ -260,22 +272,19 @@ struct ExecutorContentsTests {
 struct ExecutorPartialTests {
     @Test func partialFailedAndUnsupportedAreReportedAndTheRestContinues() async throws {
         let part = item("p", inode: 1, kind: .directory), bad = item("bad", inode: 2), ok = item("ok", inode: 3)
-        let shred = item("s", inode: 4)
-        let fs = FakeFS([part, bad, ok, shred])
+        let fs = FakeFS([part, bad, ok])
         let kept = [KeptEntry(path: part.path + "/locked", reason: .failed("Operation not permitted"))]
         fs.partially(part.path, RemovalResult(freedBytes: 40, kept: kept))
         fs.fail(bad.path)
         let simctl = ToolCommand(executable: "/usr/bin/xcrun", arguments: ["simctl"], consequence: "A runtime")
         let p = try plan([.init(candidate("p", [.file(part)]), .permanentDelete),
                           .init(candidate("bad", [.file(bad)]), .permanentDelete),
-                          .init(candidate("s", [.file(shred)]), .overwriteThenDelete),
                           .init(candidate("cmd", [.command(simctl)]), .command),
                           .init(candidate("ok", [.file(ok)]), .permanentDelete)])
         let (report, _) = try await run(CleanupExecutor(fileSystem: fs, protection: Protected()), p)
         let r = results(report)
         #expect(r[part.path] == .partiallyDone(freedBytes: 40, kept: kept, damaged: []))
         if case .failed(let why) = r[bad.path] { #expect(why.contains("not permitted")) } else { Issue.record("bad: \(String(describing: r[bad.path]))") }
-        if case .failed = r[shred.path] {} else { Issue.record("overwrite should not run yet") }
         if case .failed = r["cmd"] {} else { Issue.record("commands should not run yet") }
         #expect(r[ok.path] == .removed(bytes: 100))
         #expect(fs.ops == [.remove(part.path), .remove(ok.path)])
@@ -494,3 +503,71 @@ struct ExecutorCompletionTests {
     }
 }
 
+
+// MARK: - Overwrite-then-delete (M01-04c)
+
+@Suite("Executor: overwrite-then-delete")
+struct ExecutorOverwriteTests {
+    let parent = item("Docs", inode: 50, kind: .directory)
+    let root = item("Docs/item", inode: 51, kind: .directory)
+    let a = item("Docs/item/a", inode: 52), b = item("Docs/item/b", inode: 53)
+    var tree: CleanupTarget { .tree(parent: parent, root: root, entries: [a, b]) }
+    func shredPlan(_ t: CleanupTarget? = nil, id: String = "t") throws -> CleanupPlan {
+        try plan([.init(candidate(id, [t ?? tree], risk: .reviewRequired), .overwriteThenDelete)])
+    }
+
+    @Test func aCompleteShredIsRemovedWithItsFileCountAndAnEstimate() async throws {
+        let fs = FakeFS([parent, root, a, b])
+        let (report, _) = try await run(CleanupExecutor(fileSystem: fs, protection: Protected()), try shredPlan())
+        let o = try #require(report.outcomes.first)
+        #expect(o.result == .removed(bytes: 200) && o.removedFiles == 2 && o.warnings.isEmpty)
+        #expect(fs.ops == [.overwrite(root.path)] && report.freedBytes == 200 && report.allSucceeded)
+    }
+
+    @Test func aPartialShredKeepsDamagedPathsWarningsAndTheCount() async throws {
+        let fs = FakeFS([parent, root, a, b])
+        let kept = [KeptEntry(path: b.path, reason: .failed("writing failed (partly overwritten, so its content is damaged)")),
+                    KeptEntry(path: parent.path + "/.maccleaner-shred-x", reason: .stagingLeftBehind)]
+        fs.overwriteResult(root.path, OverwriteRemovalResult(estimatedFreedBytes: 4096, filesOverwritten: 1, kept: kept,
+                                                             damaged: [b.path], warnings: ["a: another app kept writing"]))
+        let (report, _) = try await run(CleanupExecutor(fileSystem: fs, protection: Protected()), try shredPlan())
+        let o = try #require(report.outcomes.first)
+        #expect(o.result == .partiallyDone(freedBytes: 4096, kept: kept, damaged: [b.path]))
+        #expect(o.removedFiles == 1 && o.warnings == ["a: another app kept writing"])
+        #expect(report.warnings == ["a: another app kept writing"] && report.freedBytes == 4096 && !report.allSucceeded)
+    }
+
+    @Test func theItemIsCheckedBeforeAnythingIsTouched() async throws {
+        // Replaced after review, protected now, refused by the caller, gone: nothing reaches the file system.
+        let swapped = FileIdentity(path: root.path, device: 1, inode: 99, kind: .directory, size: 100, modificationNanos: 5)
+        let cases: [(FakeFS, Protected, CleanupExecutor.Precondition?, ItemOutcome.Result)] = [
+            (FakeFS([parent, swapped, a, b]), Protected(), nil, .skipped(.changed(.replaced))),
+            (FakeFS([parent, root, a, b]), Protected(paths: [root.path]), nil, .skipped(.protected("Protected in Settings"))),
+            (FakeFS([parent, root, a, b]), Protected(), { _, _ in "not now" }, .skipped(.preconditionFailed("not now"))),
+            (FakeFS([parent, a, b]), Protected(), nil, .skipped(.missing)),
+        ]
+        for (fs, protection, pre, expected) in cases {
+            let exec = CleanupExecutor(fileSystem: fs, protection: protection)
+            let p = try shredPlan()
+            let report = try await exec.execute(p, approval: try await exec.approve(p, by: .userInApp), precondition: pre)
+            #expect(report.outcomes.first?.result == expected)
+            #expect(fs.ops.isEmpty)
+        }
+    }
+
+    @Test func theLiveProtectionRulesReachEveryEntry() async throws {
+        let fs = FakeFS([parent, root, a, b])
+        let (report, _) = try await run(CleanupExecutor(fileSystem: fs, protection: Protected(paths: [b.path])), try shredPlan())
+        #expect(report.outcomes.first?.result == .partiallyDone(freedBytes: 0, kept: [KeptEntry(path: b.path, reason: .protected("Protected in Settings"))], damaged: []))
+    }
+
+    @Test func anApprovalForAnotherTreeRunsNothing() async throws {
+        let fs = FakeFS([parent, root, a, b])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let reviewed = try shredPlan(.tree(parent: parent, root: root, entries: [a]))
+        let bigger = try shredPlan()
+        let approval = try await exec.approve(reviewed, by: .userInApp)
+        await #expect(throws: CleanupApproval.Refusal.planChanged) { try await exec.execute(bigger, approval: approval) }
+        #expect(fs.ops.isEmpty)
+    }
+}

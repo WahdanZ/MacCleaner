@@ -266,7 +266,8 @@ struct ApprovalLedgerTests {
         let refused: [(CleanupPlan, String)] = [
             (plan([.init(candidate("r", risk: .reviewRequired), .permanentDelete)]), "r"),
             (plan([.init(candidate("t"), .trash)]), "t"),
-            (plan([.init(candidate("o", targets: [.file(ident(kind: .file))]), .overwriteThenDelete)]), "o"),
+            (plan([.init(candidate("o", targets: [.tree(parent: ident("/Users/tester/Library/Caches", inode: 50), root: ident(), entries: [])]),
+                         .overwriteThenDelete)]), "o"),
             (plan([.init(candidate("c", targets: [.command(simctl)]), .command)]), "c"),
         ]
         for (q, id) in refused {
@@ -399,5 +400,115 @@ struct ProgressEventTests {
         #expect(got == sent)
         #expect(got.filter(\.isTerminal) == [.finished(report)])
         #expect(ProgressEvent.cancelled.isTerminal)
+    }
+}
+
+// MARK: - Tree targets (overwrite-then-delete, M01-04c)
+
+@Suite("Contracts: tree targets")
+struct TreeTargetTests {
+    let t0 = Date(timeIntervalSince1970: 1_000_000)
+    let parent = ident("/Users/tester/Docs", inode: 10)
+    var root: FileIdentity { ident("/Users/tester/Docs/item", inode: 11) }
+    func e(_ rel: String, _ inode: UInt64, _ kind: FileIdentity.Kind = .file, links: UInt32 = 1, device: UInt64 = 1, flags: UInt32 = 0) -> FileIdentity {
+        FileIdentity(path: "/Users/tester/Docs/item/" + rel, device: device, inode: inode, kind: kind, size: 5,
+                     modificationNanos: 7, linkCount: links, flags: flags)
+    }
+    var good: [FileIdentity] { [e("a", 20), e("sub", 21, .directory), e("sub/b", 22), e("sub/link", 23, .symlink)] }
+    func shred(_ target: CleanupTarget, _ d: Disposition = .overwriteThenDelete, id: String = "t") throws(CleanupPlan.Problem) -> CleanupPlan {
+        try CleanupPlan([.init(CleanupCandidate(id: id, module: "shredder", title: "Item", targets: [target], estimatedBytes: 1,
+                                                risk: .reviewRequired, recommended: false, explanation: ""), d)])
+    }
+    func problem(_ target: CleanupTarget, _ d: Disposition = .overwriteThenDelete) -> CleanupPlan.Problem? {
+        do { _ = try shred(target, d); return nil } catch { return error }
+    }
+    func treeProblem(parent p: FileIdentity? = nil, root r: FileIdentity? = nil, _ entries: [FileIdentity]) -> String? {
+        if case .invalidTree(_, let why)? = problem(.tree(parent: p ?? parent, root: r ?? root, entries: entries)) { return why }
+        return nil
+    }
+
+    @Test func aWellFormedTreeIsAccepted() throws {
+        let p = try shred(.tree(parent: parent, root: root, entries: good))
+        #expect(p.entries.count == 1)
+        let fileItem = ident("/Users/tester/Docs/f.txt", inode: 30, kind: .file)
+        _ = try shred(.tree(parent: parent, root: fileItem, entries: []))
+    }
+
+    @Test func everyShapeRuleIsEnforced() {
+        let fileItem = ident("/Users/tester/Docs/f.txt", inode: 30, kind: .file)
+        let hardLinkedItem = FileIdentity(path: "/Users/tester/Docs/f.txt", device: 1, inode: 30, kind: .file, size: 1,
+                                          modificationNanos: 1, linkCount: 2)
+        let cases: [(String, String?)] = [
+            ("parent not a folder", treeProblem(parent: ident("/Users/tester/Docs", inode: 10, kind: .file), good)),
+            ("item not directly in parent", treeProblem(root: ident("/Users/tester/Other/item", inode: 11), [])),
+            ("item on another volume than parent", treeProblem(root: ident("/Users/tester/Docs/item", device: 2, inode: 11), [])),
+            ("item is a link", treeProblem(root: ident("/Users/tester/Docs/item", inode: 11, kind: .symlink), [])),
+            ("item is other", treeProblem(root: ident("/Users/tester/Docs/item", inode: 11, kind: .other), [])),
+            ("file item with entries", treeProblem(root: fileItem, [e("a", 20)])),
+            ("hard-linked file item", treeProblem(root: hardLinkedItem, [])),
+            ("hard-linked nested file", treeProblem([e("a", 20, links: 2)])),
+            ("entry outside the item", treeProblem([FileIdentity(path: "/Users/tester/Docs/other", device: 1, inode: 40, kind: .file, size: 1, modificationNanos: 1)])),
+            ("entries out of order", treeProblem([e("b", 20), e("a", 21)])),
+            ("duplicate entry", treeProblem([e("a", 20), e("a", 20)])),
+            ("entry below a link", treeProblem([e("ln", 20, .symlink), e("ln/x", 21)])),
+            ("entry below a missing folder", treeProblem([e("sub/b", 22)])),
+            ("entry on another volume", treeProblem([e("a", 20, device: 2)])),
+            ("entry of kind other", treeProblem([e("a", 20, .other)])),
+            ("entry with a dot-dot name", treeProblem([FileIdentity(path: "/Users/tester/Docs/item/..", device: 1, inode: 41, kind: .directory, size: 1, modificationNanos: 1)])),
+        ]
+        for (name, why) in cases { #expect(why != nil, "\(name) should be refused") }
+    }
+
+    @Test func treesGoOnlyWithOverwriteThenDeleteAndViceVersa() {
+        let tree = CleanupTarget.tree(parent: parent, root: root, entries: good)
+        for d in [Disposition.trash, .permanentDelete, .quarantine] {
+            #expect(problem(tree, d) == .dispositionMismatch("t"), "\(d) with a tree")
+        }
+        #expect(problem(.file(root), .overwriteThenDelete) == .dispositionMismatch("t"))
+        #expect(problem(.directoryContents(folder: root, entries: [e("a", 20)]), .overwriteThenDelete) == .dispositionMismatch("t"))
+        let two = { () -> CleanupPlan.Problem? in
+            do throws(CleanupPlan.Problem) {
+                _ = try CleanupPlan([.init(CleanupCandidate(id: "t", module: "shredder", title: "", targets: [tree, .file(root)],
+                                                            estimatedBytes: 1, risk: .reviewRequired, recommended: false, explanation: ""),
+                                           .overwriteThenDelete)])
+                return nil
+            } catch { return error }
+        }()
+        #expect(two == .dispositionMismatch("t"))
+    }
+
+    @Test func theDigestCoversEveryEntryWithItsLinkCountAndFlags() throws {
+        let base = try shred(.tree(parent: parent, root: root, entries: good)).digest
+        var linked = good; linked[0] = e("a", 20, links: 1); linked[2] = FileIdentity(path: good[2].path, device: 1, inode: 22, kind: .file, size: 5, modificationNanos: 7, linkCount: 1, flags: 0x8000)
+        let variants: [(String, [FileIdentity])] = [
+            ("flags changed", linked),
+            ("entry dropped", Array(good.dropLast())),
+            ("entry added", good + [e("z", 99)]),
+            ("entry size changed", [FileIdentity(path: good[0].path, device: 1, inode: 20, kind: .file, size: 6, modificationNanos: 7)] + good.dropFirst()),
+        ]
+        for (name, entries) in variants {
+            let d = try? shred(.tree(parent: parent, root: root, entries: entries)).digest
+            #expect(d != nil && d != base, "\(name)")
+        }
+        // linkCount: a directory entry may differ only in its link count (files must have one, so they can't).
+        var dirLinks = good; dirLinks[1] = FileIdentity(path: good[1].path, device: 1, inode: 21, kind: .directory, size: 5, modificationNanos: 7, linkCount: 3)
+        #expect(try shred(.tree(parent: parent, root: root, entries: dirLinks)).digest != base)
+        let otherParent = FileIdentity(path: parent.path, device: 1, inode: 10, kind: .directory, size: 4096, modificationNanos: 1_700_000_000_000_000_000, linkCount: 2)
+        #expect(try shred(.tree(parent: otherParent, root: root, entries: good)).digest != base)
+    }
+
+    @Test func anApprovalForOneTreeDoesntAuthorizeAnother() throws {
+        let a = try shred(.tree(parent: parent, root: root, entries: good))
+        let b = try shred(.tree(parent: parent, root: root, entries: good + [e("z", 99)]))
+        var ledger = ApprovalLedger()
+        let approval = try ledger.issue(for: a, approvedBy: .userInApp, at: t0, lifetime: 60)
+        #expect(ledger.redeem(approval, for: b, at: t0) == .planChanged)
+    }
+
+    @Test func aStandingPolicyCantApproveAShred() throws {
+        var ledger = ApprovalLedger()
+        let p = try shred(.tree(parent: parent, root: root, entries: good))
+        #expect(throws: ApprovalLedger.IssueRefusal.self) { try ledger.issue(for: p, approvedBy: .standingPolicy(id: "x", version: 1), at: t0, lifetime: 60) }
+        #expect(throws: ApprovalLedger.IssueRefusal.self) { try ledger.issue(for: p, approvedBy: .appOwned(.installedSkill), at: t0, lifetime: 60) }
     }
 }

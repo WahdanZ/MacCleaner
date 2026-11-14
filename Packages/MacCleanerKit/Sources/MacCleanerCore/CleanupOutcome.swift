@@ -110,11 +110,18 @@ public struct ItemOutcome: Sendable, Hashable {
     public let candidateID: String
     public let target: CleanupTarget
     public let result: Result
+    /// Things the person should know that didn't stop the item (e.g. another app kept writing to a file while it
+    /// was shredded, so its newest data wasn't overwritten).
+    public let warnings: [String]
+    /// Files permanently removed, when the operation counts them (overwrite-then-delete); nil otherwise.
+    public let removedFiles: Int?
 
-    public init(candidateID: String, target: CleanupTarget, result: Result) {
+    public init(candidateID: String, target: CleanupTarget, result: Result, warnings: [String] = [], removedFiles: Int? = nil) {
         self.candidateID = candidateID
         self.target = target
         self.result = result
+        self.warnings = warnings
+        self.removedFiles = removedFiles
     }
 
     public var succeeded: Bool {
@@ -137,7 +144,12 @@ public struct CleanupReport: Sendable, Hashable {
         self.wasCancelled = wasCancelled
     }
 
-    /// Permanently removed, including what a partial removal already freed.
+    /// Every outcome's warnings, in order.
+    public var warnings: [String] { outcomes.flatMap(\.warnings) }
+
+    /// Permanently removed, including what a partial removal already freed. For overwrite-then-delete this is an
+    /// estimate: the space the deleted entries occupied, which APFS clones, snapshots or a file still open elsewhere
+    /// can keep from being returned to the disk.
     public var freedBytes: Int64 {
         outcomes.reduce(0) {
             switch $1.result {

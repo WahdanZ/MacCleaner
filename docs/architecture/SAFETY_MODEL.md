@@ -79,6 +79,29 @@ on that volume, and a separate lowercase `~/documents` is refused by Move to Tra
   data, and SSD wear levelling remaps blocks. FileVault (full-disk encryption) is the effective protection.
   Mac Cleaner never promises unrecoverability.
 
+### 3a. The executor's overwrite-then-delete (M01-04c-1, not used by the app yet)
+
+The same steps now also exist in MacCleanerPlatform (`LocalFileSystem.shredSnapshot` / `overwriteAndRemove`),
+run by the cleanup executor for an approved `.tree` target. The app switches to it in 04c-2
+(`docs/architecture/M01-04C_DESIGN.md`). It keeps every guarantee above and adds:
+
+* **Exactly the approved tree.** It visits only the target's entries and never lists a folder to decide what to
+  delete. An entry that wasn't reviewed is never opened, moved or deleted, and keeps its folder (`rmdir` fails).
+  The plan's digest covers every entry, including link counts and flags.
+* **Link count and flags at every check.** Every file, the item itself included, must have exactly one link and
+  no lock flags: when listed, in place before the move, in staging after the move, **on the open descriptor
+  immediately before the overwrite**, and at the staging name before the unlink.
+* **Protection per entry,** asked right before each entry moves and before each folder is removed. A newly
+  protected entry stops the item.
+* **Parent opened without following any link** (`O_NOFOLLOW_ANY`), then compared with the reviewed parent.
+* **Freed bytes are an estimate:** the deleted entries' allocated blocks. APFS clones share blocks, snapshots keep
+  them, and a file still open elsewhere frees them only when it is closed.
+* **Residual limits, unchanged:** between one check and the next step there is still no atomic "act only if
+  unchanged" call. A same-user process can write through a handle it already had after the last re-check (the
+  tail overwrite narrows this; an unfinished tail is a warning), add a hard link between the open-descriptor check
+  and the overwrite (the overwrite would then also reach that new link), or change the staging folder. All need
+  a hostile process running as the user.
+
 ## 4. Duplicates semantics (on `main` since #27)
 
 * Grouping: size → head/tail hash → full SHA-256. Short (non-empty) reads are continued until the needed byte

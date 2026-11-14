@@ -1,8 +1,8 @@
-# M01-04c — Shredder through the cleanup executor (design, for review)
+# M01-04c — Shredder through the cleanup executor (design)
 
-Status: revision 2, approved. **04c-1 (Core, Platform, executor, package tests) is merged (#45). 04c-2 (the app) is
-implemented on `m01-04c-2-shred-app`**, with the amendments from its pre-implementation Opus review listed under
-"04c-2 amendments" below. Base: `main` at c49f6e7 (04c-1), dda092d (04c-2).
+Status: revision 2, approved; **done**. 04c-1 (Core, Platform, executor, package tests) merged in #45; 04c-2 (the
+app) merged in #46 as 56bf0a4, with the amendments listed under "04c-2 amendments" below. Base: `main` at c49f6e7
+(04c-1), dda092d (04c-2).
 Two pull requests:
 
 - **04c-1** adds the Core and Platform pieces with package tests. The app doesn't use them yet.
@@ -260,6 +260,9 @@ These refine §1b, §2c, §4 and §5. Where they differ from the text above, the
 - **Approval-site rules (§5).** The builder lives in `ShredReview.swift` and the rule in `AppProtection.swift`,
   so the rules can be enforced file by file. `shredSnapshot(`, `overwriteThenDelete`, `overwriteAndRemove(`,
   `.execute(` and the self-test seam each have an allow-list, and `ShredEngine` is banned.
+- **From the PR review (#46).** The Shredder's "inside the home folder" check compares letter case exactly (an
+  allow rule, SAFETY_MODEL §2a). A `.skipped(.missing)` result removes the row only when the path is still
+  empty; a different or unreadable item at the path keeps the row, blocked and untouched.
 - **Known limit.** `HistoryStore` ignores records of 0 bytes, so a shred whose estimate is exactly 0 adds no
   History row.
 

@@ -353,14 +353,47 @@ struct ShredRaceTests {
         }
     }
 
-    @Test func aFileLockedAfterReviewIsKept() throws {   // §6b flags
-        let box = try Sandbox()
-        try box.file("item/a", "secret")
-        let t = try snapshot(shredFS(), box.path("item"))
-        chflags(box.path("item/a"), UInt32(UF_IMMUTABLE))
-        let r = try shred(shredFS(), t)
-        #expect(r.filesOverwritten == 0 && text(box, "item/a") == "secret")
-        if case .failed(let why) = r.kept.first?.reason { #expect(why.contains("locked")) } else { Issue.record("\(r.kept)") }
+    @Test func aFileLockedAfterReviewIsCaughtAtEveryCheckBeforeTheOverwrite() throws {   // §6b flags, §3 checks 1-3
+        // In place, after the move (a locked file can't be moved back, so it stays in staging, unchanged), and on the
+        // open descriptor right before the overwrite. Nothing is overwritten, and the next entry is never touched.
+        for stage in ["in place", "after move", "on open"] {
+            let box = try Sandbox()
+            try box.file("item/a", "secret"); try box.file("item/b", "next")
+            let t = try snapshot(shredFS(), box.path("item"))
+            var hooks = ShredHooks()
+            switch stage {
+            case "in place": chflags(box.path("item/a"), UInt32(UF_IMMUTABLE))
+            case "after move": hooks.afterMove = { _, staged in chflags(staged, UInt32(UF_IMMUTABLE)) }
+            default: hooks.afterOpen = { staged in chflags(staged, UInt32(UF_IMMUTABLE)) }
+            }
+            let r = try shred(shredFS(hooks), t)
+            #expect(r.filesOverwritten == 0 && r.damaged.isEmpty && text(box, "item/b") == "next", "\(stage)")
+            guard let kept = r.kept.first, case .failed(let why) = kept.reason else { Issue.record("\(stage): \(r.kept)"); continue }
+            #expect(why.contains("locked"), "\(stage): \(why)")
+            #expect((try? String(contentsOfFile: kept.path, encoding: .utf8)) == "secret", "\(stage): \(kept.path)")
+        }
+    }
+
+    @Test func aFileLinkedOrLockedAfterTheOverwriteIsNotDeleted() throws {   // §3 check 4, the last one before the unlink
+        // Its content is already overwritten (that can't be undone), but it isn't deleted: it stays in staging, is
+        // reported as damaged at that path, and the item stops.
+        for change in ["hard link", "locked"] {
+            let box = try Sandbox()
+            try box.file("item/a", "secret"); try box.file("item/b", "next"); try box.dir("elsewhere")
+            let t = try snapshot(shredFS(), box.path("item"))
+            let alias = box.path("elsewhere/alias")
+            var hooks = ShredHooks()
+            hooks.afterOverwrite = { staged in
+                if change == "hard link" { link(staged, alias) } else { chflags(staged, UInt32(UF_IMMUTABLE)) }
+            }
+            let r = try shred(shredFS(hooks), t)
+            #expect(r.filesOverwritten == 0 && text(box, "item/b") == "next", "\(change)")
+            #expect(r.damaged.count == 1 && r.damaged.first?.contains(LocalFileSystem.shredStagingPrefix) == true, "\(change): \(r.damaged)")
+            guard let kept = r.kept.first, case .failed(let why) = kept.reason else { Issue.record("\(change): \(r.kept)"); continue }
+            #expect(why.contains(change == "hard link" ? "hard link" : "locked"), "\(change): \(why)")
+            var st = stat()
+            #expect(kept.path == r.damaged.first && lstat(kept.path, &st) == 0, "\(change): \(kept.path)")
+        }
     }
 
     @Test func anEntryProtectedDuringTheShredStopsTheItem() throws {   // #2, §4 per-entry protection

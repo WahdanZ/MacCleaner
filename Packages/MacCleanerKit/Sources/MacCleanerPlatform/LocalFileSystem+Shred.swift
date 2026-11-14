@@ -245,9 +245,12 @@ extension LocalFileSystem {
                 var moved = stat()
                 let movedWhy: KeptEntry.Reason? = fstatat(sfd, tmp, &moved, AT_SYMLINK_NOFOLLOW) == 0 ? refusal(moved, e) : .changedAfterReview
                 if let why = movedWhy {
-                    let left = putBack(tmp, dirfd, name)
-                    return keep(left ?? e.path, left == nil ? why
-                                : .failed("it changed while shredding and its name was taken, so it couldn't be moved back; it is in the work folder"))
+                    guard let left = putBack(tmp, dirfd, name) else { return keep(e.path, why) }
+                    // Still in staging (its name was taken, or it was locked, which also blocks the rename): say why
+                    // it was stopped and where it is.
+                    let cause: String
+                    if case .failed(let w) = why { cause = w } else { cause = "it changed while shredding" }
+                    return keep(left, .failed(cause + ", and it couldn't be moved back, so it is in the work folder"))
                 }
                 if e.kind == .symlink {
                     let blocks = Int64(moved.st_blocks) * 512
@@ -279,12 +282,24 @@ extension LocalFileSystem {
                     return keep(left ?? e.path, .failed(why + note))
                 }
                 hooks?.afterOverwrite?(stagePath + "/" + tmp)
-                // Last check that the private name is still this file before deleting it.
+                // Last check before deleting it (design §3, check 4): the private name is still this file, with exactly
+                // one link and no lock flags. Its content is already overwritten; a failure here only stops the delete.
                 var last = stat(), current = stat()
-                guard fstatat(sfd, tmp, &last, AT_SYMLINK_NOFOLLOW) == 0, Self.sameObject(last, opened), last.st_nlink == 1,
-                      fstat(fd, &current) == 0 else {
+                let lastWhy: String?
+                if fstatat(sfd, tmp, &last, AT_SYMLINK_NOFOLLOW) != 0 || !Self.sameObject(last, opened) {
+                    lastWhy = "its staging name changed"
+                } else if last.st_nlink != 1 {
+                    lastWhy = "it gained another hard link"
+                } else if last.st_flags & Self.lockedFlags != 0 {
+                    lastWhy = "it was locked"
+                } else if fstat(fd, &current) != 0 {
+                    lastWhy = "it couldn't be checked again"
+                } else {
+                    lastWhy = nil
+                }
+                if let lastWhy {
                     r.damaged.append(stagePath + "/" + tmp)
-                    return keep(stagePath + "/" + tmp, .failed("it was overwritten, but its staging name changed, so nothing more was deleted"))
+                    return keep(stagePath + "/" + tmp, .failed("it was overwritten, but \(lastWhy), so it wasn't deleted and nothing more was"))
                 }
                 let blocks = Int64(current.st_blocks) * 512
                 guard unlinkat(sfd, tmp, 0) == 0 else {

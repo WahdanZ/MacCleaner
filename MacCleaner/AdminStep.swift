@@ -187,11 +187,16 @@ enum AdminStep {
         return URL(fileURLWithPath: line, isDirectory: true)
     }
 
-    /// A real folder (not a link), owned by `uid` and closed to everyone else.
-    static func isTrustedStaging(_ url: URL, uid: uid_t) -> Bool {
+    /// A real folder (not a link, and no link in its path), owned by `uid` and closed to everyone else.
+    static func isTrustedStaging(_ url: URL, uid: uid_t) -> Bool { trustedStaging(url, uid: uid) != nil }
+
+    /// The identity of the folder at `url` if it is trusted staging (`isTrustedStaging`). The checks and the identity
+    /// come from one stat, so the identity is always that of the folder that passed them.
+    static func trustedStaging(_ url: URL, uid: uid_t) -> FileIdentity? {
         var st = stat()
-        guard lstat(url.path, &st) == 0 else { return false }
-        return (st.st_mode & S_IFMT) == S_IFDIR && st.st_uid == uid && (st.st_mode & 0o077) == 0
+        guard fstatat(AT_FDCWD, url.path, &st, AT_SYMLINK_NOFOLLOW_ANY) == 0,
+              (st.st_mode & S_IFMT) == S_IFDIR, st.st_uid == uid, (st.st_mode & 0o077) == 0 else { return nil }
+        return FileIdentity(path: url.path, stat: st)
     }
 
     /// `do shell script "…"` for osascript, with the script escaped for an AppleScript string.
@@ -209,8 +214,7 @@ enum AdminStep {
     /// `Staging`; called by `run` and, on a script run as you, by the self-test.
     static func staging(fromOutput output: String?, items: [AppLeftover], uid: uid_t) -> Result {
         let lost = "The password step finished, but its staging folder could not be checked, so it was not sent to the Trash. Look in \(stagingParent) for a folder named \(stagingPrefix)…."
-        guard let url = parseStaging(output), isTrustedStaging(url, uid: uid),
-              let folder = try? LocalFileSystem().identity(at: url.path), folder.kind == .directory else { return .failed(lost) }
+        guard let url = parseStaging(output), let folder = trustedStaging(url, uid: uid) else { return .failed(lost) }
         let report = Report.parse(output)
         var expected: [String: FileIdentity] = [:]
         for i in report.moved.sorted() where items.indices.contains(i) {

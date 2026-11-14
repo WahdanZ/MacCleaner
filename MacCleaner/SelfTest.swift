@@ -2376,6 +2376,8 @@ extension SelfTest {
         check("an uninstall moves the app and its reviewed leftovers through the executor",
               r1.appRemoved && r1.errors.isEmpty && r1.bytes == 20 && ![fooURL, fooSupport, fooPrefs].contains { fm.fileExists(atPath: $0.path) }
               && stepCalls.count == 0)
+        check("an app moved to the Trash by the executor is reported and recorded in History as uninstalled (#41)",
+              r1.appInTrash && r1.historyTitle(appName: "Foo") == "Foo Uninstalled")
         check("each is logged as the uninstall and Put Back restores them",
               log(fooURL).first?.source == "Uninstall Foo" && putBack(fooURL) && putBack(fooSupport) && putBack(fooPrefs))
 

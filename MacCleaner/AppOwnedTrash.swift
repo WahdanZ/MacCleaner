@@ -63,12 +63,10 @@ enum AppOwnedTrash {
     /// followed). Otherwise why not.
     static func check(_ s: AdminStep.Staging) -> Result<FileIdentity, Refusal> {
         let fs = LocalFileSystem()
-        guard AdminStep.parseStaging(s.folder.path)?.path == s.folder.path, AdminStep.isTrustedStaging(s.url, uid: s.uid) else {
+        guard AdminStep.parseStaging(s.folder.path)?.path == s.folder.path, let now = AdminStep.trustedStaging(s.url, uid: s.uid) else {
             return .failure(Refusal(text: "it is no longer the private folder the password step made"))
         }
-        guard let now = try? fs.identity(at: s.folder.path), now.kind == .directory, s.folder.mismatch(against: now) == nil else {
-            return .failure(Refusal(text: "it was replaced after the password step"))
-        }
+        guard s.folder.mismatch(against: now) == nil else { return .failure(Refusal(text: "it was replaced after the password step")) }
         let names: [String]
         do { names = try FileManager.default.contentsOfDirectory(atPath: s.folder.path) } catch {
             return .failure(Refusal(text: "it couldn't be checked (\(error.localizedDescription))"))

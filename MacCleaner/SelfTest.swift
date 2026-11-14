@@ -141,6 +141,11 @@ enum SelfTest {
               shredRule(URL(fileURLWithPath: "/private/tmp/x")) != nil
               && shredRule(URL(fileURLWithPath: "/Applications/Example.app")) != nil
               && shredRule(URL(fileURLWithPath: "/Applications/Safari.app")) != nil)
+        check("the Shredder's home-folder check compares letter case exactly (a case-distinct folder is not home)",
+              AppProtection.isInsideHome("/Users/someone/a", home: "/Users/someone")
+              && !AppProtection.isInsideHome("/Users/SomeOne/a", home: "/Users/someone")
+              && !AppProtection.isInsideHome("/users/someone", home: "/Users/someone")
+              && !AppProtection.isInsideHome("/Users/someone2/a", home: "/Users/someone"))
         check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
         check("a protected folder hides what is inside it in any letter case (RISK-012)",
               ProtectedPaths.isInsideProtected(URL(fileURLWithPath: keep.path.uppercased() + "/inner"))

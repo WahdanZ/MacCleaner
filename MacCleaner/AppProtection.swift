@@ -22,9 +22,23 @@ struct AppProtection: ProtectionChecking {
     /// would allow /Applications).
     static func shredReason(_ url: URL) -> String? {
         if let why = TrashGuard.reason(url) { return why }
-        if !SafetyGuard.isInside(TrashGuard.key(url), SafetyGuard.home.path.lowercased()) {
+        if !isInsideHome(exactKey(url), home: SafetyGuard.home.path) {
             return "Only items in your home folder can be shredded"
         }
         return nil
+    }
+
+    /// "Inside the home folder" is an allow condition, so it compares letter case exactly (SAFETY_MODEL §2a: allow
+    /// rules are exact, deny rules are case-folded). On a case-sensitive volume `/Users/Me` and `/Users/me` are
+    /// different folders; a case-folded comparison would let the second pass as home. On the usual
+    /// case-insensitive disk a differently spelled path is refused, never allowed.
+    static func isInsideHome(_ key: String, home: String) -> Bool { PathRules.isInside(key, home) }
+
+    /// Like `TrashGuard.key` (parent folders' links resolved, the item itself not followed), without lower-casing.
+    static func exactKey(_ url: URL) -> String {
+        let std = url.standardizedFileURL
+        guard std.path != "/" else { return "/" }
+        let parent = std.deletingLastPathComponent().resolvingSymlinksInPath()
+        return parent.appendingPathComponent(std.lastPathComponent).standardizedFileURL.path
     }
 }

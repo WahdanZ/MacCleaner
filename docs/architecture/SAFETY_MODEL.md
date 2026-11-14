@@ -48,6 +48,7 @@ guards are written for that and **fail toward refusing** on a case-sensitive APF
 | User protection (`UserProtection`) | case-folded | A folder differing only in case from a protected one is also protected (stricter, never looser). |
 | Move to Trash (`TrashRules`: structural, sensitive) | case-folded key | A separate `~/documents` folder is refused as a system folder (stricter). Its contents follow the normal rules. |
 | Permanent delete allow-list (`PermanentDeleteRules`) | exact, on the resolved path | Only the real `~/Library/Caches` etc. qualify; a look-alike `~/library/caches` is a different folder and is never swept. |
+| Shredder "inside the home folder" (`AppProtection.shredReason`) | exact, parent links resolved | A case-distinct folder such as `/Users/ME` is not your home and is refused; the Trash rules (case-folded) still apply first. |
 
 Verified on a case-sensitive APFS disk image (2026-11-13): the isolated self-test passes 258/258 with the test home
 on that volume, and a separate lowercase `~/documents` is refused by Move to Trash.

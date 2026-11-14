@@ -299,7 +299,7 @@ final class IntegrationsModel {
                     }
                 }
             }
-            var note = ""
+            var note = "", partial = false
             if let dir = c.skillsDir {
                 let folder = InstalledSkills.folderPath(in: dir)
                 let place = Scanner.tilde(URL(fileURLWithPath: folder))
@@ -307,17 +307,24 @@ final class IntegrationsModel {
                 case .absent:
                     skills.forget(folder)
                 case .owned(let v, _):
-                    if let why = AppOwnedTrash.trashSkill(v, source: "Disconnect \(c.name)") {
-                        note = " Its skill in \(place) was kept: \(why)."
-                    } else {
+                    switch AppOwnedTrash.trashSkill(v, source: "Disconnect \(c.name)") {
+                    case .kept(let why):
+                        note = " Its skill in \(place) was kept: \(why)."   // still there and Mac Cleaner's: record kept
+                    case .moved:
                         skills.forget(folder)
                         note = " Its skill was moved to the Trash."
+                    case .movedUnrecorded(let recovery):
+                        // It left its place, so the record goes; the message says how to get it back.
+                        skills.forget(folder)
+                        partial = true
+                        note = " Its skill was moved to the Trash (\(recovery)), but couldn't be added to Mac Cleaner's Trash list; "
+                            + "to restore it, drag \((recovery as NSString).lastPathComponent) out of the Trash in Finder back to \(place)."
                     }
                 case .notOwned(let why):
                     note = " The \(SkillText.name) skill folder in \(place) was kept: \(why)."
                 }
             }
-            message = ("Removed from \(c.name).\(note)", false)
+            message = ("Removed from \(c.name).\(note)", partial)
         } catch {
             message = ("\(c.name): \(error.localizedDescription)", true)
         }

@@ -48,11 +48,15 @@ enum AppOwnedTrash {
         let run = run(plan, kind, protection: OneFolder(path: place, rules: { ProtectedPaths.reason(URL(fileURLWithPath: $0)) }),
                       source: source, restorable: false,
                       precondition: { _, _ in if case .failure(let why) = check(staging) { return why.text }; return nil })
-        if run.moved.isEmpty {
-            let why = run.problems.first?.message ?? "it wasn't moved"
+        switch result(of: run) {
+        case .kept(let why):
             return (false, "The moved system items are in \(place), but that folder couldn't be sent to the Trash: \(why)")
+        case .movedUnrecorded(let recovery):
+            return (true, "The moved system items reached the Trash (\(recovery)), but couldn't be added to Mac Cleaner's Trash list; "
+                    + "to restore them, drag \((recovery as NSString).lastPathComponent) out of the Trash in Finder")
+        case .moved:
+            return (true, nil)
         }
-        return (true, nil)
     }
 
     struct Refusal: Error { let text: String }
@@ -92,20 +96,37 @@ enum AppOwnedTrash {
 
     // MARK: - An installed usage skill
 
-    /// Moves a verified, unchanged Mac Cleaner-installed skill folder to the Trash (restorable with Put Back). nil when
-    /// it moved; otherwise why it was kept (it stays where it is).
-    static func trashSkill(_ skill: InstalledSkills.Verified, source: String) -> String? {
+    /// Moves a verified, unchanged Mac Cleaner-installed skill folder to the Trash (restorable with Put Back).
+    static func trashSkill(_ skill: InstalledSkills.Verified, source: String) -> MoveResult {
         let kind = CleanupApproval.AppOwnedKind.installedSkill
         guard let plan = plan(kind, skill.folder, title: "Mac Cleaner usage skill", bytes: Scanner.allocatedSize(skill.url)) else {
-            return "it couldn't be planned for the Trash"
+            return .kept("it couldn't be planned for the Trash")
         }
         let run = run(plan, kind, protection: OneFolder(path: skill.folder.path, rules: { TrashGuard.reason(URL(fileURLWithPath: $0)) }),
                       source: source, restorable: true,
                       precondition: { _, _ in InstalledSkills.recheck(skill) })
-        return run.moved.isEmpty ? (run.problems.first?.message ?? "it wasn't moved") : nil
+        return result(of: run)
     }
 
     // MARK: - Shared
+
+    /// What an app-owned move did. A move is never undone because its record couldn't be written.
+    enum MoveResult: Equatable {
+        /// In the Trash at `recoveryPath`, and in Mac Cleaner's Trash list.
+        case moved(recoveryPath: String)
+        /// In the Trash at `recoveryPath`, but its Trash-list record couldn't be written: it is restored from Finder.
+        case movedUnrecorded(recoveryPath: String)
+        /// Not moved: still where it was, and why.
+        case kept(String)
+    }
+
+    /// The single item's result in `run`: a move reported with a problem is a move whose record couldn't be written
+    /// (AppCleanup.moveToTrash), never a failed move.
+    private static func result(of run: TrashRun) -> MoveResult {
+        guard let id = run.moved.keys.first else { return .kept(run.problems.first?.message ?? "it wasn't moved") }
+        let recovery: String = { if case .trashed(_, let r)? = run.outcomes[id] { return r }; return "the Trash" }()
+        return run.problems.contains { $0.id == id } ? .movedUnrecorded(recoveryPath: recovery) : .moved(recoveryPath: recovery)
+    }
 
     /// The one-entry plan the ledger accepts for `.appOwned(kind)`: a Trash move of exactly `folder`.
     private static func plan(_ kind: CleanupApproval.AppOwnedKind, _ folder: FileIdentity, title: String, bytes: Int64) -> CleanupPlan? {

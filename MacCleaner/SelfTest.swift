@@ -2135,14 +2135,14 @@ extension SelfTest {
             try? fm.removeItem(at: skillFile)
             try? SkillText.markdown.write(to: skillFile, atomically: false, encoding: .utf8)   // the same text, another file
             check("a skill whose SKILL.md was replaced after it was verified is kept",
-                  AppOwnedTrash.trashSkill(v, source: "Self-test")?.contains("replaced") == true && fm.fileExists(atPath: folder))
+                  { if case .kept(let why) = AppOwnedTrash.trashSkill(v, source: "Self-test") { return why.contains("replaced") }; return false }() && fm.fileExists(atPath: folder))
         } else { check("a skill whose SKILL.md was replaced after it was verified is kept", false) }
         reset()
         _ = connect()
         if case .owned(let v, _) = skills.state(at: folder) {
             try? "x".write(to: URL(fileURLWithPath: folder).appendingPathComponent("added.txt"), atomically: true, encoding: .utf8)
             check("…and so is one that gained a file after it was verified",
-                  AppOwnedTrash.trashSkill(v, source: "Self-test")?.contains("holds files") == true && fm.fileExists(atPath: folder))
+                  { if case .kept(let why) = AppOwnedTrash.trashSkill(v, source: "Self-test") { return why.contains("holds files") }; return false }() && fm.fileExists(atPath: folder))
         } else { check("…and so is one that gained a file after it was verified", false) }
         reset()
 
@@ -2162,6 +2162,24 @@ extension SelfTest {
         model2.connect(blocked)
         check("a Connect whose skill can't be installed doesn't change the config",
               model2.message?.isError == true && model2.message?.text.contains("couldn't be installed") == true && !fm.fileExists(atPath: config.path))
+
+        // 6b. Moved to the Trash, but its Trash-list record can't be written: the move stands (never undone), reported as
+        // moved but unrecorded, with where it is and how to restore it from Finder.
+        _ = connect()
+        let savedRecord = AppCleanup.recordMove
+        AppCleanup.recordMove = { _, _, _, _, _ in false }
+        let movesBefore6 = SelfTest.isolatedMoves.count
+        let d6 = disconnect()
+        AppCleanup.recordMove = savedRecord
+        let dest6 = SelfTest.isolatedMoves.count > movesBefore6 ? SelfTest.isolatedMoves.all.last : nil
+        check("a skill moved to the Trash whose record couldn't be written is reported as moved but unrecorded, with its Trash path and Finder recovery",
+              d6?.isError == true && d6?.text.contains("couldn't be added to Mac Cleaner's Trash list") == true && d6?.text.contains("Finder") == true
+              && !fm.fileExists(atPath: folder) && !connected()
+              && dest6.map { fm.fileExists(atPath: $0 + "/SKILL.md") && d6?.text.contains($0) == true } == true)
+        check("…its ownership record is forgotten (it left its place) and no Trash-list entry claims it",
+              !recorded() && !TrashLog.shared.present().contains { $0.original == folder })
+        if let dest6 { try? fm.removeItem(atPath: (dest6 as NSString).deletingLastPathComponent) }
+        reset()
 
         // 7. An unchanged skill an earlier version installed (recorded) is kept as it is: never rewritten.
         try? fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
@@ -2626,6 +2644,21 @@ extension SelfTest {
             check("it is logged as not restorable item by item: Put Back points to Finder and moves nothing",
                   entry?.restorable == false && entry?.source == "Self-test staging"
                   && entry.map { TrashOps.restore($0)?.contains("Finder") == true && !fm.fileExists(atPath: s.folder.path) } == true)
+        }
+        // Moved, but its Trash-list record can't be written: still in the Trash (never moved back), and the report says
+        // where it is and how to restore it from Finder.
+        if let (s, _) = stagedRun("st-unrecorded") {
+            let saved = AppCleanup.recordMove
+            AppCleanup.recordMove = { _, _, _, _, _ in false }
+            let before = SelfTest.isolatedMoves.count
+            let r = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            AppCleanup.recordMove = saved
+            let dest = SelfTest.isolatedMoves.count > before ? SelfTest.isolatedMoves.all.last : nil
+            check("a staging folder moved to the Trash whose record couldn't be written stays in the Trash and is reported with its path and Finder recovery",
+                  r.inTrash && r.error?.contains("couldn't be added to Mac Cleaner's Trash list") == true && r.error?.contains("Finder") == true
+                  && !fm.fileExists(atPath: s.folder.path) && !TrashLog.shared.present().contains { $0.original == s.folder.path }
+                  && dest.map { fm.fileExists(atPath: $0 + "/" + (s.expected.keys.first ?? "?")) && r.error?.contains($0) == true } == true)
+            if let dest { try? fm.removeItem(atPath: (dest as NSString).deletingLastPathComponent) }
         }
         // Unexpected, modified, replaced, linked or missing contents; a replaced or opened folder: left untouched.
         func refused(_ name: String, _ change: (AdminStep.Staging) -> Void, _ expect: String) -> Bool {

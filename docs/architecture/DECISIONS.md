@@ -124,7 +124,11 @@ was moved is the recorded folder, file and content (anything else is moved back)
 only after the old one was removed, and restored if the new one can't be added; Disconnect touches the skill only once
 the server is really gone, still disconnects the server when it keeps the skill, and says so; Save skill folder never overwrites and is never recorded. `AppEngine.trash`
 is removed. `scripts/check-approval-sites.sh` keeps `.appOwned`, executor creation, these moves and their proofs in
-their files. History records an uninstall as moved to the Trash only for what reached it (#41).
-**Not guaranteed:** another process running as you could change the staging folder (0700, yours after the step) or the
-skill folder in the instant between the precondition and the move; the executor still checks the folder's identity,
-not every nested file. The staging check covers the folder's direct entries, not the contents of a moved bundle.
+their files. History records an uninstall as moved to the Trash only for what reached it (#41). A move that reached the
+Trash but whose Trash-list record couldn't be written is never undone: it is reported as moved but unrecorded, with its
+Trash path and how to restore it from Finder (and a skill's ownership record is dropped, since it left its place).
+**Not guaranteed (open, not resolved):** (1) another process running as you could change the staging folder (0700,
+yours after the step) or the skill folder in the instant between the precondition and the move; the executor still
+checks the folder's identity, not every nested file. (2) The staging check covers the folder's direct entries, not the
+contents of a moved item such as a bundle. Taking the staging folder's trust check and identity from one stat only
+ties the identity to the folder that passed the check; it closes neither of these.

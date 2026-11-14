@@ -19,7 +19,7 @@ struct TrashedItem: Codable, Identifiable, Sendable {
 }
 
 /// Persisted log (~/Library/Application Support/Mac Cleaner/trash-log.json), shared by the window and the
-/// CLI/MCP process. Written from background threads by AppEngine.trash. Each change goes through
+/// CLI/MCP process. Written from background threads by the cleanup executor's Trash moves. Each change goes through
 /// `SharedFile`, so entries one process adds are never lost when the other one writes.
 final class TrashLog: @unchecked Sendable {
     static let shared = TrashLog()

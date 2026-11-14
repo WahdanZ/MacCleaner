@@ -278,6 +278,44 @@ struct ApprovalLedgerTests {
         for (q, _) in refused { _ = try ledger.issue(for: q, approvedBy: .userInApp, at: t0, lifetime: 60) }
     }
 
+    @Test func anAppOwnedApprovalCoversOnlyOneTrashMoveOfOneFolderOfItsKind() throws {
+        func owned(_ id: String, module: String, targets: [CleanupTarget]) -> CleanupCandidate {
+            CleanupCandidate(id: id, module: module, title: id, targets: targets, estimatedBytes: 1, risk: .reviewRequired,
+                             recommended: false, explanation: "")
+        }
+        let folder = ident("/private/var/tmp/MacCleaner-uninstall.AbCdEf1234")
+        var ledger = ApprovalLedger()
+        for kind in CleanupApproval.AppOwnedKind.allCases {
+            let ok = plan([.init(owned("s", module: kind.rawValue, targets: [.file(folder)]), .trash)])
+            let a = try ledger.issue(for: ok, approvedBy: .appOwned(kind), at: t0, lifetime: 60)
+            #expect(a.approvedBy == .appOwned(kind) && ledger.redeem(a, for: ok, at: t0) == nil)
+        }
+        let staging = CleanupApproval.Approver.appOwned(.adminStaging)
+        let refused: [CleanupPlan] = [
+            // The other kind's module, or any other module.
+            plan([.init(owned("s", module: "installed-skill", targets: [.file(folder)]), .trash)]),
+            plan([.init(owned("s", module: "uninstall", targets: [.file(folder)]), .trash)]),
+            // Not a Trash move.
+            plan([.init(owned("s", module: "admin-staging", targets: [.file(folder)]), .permanentDelete)]),
+            // Not exactly one folder: a file, two targets, a folder's contents, a command.
+            plan([.init(owned("s", module: "admin-staging", targets: [.file(ident(kind: .file))]), .trash)]),
+            plan([.init(owned("s", module: "admin-staging", targets: [.file(folder), .file(ident("/b", inode: 7))]), .trash)]),
+            plan([.init(owned("s", module: "admin-staging", targets: [contents()]), .trash)]),
+            plan([.init(owned("s", module: "admin-staging", targets: [.command(simctl)]), .command)]),
+            // More than one entry.
+            plan([.init(owned("s", module: "admin-staging", targets: [.file(folder)]), .trash),
+                  .init(owned("t", module: "admin-staging", targets: [.file(ident("/c", inode: 9))]), .trash)]),
+        ]
+        for q in refused {
+            #expect(throws: ApprovalLedger.IssueRefusal.self) { try ledger.issue(for: q, approvedBy: staging, at: t0, lifetime: 60) }
+        }
+        #expect(ledger.outstandingCount == 0)
+        // An app-owned approval names who approved it; it is never a person's confirmation.
+        let ok = plan([.init(owned("s", module: "admin-staging", targets: [.file(folder)]), .trash)])
+        let a = try ledger.issue(for: ok, approvedBy: staging, at: t0, lifetime: 60)
+        #expect(a.approvedBy != .userInApp && a.approvedBy != .appOwned(.installedSkill))
+    }
+
     @Test func aNonInteractiveOverrideIsRecordedAsSuch() throws {
         var ledger = ApprovalLedger()
         let a = try ledger.issue(for: p, approvedBy: .nonInteractiveOverride, at: t0, lifetime: 60)

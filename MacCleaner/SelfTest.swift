@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MacCleanerCore
+import MacCleanerPlatform
 
 /// `Mac Cleaner --selftest`: checks every safety rule. Exit code 0 = all passed.
 ///
@@ -138,25 +139,9 @@ enum SelfTest {
               ProtectedPaths.isInsideProtected(URL(fileURLWithPath: keep.path.uppercased() + "/inner"))
               && ProtectedPaths.isInsideProtected(keep.appendingPathComponent("inner")))
 
-        print("Trash and Put Back")
+        // Trash moves, the Trash log and Put Back go through the cleanup executor only (there is no other Trash path):
+        // see "Approved Trash" below (moved, logged, put back; protected after review is refused).
         ProtectedPaths.set(savedProtected)
-        // The one test that uses the real Trash (trashItem always uses the volume's Trash, whatever the home
-        // folder): a file this run created, with a per-run name, put back right away.
-        let rt = sandbox.appendingPathComponent("roundtrip-\(runID).txt")
-        fm.createFile(atPath: rt.path, contents: Data("roundtrip".utf8))
-        let trashErr = AppEngine.trash(rt, source: "Self-test")
-        let entry = TrashLog.shared.present().first { $0.original == rt.path }
-        check("trash moves the file and logs it", trashErr == nil && !fm.fileExists(atPath: rt.path) && entry != nil)
-        check("logged item is readable in the Trash", entry.map { fm.fileExists(atPath: $0.trashed) } ?? false)
-        if let entry {
-            check("put back restores the file", TrashOps.restore(entry) == nil
-                  && (try? String(contentsOf: rt, encoding: .utf8)) == "roundtrip")
-            check("put back removes the log entry", !TrashLog.shared.present().contains { $0.id == entry.id })
-        }
-        ProtectedPaths.set(savedProtected + [rt.path])
-        check("protected file is refused by trash()", AppEngine.trash(rt, source: "Self-test") != nil && fm.fileExists(atPath: rt.path))
-        ProtectedPaths.set(savedProtected)
-
         approvedTrash(sandbox: sandbox, runID: String(runID), savedProtected: savedProtected)
 
         print("Projects (build files)")
@@ -1547,6 +1532,7 @@ extension SelfTest {
         mcpAndCLITrash(dir: dir, runID: runID)
         engineTrash(dir: dir, runID: runID)
         uninstallAndAlerts(dir: dir, runID: runID, savedProtected: savedProtected)
+        MainActor.assumeIsolated { installedSkills(dir: dir, runID: runID) }
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
@@ -1628,7 +1614,7 @@ extension SelfTest {
         // A record that can't be written stops the run and is reported, never shown as a recoverable success.
         let f1 = file("unrecorded-1", "reviewed"), f2 = file("unrecorded-2", "reviewed")
         let saved = AppCleanup.recordMove
-        AppCleanup.recordMove = { _, _, _, _ in false }
+        AppCleanup.recordMove = { _, _, _, _, _ in false }
         let failed = run(MainActor.assumeIsolated { confirmTrashReview([f1, f2]) }, "Self-test")
         AppCleanup.recordMove = saved
         let f1Message = failed?.problems.first { $0.id == f1.path }?.message ?? ""
@@ -1801,7 +1787,7 @@ extension SelfTest {
         }
         let u1 = file("mcp-unrecorded-1", "one"), u2 = file("mcp-unrecorded-2", "two")
         let saved = AppCleanup.recordMove
-        AppCleanup.recordMove = { _, _, _, _ in false }
+        AppCleanup.recordMove = { _, _, _, _, _ in false }
         let unrecorded = confirm([u1, u2], previewID([u1, u2]))
         AppCleanup.recordMove = saved
         let uErrors = unrecorded?["errors"] as? [String] ?? []
@@ -2060,6 +2046,297 @@ extension SelfTest {
 
     // MARK: Uninstall and Remove alerts through the executor (M01-04b-3b)
 
+    /// Installed usage skills (M01-04b-3c): Connect never overwrites a skill that isn't provably Mac Cleaner's and
+    /// unchanged, Disconnect moves only such a skill to the Trash (AppOwnedTrash) and disconnects the server either way,
+    /// and a Connect that fails part-way changes nothing. A fake client in this run's folder; settings in memory.
+    @MainActor
+    static func installedSkills(dir: URL, runID: String) {
+        print("Installed skills: ownership record → Connect / Disconnect (M01-04b-3c)")
+        let fm = FileManager.default
+        let base = dir.appendingPathComponent("skills-\(runID)")
+        let skillsDir = base.appendingPathComponent("client/skills")
+        let config = base.appendingPathComponent("client/mcp.json")
+        try? fm.createDirectory(at: skillsDir, withIntermediateDirectories: true)
+        let client = AIClient(id: "selftest", name: "SelfTest", detail: "", kind: .json(file: config.path, key: "mcpServers", vscodeStyle: false),
+                              skillsDir: skillsDir.path, presence: base.path)
+        let store = MemorySettings()
+        let skills = InstalledSkills(store: store)
+        let model = IntegrationsModel(clients: [client], skills: skills)
+        let folder = InstalledSkills.folderPath(in: skillsDir.path)
+        let skillFile = URL(fileURLWithPath: folder).appendingPathComponent("SKILL.md")
+        func text(_ u: URL = skillFile) -> String? { try? String(contentsOf: u, encoding: .utf8) }
+        func inode(_ u: URL) -> UInt64? { (try? fm.attributesOfItem(atPath: u.path))?[.systemFileNumber] as? UInt64 }
+        func connected() -> Bool {
+            let d = (try? Data(contentsOf: config)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            return (d?["mcpServers"] as? [String: Any])?["mac-cleaner"] != nil
+        }
+        func connect() -> (text: String, isError: Bool)? { model.connect(client); return model.message }
+        func disconnect() -> (text: String, isError: Bool)? { model.disconnect(client); return model.message }
+        func recorded() -> Bool { (store.object(forKey: InstalledSkills.key) as? [String: String])?[folder] != nil }
+        func owned(current: Bool = true) -> Bool { if case .owned(_, let c) = skills.state(at: folder) { return c == current }; return false }
+        func notOwned() -> Bool { if case .notOwned = skills.state(at: folder) { return true }; return false }
+        func reset() { try? fm.removeItem(atPath: folder); skills.forget(folder); try? fm.removeItem(at: config) }
+
+        // 1. Connect: the skill is installed and recorded, the server registered; again: left as it is.
+        let c1 = connect()
+        check("Connect installs the skill, records it as Mac Cleaner's only after writing it, and registers the server",
+              c1?.isError == false && c1?.text.contains("Skill installed") == true && text() == SkillText.markdown
+              && owned() && recorded() && connected())
+        let inode1 = inode(skillFile)
+        let c1b = connect()
+        check("Connect again leaves an unchanged installed skill as it is",
+              c1b?.text.contains("already installed") == true && inode(skillFile) == inode1 && inode1 != nil)
+
+        // 2. Disconnect: the verified skill goes to the Trash (Put Back works); the server is removed; the record forgotten.
+        let d1 = disconnect()
+        let e1 = TrashLog.shared.present().first { $0.original == folder }
+        check("Disconnect moves a verified, unchanged Mac Cleaner skill to the Trash through the executor and removes the server",
+              d1?.isError == false && d1?.text.contains("moved to the Trash") == true && !fm.fileExists(atPath: folder)
+              && !connected() && SelfTest.inIsolatedTrash(e1?.trashed) && e1?.restorable == true && e1?.source == "Disconnect SelfTest")
+        check("…and forgets its record", !recorded())
+        check("the removed skill can be put back", e1.map { TrashOps.restore($0) == nil } == true && text() == SkillText.markdown)
+
+        // 3. The put-back folder has no record, like a skill an older version installed: never treated as Mac Cleaner's,
+        // even with matching text. Same for the person's own skill.
+        let c3 = connect()
+        check("an unrecorded skill folder with Mac Cleaner's text (older install) isn't Mac Cleaner's: Connect keeps it and says so",
+              c3?.isError == false && c3?.text.contains("kept as it is") == true && c3?.text.contains("no record") == true
+              && text() == SkillText.markdown && notOwned() && !recorded() && connected())
+        let d3 = disconnect()
+        check("…and Disconnect keeps it, still removing the server, and says the skill was kept",
+              d3?.isError == false && d3?.text.contains("was kept") == true && fm.fileExists(atPath: folder) && !connected())
+        try? "my own skill".write(to: skillFile, atomically: false, encoding: .utf8)
+        let c3b = connect()
+        check("Connect never overwrites a skill the person put there", text() == "my own skill" && c3b?.text.contains("kept as it is") == true && connected())
+        let d3b = disconnect()
+        check("…and Disconnect never removes it", text() == "my own skill" && d3b?.text.contains("was kept") == true && !connected())
+        reset()
+
+        // 4. An installed skill the person edited, or added files to: kept by Disconnect and by Connect.
+        _ = connect()
+        try? (SkillText.markdown + "\nMy notes.\n").write(to: skillFile, atomically: false, encoding: .utf8)
+        let d4 = disconnect()
+        check("Disconnect keeps an installed skill that was edited, says why, and still removes the server",
+              d4?.text.contains("was edited") == true && text()?.hasSuffix("My notes.\n") == true && !connected())
+        let c4 = connect()
+        check("…and Connect doesn't overwrite it", text()?.hasSuffix("My notes.\n") == true && c4?.text.contains("kept as it is") == true)
+        reset()
+        _ = connect()
+        let notes = URL(fileURLWithPath: folder).appendingPathComponent("notes.md")
+        try? "mine".write(to: notes, atomically: true, encoding: .utf8)
+        let d4b = disconnect()
+        check("Disconnect keeps an installed skill folder that holds other files, with those files",
+              d4b?.text.contains("holds files") == true && text(notes) == "mine" && text() == SkillText.markdown && !connected())
+        reset()
+
+        // 5. Changed after it was verified (the proof) and before the move: checked again right before it, and kept.
+        _ = connect()
+        if case .owned(let v, _) = skills.state(at: folder) {
+            try? fm.removeItem(at: skillFile)
+            try? SkillText.markdown.write(to: skillFile, atomically: false, encoding: .utf8)   // the same text, another file
+            check("a skill whose SKILL.md was replaced after it was verified is kept",
+                  { if case .kept(let why) = AppOwnedTrash.trashSkill(v, source: "Self-test") { return why.contains("replaced") }; return false }() && fm.fileExists(atPath: folder))
+        } else { check("a skill whose SKILL.md was replaced after it was verified is kept", false) }
+        reset()
+        _ = connect()
+        if case .owned(let v, _) = skills.state(at: folder) {
+            try? "x".write(to: URL(fileURLWithPath: folder).appendingPathComponent("added.txt"), atomically: true, encoding: .utf8)
+            check("…and so is one that gained a file after it was verified",
+                  { if case .kept(let why) = AppOwnedTrash.trashSkill(v, source: "Self-test") { return why.contains("holds files") }; return false }() && fm.fileExists(atPath: folder))
+        } else { check("…and so is one that gained a file after it was verified", false) }
+        reset()
+
+        // 6. A Connect that fails part-way changes nothing.
+        try? "{ not json".write(to: config, atomically: true, encoding: .utf8)
+        let c6 = connect()
+        check("a Connect whose config can't be changed removes the skill it just installed, and changes nothing",
+              c6?.isError == true && c6?.text.contains("removed again") == true && !fm.fileExists(atPath: folder) && !recorded()
+              && text(config) == "{ not json")
+        reset()
+        let blocker = base.appendingPathComponent("blocker")
+        try? Data("a file, not a folder".utf8).write(to: blocker)
+        let blocked = AIClient(id: "selftest-blocked", name: "SelfTestBlocked", detail: "",
+                               kind: .json(file: config.path, key: "mcpServers", vscodeStyle: false),
+                               skillsDir: blocker.appendingPathComponent("skills").path, presence: base.path)
+        let model2 = IntegrationsModel(clients: [blocked], skills: skills)
+        model2.connect(blocked)
+        check("a Connect whose skill can't be installed doesn't change the config",
+              model2.message?.isError == true && model2.message?.text.contains("couldn't be installed") == true && !fm.fileExists(atPath: config.path))
+
+        // 6b. Moved to the Trash, but its Trash-list record can't be written: the move stands (never undone), reported as
+        // moved but unrecorded, with where it is and how to restore it from Finder.
+        _ = connect()
+        let savedRecord = AppCleanup.recordMove
+        AppCleanup.recordMove = { _, _, _, _, _ in false }
+        let movesBefore6 = SelfTest.isolatedMoves.count
+        let d6 = disconnect()
+        AppCleanup.recordMove = savedRecord
+        let dest6 = SelfTest.isolatedMoves.count > movesBefore6 ? SelfTest.isolatedMoves.all.last : nil
+        check("a skill moved to the Trash whose record couldn't be written is reported as moved but unrecorded, with its Trash path and Finder recovery",
+              d6?.isError == true && d6?.text.contains("couldn't be added to Mac Cleaner's Trash list") == true && d6?.text.contains("Finder") == true
+              && !fm.fileExists(atPath: folder) && !connected()
+              && dest6.map { fm.fileExists(atPath: $0 + "/SKILL.md") && d6?.text.contains($0) == true } == true)
+        check("…its ownership record is forgotten (it left its place) and no Trash-list entry claims it",
+              !recorded() && !TrashLog.shared.present().contains { $0.original == folder })
+        if let dest6 { try? fm.removeItem(atPath: (dest6 as NSString).deletingLastPathComponent) }
+        reset()
+
+        // 7. An unchanged skill an earlier version installed (recorded) is kept as it is: never rewritten.
+        try? fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
+        try? "an older version's text".write(to: skillFile, atomically: false, encoding: .utf8)
+        let fsys = LocalFileSystem()
+        if let d = try? fsys.identity(at: folder), let f = try? fsys.identity(at: skillFile.path),
+           let json = try? JSONEncoder().encode(InstalledSkills.Record(folderDevice: d.device, folderInode: d.inode, fileDevice: f.device,
+                                                                     fileInode: f.inode, sha256: InstalledSkills.sha256(Data("an older version's text".utf8)))) {
+            store.set([folder: String(decoding: json, as: UTF8.self)], forKey: InstalledSkills.key)
+        }
+        let before7 = owned(current: false), inode7 = inode(skillFile)
+        let c7 = connect()
+        check("Connect keeps an older Mac Cleaner skill as it is (never rewrites a skill folder) and says so",
+              before7 && c7?.isError == false && c7?.text.contains("earlier version installed was kept") == true
+              && text() == "an older version's text" && inode(skillFile) == inode7 && owned(current: false) && connected())
+        reset()
+
+        // 7b. Undoing an install (a Connect that failed) removes only what is provably the installed folder at the moment
+        // of removal: changes made after the ownership check and before the removal are left untouched.
+        func undo(_ change: () -> Void) -> String?? {
+            guard let made = try? skills.install(in: skillsDir.path) else { return nil }
+            return .some(skills.undoInstall(folder: made.folder, record: made.record, afterCheck: change))
+        }
+        func noLeftovers(_ dir: String) -> Bool {
+            !((try? fm.contentsOfDirectory(atPath: dir)) ?? []).contains { $0.hasPrefix(".maccleaner-undo-") }
+        }
+        let u1 = undo { try? fm.removeItem(at: skillFile); try? "the person's own skill".write(to: skillFile, atomically: false, encoding: .utf8) }
+        check("undoing an install never removes a SKILL.md replaced after the check",
+              u1??.contains("replaced") == true && text() == "the person's own skill" && noLeftovers(folder) && noLeftovers(skillsDir.path))
+        reset()
+        let u2 = undo { try? (SkillText.markdown + "edited").write(to: skillFile, atomically: false, encoding: .utf8) }
+        check("…nor one edited in place after the check",
+              u2??.contains("edited") == true && text() == SkillText.markdown + "edited" && noLeftovers(folder) && noLeftovers(skillsDir.path))
+        reset()
+        let moved7 = skillsDir.appendingPathComponent("moved-away")
+        let u3 = undo {
+            try? fm.moveItem(atPath: folder, toPath: moved7.path)
+            try? fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
+            try? "a new folder's skill".write(to: skillFile, atomically: false, encoding: .utf8)
+        }
+        check("…nor a folder replaced after the check (and the moved original is untouched too)",
+              u3??.contains("isn't the folder") == true && text() == "a new folder's skill"
+              && text(moved7.appendingPathComponent("SKILL.md")) == SkillText.markdown && noLeftovers(skillsDir.path))
+        try? fm.removeItem(at: moved7); reset()
+        let extra7 = URL(fileURLWithPath: folder).appendingPathComponent("notes.md")
+        let u4 = undo { try? "mine".write(to: extra7, atomically: true, encoding: .utf8) }
+        check("…nor a folder that gained a file after the check: the file and SKILL.md both stay",
+              u4??.contains("holds files") == true && text(extra7) == "mine" && text() == SkillText.markdown
+              && noLeftovers(folder) && noLeftovers(skillsDir.path))
+        reset()
+        let u5 = undo {}
+        check("an unchanged installed folder is removed by the undo, and its record forgotten",
+              u5 == .some(nil) && !fm.fileExists(atPath: folder) && !recorded() && noLeftovers(skillsDir.path))
+        reset()
+
+        // 7c. Claude Code through its command line (a fake): registration is replaced only after the old one is removed,
+        // restored if the new one can't be added, and Disconnect touches the skill only once the server is really gone.
+        final class FakeClaude {
+            let config: URL
+            var failRemove = false, failAdd = false, failRestore = false, installed = true
+            var calls: [String] = []
+            init(_ config: URL) { self.config = config }
+            var entry: [String: Any]? {
+                get {
+                    let d = (try? Data(contentsOf: config)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                    return (d?["mcpServers"] as? [String: Any])?["mac-cleaner"] as? [String: Any]
+                }
+                set {
+                    var d = (try? Data(contentsOf: config)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                    var servers = d["mcpServers"] as? [String: Any] ?? [:]
+                    servers["mac-cleaner"] = newValue
+                    d["mcpServers"] = servers
+                    try? JSONSerialization.data(withJSONObject: d).write(to: config)
+                }
+            }
+            func run(_ args: [String]) -> (status: Int32, output: String?)? {
+                guard installed else { return nil }
+                calls.append(args.prefix(2).joined(separator: " "))
+                switch args[1] {
+                case "remove": if failRemove { return (1, "remove refused") }; entry = nil
+                case "add": if failAdd { return (1, "add refused") }; entry = ["type": "stdio", "command": args[args.count - 2], "args": [args[args.count - 1]]]
+                case "add-json":
+                    if failRestore { return (1, "restore refused") }
+                    entry = (try? JSONSerialization.jsonObject(with: Data(args[args.count - 1].utf8))) as? [String: Any]
+                default: return (2, "unknown")
+                }
+                return (0, "")
+            }
+        }
+        let ccDir = base.appendingPathComponent("claude")
+        let ccConfig = ccDir.appendingPathComponent("claude.json"), ccSkills = ccDir.appendingPathComponent("skills")
+        try? fm.createDirectory(at: ccSkills, withIntermediateDirectories: true)
+        let cc = AIClient(id: "selftest-claude", name: "SelfTestClaude", detail: "", kind: .claudeCode(config: ccConfig.path),
+                          skillsDir: ccSkills.path, presence: ccDir.path)
+        let fake = FakeClaude(ccConfig)
+        let ccModel = IntegrationsModel(clients: [cc], skills: skills, claude: { fake.run($0) })
+        let ccFolder = InstalledSkills.folderPath(in: ccSkills.path)
+        let older: [String: Any] = ["type": "stdio", "command": "/old/Mac Cleaner", "args": ["--mcp"]]
+        func ccMessage(_ connect: Bool) -> (text: String, isError: Bool)? {
+            if connect { ccModel.connect(cc) } else { ccModel.disconnect(cc) }
+            return ccModel.message
+        }
+        func entryIs(_ e: [String: Any]?) -> Bool { (fake.entry as NSDictionary?) == (e as NSDictionary?) }
+        func ccReset() { try? fm.removeItem(atPath: ccFolder); skills.forget(ccFolder); try? fm.removeItem(at: ccConfig) }
+
+        fake.entry = older; fake.failAdd = true
+        let k1 = ccMessage(true)
+        check("a Claude Code registration that can't be added restores the previous one, says so, and undoes the skill",
+              k1?.isError == true && k1?.text.contains("previous Mac Cleaner registration was restored") == true
+              && entryIs(older) && !fm.fileExists(atPath: ccFolder) && fake.calls == ["mcp remove", "mcp add", "mcp add-json"])
+        ccReset(); fake.calls = []
+        fake.entry = older; fake.failRestore = true
+        let k2 = ccMessage(true)
+        check("…and says truthfully when the previous one couldn't be restored either",
+              k2?.isError == true && k2?.text.contains("removed and couldn't be restored") == true && fake.entry == nil)
+        ccReset(); fake.calls = []; fake.failAdd = false; fake.failRestore = false
+        fake.entry = older; fake.failRemove = true
+        let k3 = ccMessage(true)
+        check("a previous registration that can't be removed is left as it was, and nothing is added",
+              k3?.isError == true && k3?.text.contains("left as it was") == true && entryIs(older) && fake.calls == ["mcp remove"]
+              && !fm.fileExists(atPath: ccFolder))
+        ccReset(); fake.calls = []; fake.failRemove = false
+        let k4 = ccMessage(true)
+        let registered: [String: Any] = ["type": "stdio", "command": SkillText.serverCommand, "args": ["--mcp"]]
+        check("Connect registers through the command line and installs the skill",
+              k4?.isError == false && entryIs(registered) && fake.calls == ["mcp add"] && fm.fileExists(atPath: ccFolder))
+        fake.calls = []
+        let k5 = ccMessage(true)
+        check("…and changes nothing when it is already registered as needed", k5?.isError == false && fake.calls.isEmpty && entryIs(registered))
+        fake.failRemove = true
+        let k6 = ccMessage(false)
+        check("a Disconnect whose remove fails reports that the server is still registered, and keeps the skill",
+              k6?.isError == true && k6?.text.contains("still registered") == true && entryIs(registered)
+              && text(URL(fileURLWithPath: ccFolder).appendingPathComponent("SKILL.md")) == SkillText.markdown)
+        fake.failRemove = false
+        let k7 = ccMessage(false)
+        check("…and once the remove works, the server is gone and the skill moved to the Trash",
+              k7?.isError == false && fake.entry == nil && k7?.text.contains("moved to the Trash") == true && !fm.fileExists(atPath: ccFolder))
+        ccReset(); fake.installed = false; fake.calls = []
+        let k8 = ccMessage(true)
+        check("without the command line, Connect writes the registration into the config file",
+              k8?.isError == false && entryIs(registered) && fake.calls.isEmpty)
+        ccReset()
+
+        // 8. Save skill folder (a place the person picked): never overwrites, never recorded, so never removed.
+        let saveDir = base.appendingPathComponent("saved")
+        try? fm.createDirectory(at: saveDir, withIntermediateDirectories: true)
+        let saved = try? InstalledSkills.saveCopy(in: saveDir.path)
+        let savedFile = saved.map { URL(fileURLWithPath: $0).appendingPathComponent("SKILL.md") }
+        if let savedFile { try? "edited".write(to: savedFile, atomically: false, encoding: .utf8) }
+        let again: Bool = (try? InstalledSkills.saveCopy(in: saveDir.path)) == nil
+        let savedState: Bool = saved.map { if case .notOwned = skills.state(at: $0) { return true }; return false } ?? false
+        check("Save skill folder never overwrites an existing folder, and its copy is never recorded as Mac Cleaner's",
+              saved != nil && again && savedFile.flatMap { text($0) } == "edited" && savedState)
+        try? fm.removeItem(at: base)
+    }
+
     static func uninstallAndAlerts(dir: URL, runID: String, savedProtected: [String]) {
         print("Uninstall and Remove alerts: scan identity → review / alert → executor; the password step checks identity (M01-04b-3b)")
         let fm = FileManager.default
@@ -2117,6 +2394,8 @@ extension SelfTest {
         check("an uninstall moves the app and its reviewed leftovers through the executor",
               r1.appRemoved && r1.errors.isEmpty && r1.bytes == 20 && ![fooURL, fooSupport, fooPrefs].contains { fm.fileExists(atPath: $0.path) }
               && stepCalls.count == 0)
+        check("an app moved to the Trash by the executor is reported and recorded in History as uninstalled (#41)",
+              r1.appInTrash && r1.historyTitle(appName: "Foo") == "Foo Uninstalled")
         check("each is logged as the uninstall and Put Back restores them",
               log(fooURL).first?.source == "Uninstall Foo" && putBack(fooURL) && putBack(fooSupport) && putBack(fooPrefs))
 
@@ -2298,9 +2577,7 @@ extension SelfTest {
         // Only verified moves count: never inferred from the original being gone.
         let asYou: AppEngine.AdminStepRunner = { items, uid in
             let script = AdminStep.script(items, uid: uid, allowed: { _ in true }, parentOwner: uid, chown: "/usr/bin/true")
-            let out = Shell.run("/bin/sh", ["-c", script]).output
-            guard let st = AdminStep.parseStaging(out), AdminStep.isTrustedStaging(st, uid: uid) else { return .failed("no staging") }
-            return .ok(staging: st, report: .parse(out))
+            return AdminStep.staging(fromOutput: Shell.run("/bin/sh", ["-c", script]).output, items: items, uid: uid)
         }
         let vOK = plain(sys.appendingPathComponent("v-ok.plist"), "ok")
         let vGone = plain(sys.appendingPathComponent("v-gone.plist"), "gone")
@@ -2323,56 +2600,141 @@ extension SelfTest {
               AdminStep.Report().notMovedReason(0)?.contains("can't confirm") == true
               && AdminStep.Report.parse("MACCLEANER-MOVED 0\nMACCLEANER-MISSING 1").notMovedReason(0) == nil
               && AdminStep.Report.parse("MACCLEANER-MOVED 0\nMACCLEANER-MISSING 1").notMovedReason(1) != nil)
-        // Moved out of place, but the staging folder can't reach the Trash: reported as staged, not as in the Trash.
+        // The staging folder goes to the Trash only as the app-owned folder the step made (AppOwnedTrash.trashStaging),
+        // proven by the step's own result and holding exactly the items reported moved. Real staging folders, made by the
+        // root script run as you; anything unexpected leaves the folder untouched and says where it is.
+        func stagedRun(_ name: String) -> (staging: AdminStep.Staging, item: URL)? {
+            let u = plain(sys.appendingPathComponent("\(name)-\(runID).plist"), name)
+            guard case .ok(let s) = asYou([leftover(u, admin: true)], getuid()) else { return nil }
+            return (s, u)
+        }
+        func stagedItem(_ s: AdminStep.Staging) -> URL { s.url.appendingPathComponent(s.expected.keys.first ?? "none") }
+        func drop(_ s: AdminStep.Staging?) {
+            guard let s else { return }
+            chflags(s.folder.path, 0); chmod(s.folder.path, 0o700)
+            try? fm.removeItem(at: s.url)
+        }
+        let foreign = ["/private/var/tmp/MacCleaner-uninstall", base.path, base.appendingPathComponent("MacCleaner-uninstall.AbCdEf1234").path]
+        check("only the step's own result is proof: a staging path that isn't exactly what mktemp makes is refused",
+              foreign.allSatisfy { p in if case .failed = AdminStep.staging(fromOutput: "MACCLEANER-MOVED 0\n\(p)", items: [], uid: getuid()) { return true }; return false })
+        if let loose = { () -> String? in
+            var t = Array((AdminStep.stagingTemplate).utf8CString)
+            return mkdtemp(&t).map { String(cString: $0) }
+        }() {
+            chmod(loose, 0o755)
+            let r = AdminStep.staging(fromOutput: loose, items: [], uid: getuid())
+            check("…and so is a staging folder others can open", { if case .failed = r { return true }; return false }())
+            rmdir(loose)
+        }
+        check("the app-owned protection allows only the one folder, only as a Trash move",
+              AppOwnedTrash.OneFolder(path: "/private/var/tmp/MacCleaner-uninstall.AbCdEf1234", rules: { _ in nil })
+                .refusal(path: "/private/var/tmp/MacCleaner-uninstall.AbCdEf1234", disposition: .trash) == nil
+              && AppOwnedTrash.OneFolder(path: "/private/var/tmp/MacCleaner-uninstall.AbCdEf1234", rules: { _ in nil })
+                .refusal(path: "/private/var/tmp", disposition: .trash) != nil
+              && AppOwnedTrash.OneFolder(path: "/private/var/tmp/MacCleaner-uninstall.AbCdEf1234", rules: { _ in nil })
+                .refusal(path: "/private/var/tmp/MacCleaner-uninstall.AbCdEf1234", disposition: .permanentDelete) != nil)
+
+        // A clean run: the folder reaches the Trash, logged as not restorable from Mac Cleaner (Finder only).
+        if let (s, item) = stagedRun("st-ok") {
+            let r = AppOwnedTrash.trashStaging(s, source: "Self-test staging")
+            let entry = TrashLog.shared.present().first { $0.original == s.folder.path }
+            check("a staging folder holding exactly the moved items goes to the Trash through the executor",
+                  r.inTrash && r.error == nil && !fm.fileExists(atPath: s.folder.path) && !fm.fileExists(atPath: item.path)
+                  && SelfTest.inIsolatedTrash(entry?.trashed))
+            check("it is logged as not restorable item by item: Put Back points to Finder and moves nothing",
+                  entry?.restorable == false && entry?.source == "Self-test staging"
+                  && entry.map { TrashOps.restore($0)?.contains("Finder") == true && !fm.fileExists(atPath: s.folder.path) } == true)
+        }
+        // Moved, but its Trash-list record can't be written: still in the Trash (never moved back), and the report says
+        // where it is and how to restore it from Finder.
+        if let (s, _) = stagedRun("st-unrecorded") {
+            let saved = AppCleanup.recordMove
+            AppCleanup.recordMove = { _, _, _, _, _ in false }
+            let before = SelfTest.isolatedMoves.count
+            let r = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            AppCleanup.recordMove = saved
+            let dest = SelfTest.isolatedMoves.count > before ? SelfTest.isolatedMoves.all.last : nil
+            check("a staging folder moved to the Trash whose record couldn't be written stays in the Trash and is reported with its path and Finder recovery",
+                  r.inTrash && r.error?.contains("couldn't be added to Mac Cleaner's Trash list") == true && r.error?.contains("Finder") == true
+                  && !fm.fileExists(atPath: s.folder.path) && !TrashLog.shared.present().contains { $0.original == s.folder.path }
+                  && dest.map { fm.fileExists(atPath: $0 + "/" + (s.expected.keys.first ?? "?")) && r.error?.contains($0) == true } == true)
+            if let dest { try? fm.removeItem(atPath: (dest as NSString).deletingLastPathComponent) }
+        }
+        // Unexpected, modified, replaced, linked or missing contents; a replaced or opened folder: left untouched.
+        func refused(_ name: String, _ change: (AdminStep.Staging) -> Void, _ expect: String) -> Bool {
+            guard let (s, _) = stagedRun(name) else { return false }
+            defer { drop(s) }
+            change(s)
+            let before = (try? fm.contentsOfDirectory(atPath: s.folder.path))?.sorted()
+            let r = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            return !r.inTrash && r.error?.contains(expect) == true && r.error?.contains(s.folder.path) == true
+                && fm.fileExists(atPath: s.folder.path) && (try? fm.contentsOfDirectory(atPath: s.folder.path))?.sorted() == before
+        }
+        check("a staging folder with an unexpected entry is left untouched, and the report says where it is",
+              refused("st-extra", { try? Data("x".utf8).write(to: $0.url.appendingPathComponent("unexpected")) }, "something other than"))
+        check("…also one hidden under the executor's own staging prefix",
+              refused("st-hidden", { try? fm.createDirectory(at: $0.url.appendingPathComponent(".maccleaner-rm-planted"), withIntermediateDirectories: false) }, "something other than"))
+        check("…a moved item that was modified after the move",
+              refused("st-modified", { try? Data("written later, longer".utf8).write(to: stagedItem($0)) }, "isn't the item"))
+        check("…a moved item that was replaced",
+              refused("st-replaced", { try? fm.removeItem(at: stagedItem($0)); try? Data("st-replaced".utf8).write(to: stagedItem($0)) }, "isn't the item"))
+        check("…a moved item replaced by a symlink",
+              refused("st-link", { try? fm.removeItem(at: stagedItem($0)); try? fm.createSymbolicLink(atPath: stagedItem($0).path, withDestinationPath: "/etc") }, "isn't the item"))
+        check("…a moved item that is missing",
+              refused("st-missing", { try? fm.removeItem(at: stagedItem($0)) }, "weren't found"))
+        check("…a staging folder others can open",
+              refused("st-mode", { chmod($0.folder.path, 0o755) }, "no longer the private folder"))
+        if let (s, item) = stagedRun("st-swapped") {
+            // The proof names the folder the step made; a new folder with the same name and contents isn't it.
+            let moved = s.url.deletingLastPathComponent().appendingPathComponent("moved-\(runID)")
+            try? fm.moveItem(at: s.url, to: moved)
+            try? fm.createDirectory(at: s.url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try? fm.copyItem(at: moved.appendingPathComponent(s.expected.keys.first!), to: stagedItem(s))
+            let r = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            check("a staging folder replaced after the step (same name, copied contents) is refused and left alone",
+                  !r.inTrash && r.error?.contains("replaced after the password step") == true && fm.fileExists(atPath: s.folder.path))
+            try? fm.removeItem(at: s.url); try? fm.removeItem(at: moved); _ = item
+        }
+        // The staging folder can't reach the Trash: the moved items are reported as staged, not as in the Trash.
         let vStaged = plain(sys.appendingPathComponent("v-staged.plist"), "staged")
-        let vItem = [leftover(vStaged, admin: true)]
         AppCleanup.trashMover = { url in
-            if url.path.contains("/MacCleaner-uninstall.") { throw CocoaError(.fileWriteUnknown) }
+            if url.path.contains("MacCleaner-uninstall.") { throw CocoaError(.fileWriteUnknown) }
             return try isolatedMover(url)
         }
-        let stagedOnly = AppEngine.removeSystemItems(vItem, adminStep: asYou)
+        var refusedStaging: AdminStep.Staging?
+        let stagedOnly = AppEngine.removeSystemItems([leftover(vStaged, admin: true)], adminStep: { items, uid in
+            let r = asYou(items, uid)
+            if case .ok(let s) = r { refusedStaging = s }
+            return r
+        })
         AppCleanup.trashMover = isolatedMover
         check("items moved into staging whose folder can't reach the Trash are reported as staged, not in the Trash",
               stagedOnly.removed == [vStaged] && !stagedOnly.inTrash
-              && stagedOnly.errors.contains { $0.contains("couldn't be sent to the Trash") })
-        if let st = stagedOnly.errors.first.flatMap({ e -> URL? in
-            guard let r = e.range(of: "MacCleaner-uninstall.") else { return nil }
-            let tail = e[r.lowerBound...].prefix { $0 != "," && $0 != " " }
-            return URL(fileURLWithPath: AdminStep.stagingParent + "/" + tail)
-        }) { try? fm.removeItem(at: st) }
-        // The staging folder itself: a listing or removal failure is reported, never treated as done (injected operations).
-        struct Refused: Error {}
-        let stDir = base.appendingPathComponent("staging-check-\(runID)")
-        try? fm.createDirectory(at: stDir, withIntermediateDirectories: true)
-        let movedOne = AdminStep.Report.parse("MACCLEANER-MOVED 0"), movedNone = AdminStep.Report()
-        let unlistable = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
-                                                      list: { _ in throw Refused() }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
-        check("a staging folder that can't be listed is not reported as in the Trash, and stays",
-              !unlistable.inTrash && unlistable.error?.contains("couldn't be checked") == true && fm.fileExists(atPath: stDir.path))
-        let unremovable = AppEngine.sendStagingToTrash(stDir, movedNone, source: "Self-test",
-                                                       list: { _ in [] }, removeEmpty: { _ in throw Refused() }, moveToTrash: { _, _ in nil })
-        check("an empty staging folder that can't be removed is reported, not cleaned up silently",
-              unremovable.error?.contains("couldn't be removed") == true && fm.fileExists(atPath: stDir.path))
-        let movedButEmpty = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
-                                                         list: { _ in [] }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
-        check("verified items missing from the staging folder are never reported as in the Trash",
-              !movedButEmpty.inTrash && movedButEmpty.error?.contains("weren't found") == true)
-        let trashRefused = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
-                                                        list: { _ in ["0-item"] }, removeEmpty: { _ in }, moveToTrash: { _, _ in "refused" })
-        let trashOK = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test",
-                                                   list: { _ in ["0-item"] }, removeEmpty: { _ in }, moveToTrash: { _, _ in nil })
-        check("verified items stay 'not in the Trash' until their staging folder actually moved there",
-              !trashRefused.inTrash && trashRefused.error?.contains("couldn't be sent to the Trash") == true
-              && trashOK.inTrash && trashOK.error == nil)
-        // A really unreadable staging folder, with the default (real) operations.
-        try? Data("x".utf8).write(to: stDir.appendingPathComponent("0-item"))
-        chmod(stDir.path, 0)
-        let unreadable = AppEngine.sendStagingToTrash(stDir, movedOne, source: "Self-test")
-        chmod(stDir.path, 0o755)
-        check("a staging folder the system won't list is reported and left alone",
-              !unreadable.inTrash && unreadable.error?.contains("couldn't be checked") == true
-              && fm.fileExists(atPath: stDir.appendingPathComponent("0-item").path))
-        try? fm.removeItem(at: stDir)
+              && stagedOnly.errors.contains { $0.contains("couldn't be sent to the Trash") && $0.contains(refusedStaging?.folder.path ?? "?") }
+              && refusedStaging.map { fm.fileExists(atPath: stagedItem($0).path) } == true)
+        drop(refusedStaging)
+        // A staging folder the system won't list, and an empty one (nothing moved) that can or can't be removed.
+        if let (s, _) = stagedRun("st-unreadable") {
+            chmod(s.folder.path, 0)
+            let r = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            chmod(s.folder.path, 0o700)
+            check("a staging folder the system won't list is reported and left alone",
+                  !r.inTrash && r.error?.contains("couldn't be checked") == true && fm.fileExists(atPath: stagedItem(s).path))
+            drop(s)
+        }
+        let gone = plain(sys.appendingPathComponent("st-gone-\(runID).plist"), "gone")
+        let goneItem = leftover(gone, admin: true)
+        try? fm.removeItem(at: gone)
+        if case .ok(let s) = asYou([goneItem], getuid()) {
+            chflags(s.folder.path, UInt32(UF_IMMUTABLE))
+            let stuck = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            chflags(s.folder.path, 0)
+            check("an empty staging folder that can't be removed is reported, not cleaned up silently",
+                  stuck.error?.contains("couldn't be removed") == true && fm.fileExists(atPath: s.folder.path))
+            let removed = AppOwnedTrash.trashStaging(s, source: "Self-test")
+            check("an empty staging folder (nothing moved) is removed", removed.inTrash && removed.error == nil && !fm.fileExists(atPath: s.folder.path))
+            drop(s)
+        }
 
         // The same rule in an uninstall: a leftover that vanished isn't counted, and the note says what happened.
         let fooSys = plain(sys.appendingPathComponent("com.example.foo-gone-\(runID).plist"), "daemon")
@@ -2387,6 +2749,43 @@ extension SelfTest {
               rA.appRemoved && rA.bytes == 15 && rA.adminNote.contains("No system item was moved")
               && rA.errors.contains { $0.contains("gone before the password step") })
         _ = putBack(fooURL); _ = putBack(fooSupport)
+
+        // #41: History and the result say "in the Trash" only for an app that got there. The bundle's Trash move is
+        // refused for permission, so the password step (run as you) moves it into staging.
+        func viaPasswordStep(stagingReachesTrash: Bool) -> (AppEngine.UninstallResult, AdminStep.Staging?) {
+            let a = app("Foo", fooURL, [leftover(fooSupport)])
+            let picked = MainActor.assumeIsolated { confirmed(a) }
+            AppCleanup.trashMover = { url in
+                if url.path.hasSuffix("/Foo-\(runID).app") { throw CocoaError(.fileWriteNoPermission) }
+                if !stagingReachesTrash && url.path.contains("MacCleaner-uninstall.") { throw CocoaError(.fileWriteUnknown) }
+                return try isolatedMover(url)
+            }
+            var staging: AdminStep.Staging?
+            let r = AppEngine.uninstall(a, picked: picked?.0 ?? [], trash: picked?.1, adminStep: { items, uid in
+                let r = asYou(items, uid)
+                if case .ok(let s) = r { staging = s }
+                return r
+            }, adminAllowed: allowAll)
+            AppCleanup.trashMover = isolatedMover
+            return (r, staging)
+        }
+        let (r41, st41) = viaPasswordStep(stagingReachesTrash: false)
+        check("an app left in the password step's staging folder isn't reported or recorded as in the Trash (#41)",
+              r41.appRemoved && !r41.appInTrash && r41.historyTitle(appName: "Foo") == "Foo leftovers"
+              && r41.adminNote.contains(st41?.folder.path ?? "?") && r41.adminNote.contains("not yet the Trash")
+              && !fm.fileExists(atPath: fooURL.path) && st41.map { fm.fileExists(atPath: $0.url.appendingPathComponent("0-Foo-\(runID).app").path) } == true)
+        if let st41 { try? fm.moveItem(at: st41.url.appendingPathComponent("0-Foo-\(runID).app"), to: fooURL); try? fm.removeItem(at: st41.url) }
+        _ = putBack(fooSupport)
+        let (r41b, st41b) = viaPasswordStep(stagingReachesTrash: true)
+        let st41bEntry = TrashLog.shared.present().first { $0.original == st41b?.folder.path }
+        check("…and is, once its staging folder reached the Trash",
+              r41b.appRemoved && r41b.appInTrash && r41b.historyTitle(appName: "Foo") == "Foo Uninstalled"
+              && st41bEntry?.restorable == false && SelfTest.inIsolatedTrash(st41bEntry?.trashed))
+        if let e = st41bEntry { try? fm.moveItem(atPath: e.trashed + "/0-Foo-\(runID).app", toPath: fooURL.path) }
+        _ = putBack(fooSupport)
+        check("a cancelled password step records only the leftovers that reached the Trash, or nothing",
+              AppEngine.UninstallResult(appRemoved: false, appInTrash: false, bytes: 0).historyTitle(appName: "Foo") == nil
+              && AppEngine.UninstallResult(appRemoved: false, appInTrash: false, bytes: 5).historyTitle(appName: "Foo") == "Foo leftovers")
 
         // 10. MCP uninstall_app, on a fake app in this home folder only.
         let mcpApp = folder(SafetyGuard.home.appendingPathComponent("Applications/SelfTestUninstall\(runID).app/Contents"), "x")
@@ -2570,7 +2969,7 @@ extension SelfTest {
         return path.hasPrefix(isolatedTrash.path + "/") || path.hasPrefix(AppCleanup.physicalPath(isolatedTrash) + "/")
     }
 
-    /// Points every Trash move (the executor's and the legacy AppEngine.trash) at `dir` instead of the real Trash.
+    /// Points every Trash move (every cleanup executor's) at `dir` instead of the real Trash.
     static func isolateTrash(in dir: URL) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         isolatedTrash = dir

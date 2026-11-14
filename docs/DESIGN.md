@@ -71,7 +71,7 @@ For every item it shows:
 
 It also adds Copy List and Reveal. Deleting anything marked Review or In use needs an explicit checkbox, and Cancel is the keyboard default.
 
-The engines still re-check every guard at execution time (`Cleaner.run`, `AppEngine.trash`, `ProjectEngine.clean`, `SDKEngine.remove`, `SystemDataEngine.remove`). The sheet informs the decision; it is not the only check.
+The engines still re-check every guard at execution time (`Cleaner.run`, the cleanup executor's Trash moves, `ProjectEngine.clean`, `SDKEngine.remove`, `SystemDataEngine.remove`). The sheet informs the decision; it is not the only check.
 
 **Honest history.**
 - `CleanupRecord` has `outcome` (`deleted` / `trashed`) and `measuredFreeChange`.

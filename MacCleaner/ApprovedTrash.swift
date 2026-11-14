@@ -8,15 +8,16 @@ import MacCleanerPlatform
 // plan built from exactly those identities (ReviewConfirmation); the cleanup executor re-checks protection and
 // identity right before each move. Anything changed since review is left alone and reported.
 //
-// Callers not migrated yet still use AppEngine.trash (the legacy path). Remaining legacy callers move here in the
-// next M01-04b pull requests; then AppEngine.trash's bypass is removed.
+// Every Trash move in the app goes through the cleanup executor. The only moves nobody confirms item by item are
+// the two folders Mac Cleaner makes itself (AppOwnedTrash): the uninstall password step's staging folder and an
+// installed usage skill, each approved with its operation's own proof and limited by the ledger to that one folder.
 
 /// One cleanup executor for this process (the app, a `--cli` run or an `--mcp` server each have their own).
 enum AppCleanup {
     /// Moves one item to the Trash and returns where it went: the system Trash (FileManager.trashItem) in the app,
-    /// the CLI and the MCP server. Every Trash move goes through here (the executor's file system and the legacy
-    /// AppEngine.trash). Only the self-test replaces it, at its start, with a folder in its throwaway home, so tests
-    /// never touch the real Trash (trashItem ignores CFFIXED_USER_HOME).
+    /// the CLI and the MCP server. Every Trash move goes through here (the executors' file system). Only the self-test
+    /// replaces it, at its start, with a folder in its throwaway home, so tests never touch the real Trash (trashItem
+    /// ignores CFFIXED_USER_HOME).
     nonisolated(unsafe) static var trashMover: LocalFileSystem.TrashMover = LocalFileSystem.systemTrash
 
     static let executor = CleanupExecutor(fileSystem: LocalFileSystem(trashMover: { try AppCleanup.trashMover($0) }),
@@ -57,11 +58,12 @@ enum AppCleanup {
         return entries.isEmpty ? nil : try? CleanupPlan(entries)
     }
 
-    /// Records one Trash move for Put Back; true when it reached the disk. Replaced only by the self-test (to make
-    /// the write fail).
+    /// Records one Trash move for Put Back; true when it reached the disk. `restorable: false` (a staging folder of
+    /// system items) is listed but put back by dragging it out of the Trash in Finder. Replaced only by the self-test
+    /// (to make the write fail).
     nonisolated(unsafe) static var recordMove: @Sendable (_ original: String, _ trashed: String, _ size: Int64,
-                                                          _ source: String) -> Bool = { original, trashed, size, source in
-        TrashLog.shared.record(original: original, trashed: trashed, size: size, source: source, restorable: true)
+                                                          _ source: String, _ restorable: Bool) -> Bool = { original, trashed, size, source, restorable in
+        TrashLog.shared.record(original: original, trashed: trashed, size: size, source: source, restorable: restorable)
     }
     /// Test-only: runs after a move was recorded and before the next item is touched (the self-test interrupts or
     /// kills the process here). nil in the app.
@@ -72,10 +74,12 @@ enum AppCleanup {
     /// Moves an approved Trash plan's items to the Trash. Each move is recorded in the Trash log (for Put Back) as
     /// soon as it happens, before the executor touches the next item, so an interruption or crash never loses the
     /// record of a move that was made. If a record can't be written, the run stops there and says so. `precondition`
-    /// can refuse single items right before they move.
+    /// can refuse single items right before they move. `executor` is the one that issued the approval (AppOwnedTrash
+    /// passes its own); `restorable` is what the Trash log records.
     static func moveToTrash(_ decision: TrashApproval, source: String,
                             precondition: CleanupExecutor.Precondition? = nil,
-                            stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil) async -> TrashRun {
+                            stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil,
+                            executor: CleanupExecutor = AppCleanup.executor, restorable: Bool = true) async -> TrashRun {
         let approved: ApprovedTrash
         switch decision {
         case .approved(let a): approved = a
@@ -91,7 +95,7 @@ enum AppCleanup {
                 approved.plan, approval: approved.approval, precondition: precondition,
                 onItemFinished: { o in
                     guard case .file(let item) = o.target, case .trashed(_, let recovery) = o.result else { return stopAfter?(o) }
-                    guard record(item.path, recovery, sizes[o.candidateID] ?? 0, source) else {
+                    guard record(item.path, recovery, sizes[o.candidateID] ?? 0, source, restorable) else {
                         unrecorded.insert(o.candidateID)
                         return unrecordedStop
                     }
@@ -237,8 +241,8 @@ enum AppCleanup {
     }
 }
 
-/// A plan built from what the review sheet showed, and the approval the person gave for exactly that plan.
-/// Made only by ReviewConfirmation.
+/// A plan and the approval issued for exactly that plan: made where an approval is issued (ReviewConfirmation,
+/// ToolConfirmation, AlertConfirmation, and AppOwnedTrash for the folders Mac Cleaner makes itself).
 struct ApprovedTrash: Sendable {
     let plan: CleanupPlan
     let approval: CleanupApproval

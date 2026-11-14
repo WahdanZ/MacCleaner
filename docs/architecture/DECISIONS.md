@@ -104,4 +104,31 @@ those snapshots. The sheet's confirm button calls `ReviewConfirmation.confirm`, 
 an approval (`.userInApp`); the plan is approved as built, never rebuilt or extended. `AppCleanup.moveToTrash` runs it
 through the executor and records each move in the Trash log as `AppEngine.trash` does. `scripts/check-approval-sites.sh`
 (CI) fails on any other approval site; it only finds call sites, so the self-test checks the confirmation behaviour.
-**Consequence:** until M01-04b-3 the legacy `AppEngine.trash` stays for unmigrated callers; it is removed then.
+**Consequence:** until M01-04b-3 the legacy `AppEngine.trash` stays for unmigrated callers; it is removed then. (Removed in M01-04b-3c: see D-017.)
+
+### D-017 The folders Mac Cleaner makes itself go to the Trash as app-owned, with their operation's proof (2026-11-13)
+**Decision:** the last two Trash moves nobody confirms item by item — the uninstall password step's staging folder and
+an installed usage skill — go through the cleanup executor too, approved as `.appOwned(kind)` in `AppOwnedTrash`. That
+is not a general bypass: the ledger accepts an app-owned approval only for one `.trash` of exactly one folder in the
+kind's module (`admin-staging`, `installed-skill`); each move gets its own executor whose protection allows only that
+folder; and each needs a proof value only its operation can make (fileprivate initializers): `AdminStep.Staging` (the
+`mktemp` folder checked right after the script, its identity, your uid, and the staging names and reviewed identities of
+the items the script reported MOVED) and `InstalledSkills.Verified` (an ownership record — folder and SKILL.md
+identities, SHA-256 — written only after Mac Cleaner created both, and still matching). The folder's exact contents are
+checked before approving and again as the executor's precondition, after which the executor checks its identity.
+Staging is logged `restorable: false` (Put Back points to Finder). Connect never overwrites a skill folder that isn't
+provably Mac Cleaner's (an unrecorded one, even with matching text, an edited one, one with other files) and never
+rewrites one (an older version's skill is kept as it is), installs the skill before changing the config and removes it
+again if the config can't be changed — only after moving the folder and its SKILL.md to private names and proving what
+was moved is the recorded folder, file and content (anything else is moved back). Claude Code's registration is replaced
+only after the old one was removed, and restored if the new one can't be added; Disconnect touches the skill only once
+the server is really gone, still disconnects the server when it keeps the skill, and says so; Save skill folder never overwrites and is never recorded. `AppEngine.trash`
+is removed. `scripts/check-approval-sites.sh` keeps `.appOwned`, executor creation, these moves and their proofs in
+their files. History records an uninstall as moved to the Trash only for what reached it (#41). A move that reached the
+Trash but whose Trash-list record couldn't be written is never undone: it is reported as moved but unrecorded, with its
+Trash path and how to restore it from Finder (and a skill's ownership record is dropped, since it left its place).
+**Not guaranteed (open, not resolved):** (1) another process running as you could change the staging folder (0700,
+yours after the step) or the skill folder in the instant between the precondition and the move; the executor still
+checks the folder's identity, not every nested file. (2) The staging check covers the folder's direct entries, not the
+contents of a moved item such as a bundle. Taking the staging folder's trust check and identity from one stat only
+ties the identity to the folder that passed the check; it closes neither of these.

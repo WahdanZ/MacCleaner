@@ -59,7 +59,9 @@ struct AIClient: Identifiable {
     enum Kind {
         case json(file: String, key: String, vscodeStyle: Bool)
         case codexToml(file: String)
-        case claudeCode
+        /// Claude Code, registered through its `claude` command line when installed (user scope, kept in `config`,
+        /// ~/.claude.json), otherwise by editing `config`.
+        case claudeCode(config: String)
     }
 
     let id: String
@@ -79,9 +81,24 @@ final class IntegrationsModel {
 
     static let home = SafetyGuard.home.path
 
-    let clients: [AIClient] = [
+    let clients: [AIClient]
+    /// The skill folders Mac Cleaner installed (its ownership records). Passed in: the self-test uses memory settings.
+    let skills: InstalledSkills
+    /// Runs the `claude` command line with these arguments: its exit status and output, or nil when it isn't
+    /// installed. Passed in: the self-test uses a fake.
+    typealias ClaudeRunner = ([String]) -> (status: Int32, output: String?)?
+    let claude: ClaudeRunner
+
+    init(clients: [AIClient]? = nil, skills: InstalledSkills = InstalledSkills(store: UserDefaults.standard),
+         claude: ClaudeRunner? = nil) {
+        self.clients = clients ?? Self.knownClients
+        self.skills = skills
+        self.claude = claude ?? { args in Self.claudeCLI().map { Shell.run($0, args, timeout: 60) } }
+    }
+
+    static let knownClients: [AIClient] = [
         AIClient(id: "claude-code", name: "Claude Code", detail: "user scope · ~/.claude.json + skill",
-                 kind: .claudeCode, skillsDir: home + "/.claude/skills", presence: home + "/.claude"),
+                 kind: .claudeCode(config: home + "/.claude.json"), skillsDir: home + "/.claude/skills", presence: home + "/.claude"),
         AIClient(id: "claude-desktop", name: "Claude Desktop", detail: "claude_desktop_config.json · restart Claude after",
                  kind: .json(file: home + "/Library/Application Support/Claude/claude_desktop_config.json",
                              key: "mcpServers", vscodeStyle: false),
@@ -116,54 +133,145 @@ final class IntegrationsModel {
             return (d[key] as? [String: Any])?["mac-cleaner"] != nil
         case .codexToml(let file):
             return (try? String(contentsOfFile: file, encoding: .utf8))?.contains("[mcp_servers.mac-cleaner]") ?? false
-        case .claudeCode:
-            guard let d = readJSON(Self.home + "/.claude.json") else { return false }
-            return (d["mcpServers"] as? [String: Any])?["mac-cleaner"] != nil
+        case .claudeCode(let config):
+            return claudeEntry(config) != nil
         }
     }
 
+    /// What Connect does with a client's skill folder, decided before any config changes.
+    private enum SkillStep {
+        case none, install, installed(current: Bool), keep(folder: String, why: String)
+    }
+
+    /// Registers the MCP server with `c` and installs its usage skill. The skill is decided first (an existing folder
+    /// is never written to: one that isn't provably Mac Cleaner's and unchanged, or holds an older version's text, is
+    /// kept as it is), and installed before the config changes: if it can't be, nothing is changed; if the config then
+    /// can't be changed, a skill installed just now is removed again (only if it is still exactly what was installed).
     func connect(_ c: AIClient) {
+        var step = SkillStep.none
+        if let dir = c.skillsDir {
+            let folder = InstalledSkills.folderPath(in: dir)
+            switch skills.state(at: folder) {
+            case .absent: step = .install
+            case .owned(_, let current): step = .installed(current: current)
+            case .notOwned(let why): step = .keep(folder: folder, why: why)
+            }
+        }
+        var installed: (folder: String, record: InstalledSkills.Record)?
         do {
-            switch c.kind {
-            case .json(let file, let key, let vscode):
-                var entry: [String: Any] = ["command": SkillText.serverCommand, "args": ["--mcp"]]
-                if vscode { entry["type"] = "stdio" }
-                try editJSON(file) { d in
-                    var servers = d[key] as? [String: Any] ?? [:]
-                    servers["mac-cleaner"] = entry
-                    d[key] = servers
-                }
-            case .codexToml(let file):
-                var text = (try? String(contentsOfFile: file, encoding: .utf8)) ?? ""
-                text = Self.removeTomlBlock(text)
-                let cmd = SkillText.serverCommand.replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "\"", with: "\\\"")
-                text += (text.isEmpty || text.hasSuffix("\n") ? "" : "\n")
-                    + "\n[mcp_servers.mac-cleaner]\ncommand = \"\(cmd)\"\nargs = [\"--mcp\"]\n"
-                try backup(file)
-                try write(text, to: file)
-            case .claudeCode:
-                if let cli = Self.claudeCLI() {
-                    _ = Shell.run(cli, ["mcp", "remove", "mac-cleaner", "-s", "user"], timeout: 60)
-                    let r = Shell.run(cli, ["mcp", "add", "mac-cleaner", "-s", "user", "--", SkillText.serverCommand, "--mcp"], timeout: 60)
-                    if r.status != 0 { throw NSError(domain: "claude", code: Int(r.status),
-                                                     userInfo: [NSLocalizedDescriptionKey: r.output ?? "claude mcp add failed"]) }
+            if case .install = step { installed = try skills.install(in: c.skillsDir!) }
+        } catch {
+            message = ("\(c.name): the skill couldn't be installed (\(error.localizedDescription)). Nothing was changed.", true)
+            refresh()
+            return
+        }
+        do {
+            try register(c)
+        } catch {
+            var text = "\(c.name): \(error.localizedDescription)"
+            if let installed {
+                if let why = skills.undoInstall(folder: installed.folder, record: installed.record) {
+                    text += " The skill installed in \(Scanner.tilde(URL(fileURLWithPath: installed.folder))) was left there: \(why)."
                 } else {
-                    try editJSON(Self.home + "/.claude.json") { d in
-                        var servers = d["mcpServers"] as? [String: Any] ?? [:]
-                        servers["mac-cleaner"] = ["type": "stdio", "command": SkillText.serverCommand, "args": ["--mcp"]]
-                        d["mcpServers"] = servers
-                    }
+                    text += " The skill installed for it was removed again; nothing was changed."
                 }
             }
-            if let dir = c.skillsDir { try installSkill(in: dir) }
-            message = ("Connected to \(c.name).\(c.skillsDir != nil ? " Skill installed." : "") Restart \(c.name) to load it.", false)
-        } catch {
-            message = ("\(c.name): \(error.localizedDescription)", true)
+            message = (text, true)
+            refresh()
+            return
         }
+        let skillNote: String
+        switch step {
+        case .none: skillNote = ""
+        case .install: skillNote = " Skill installed."
+        case .installed(current: true): skillNote = " Skill already installed."
+        case .installed(current: false): skillNote = " The skill an earlier version installed was kept as it is."
+        case .keep(let folder, let why):
+            skillNote = " The \(SkillText.name) skill folder already in \(Scanner.tilde(URL(fileURLWithPath: folder))) was kept as it is: \(why)."
+        }
+        message = ("Connected to \(c.name).\(skillNote) Restart \(c.name) to load it.", false)
         refresh()
     }
 
+    private func register(_ c: AIClient) throws {
+        switch c.kind {
+        case .json(let file, let key, let vscode):
+            var entry: [String: Any] = ["command": SkillText.serverCommand, "args": ["--mcp"]]
+            if vscode { entry["type"] = "stdio" }
+            try editJSON(file) { d in
+                var servers = d[key] as? [String: Any] ?? [:]
+                servers["mac-cleaner"] = entry
+                d[key] = servers
+            }
+        case .codexToml(let file):
+            var text = (try? String(contentsOfFile: file, encoding: .utf8)) ?? ""
+            text = Self.removeTomlBlock(text)
+            let cmd = SkillText.serverCommand.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            text += (text.isEmpty || text.hasSuffix("\n") ? "" : "\n")
+                + "\n[mcp_servers.mac-cleaner]\ncommand = \"\(cmd)\"\nargs = [\"--mcp\"]\n"
+            try backup(file)
+            try write(text, to: file)
+        case .claudeCode(let config):
+            try registerWithClaude(config)
+        }
+    }
+
+    /// Mac Cleaner's user-scope entry in Claude Code's config, if any.
+    private func claudeEntry(_ config: String) -> [String: Any]? {
+        (readJSON(config)?["mcpServers"] as? [String: Any])?["mac-cleaner"] as? [String: Any]
+    }
+
+    private static func failure(_ text: String) -> NSError {
+        NSError(domain: "claude", code: 1, userInfo: [NSLocalizedDescriptionKey: text])
+    }
+
+    private static func detail(_ r: (status: Int32, output: String?)?) -> String {
+        let out = (r?.output ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.isEmpty ? "exit status \(r?.status ?? -1)" : out
+    }
+
+    /// Registers Mac Cleaner with Claude Code. Nothing changes when it is already registered as needed. A previous
+    /// registration is replaced only after it was removed (a failed remove leaves it as it was), and if the new one
+    /// can't be added, the previous one is added back; the error says what state Claude Code was left in.
+    private func registerWithClaude(_ config: String) throws {
+        let previous = claudeEntry(config)
+        if let previous, previous["command"] as? String == SkillText.serverCommand, previous["args"] as? [String] == ["--mcp"] { return }
+        let add = ["mcp", "add", "mac-cleaner", "-s", "user", "--", SkillText.serverCommand, "--mcp"]
+        if previous != nil {
+            guard let removed = claude(["mcp", "remove", "mac-cleaner", "-s", "user"]) else { return try editClaudeConfig(config) }
+            if claudeEntry(config) != nil {
+                throw Self.failure("claude mcp remove failed (\(Self.detail(removed))); the existing Mac Cleaner registration was left as it was")
+            }
+        }
+        guard let added = claude(add) else { return try editClaudeConfig(config) }
+        if added.status == 0, claudeEntry(config) != nil { return }
+        var text = "claude mcp add failed (\(Self.detail(added)))"
+        if let previous {
+            let json = (try? JSONSerialization.data(withJSONObject: previous, options: [.sortedKeys, .withoutEscapingSlashes]))
+                .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            let restored = claude(["mcp", "add-json", "-s", "user", "mac-cleaner", json])
+            text += restored?.status == 0 && claudeEntry(config) != nil
+                ? "; the previous Mac Cleaner registration was restored"
+                : "; the previous Mac Cleaner registration was removed and couldn't be restored (\(Self.detail(restored))). Connect again, or use Copy MCP config"
+        } else {
+            text += "; nothing was registered"
+        }
+        throw Self.failure(text)
+    }
+
+    /// Without the `claude` command line: Mac Cleaner's entry written into `config` directly (with a backup).
+    private func editClaudeConfig(_ config: String) throws {
+        try editJSON(config) { d in
+            var servers = d["mcpServers"] as? [String: Any] ?? [:]
+            servers["mac-cleaner"] = ["type": "stdio", "command": SkillText.serverCommand, "args": ["--mcp"]]
+            d["mcpServers"] = servers
+        }
+    }
+
+    /// Removes the MCP server from `c`'s config, then its usage skill folder, only if it is provably Mac Cleaner's and
+    /// unchanged (AppOwnedTrash, to the Trash). Otherwise the folder is kept and the message says so; the server is
+    /// disconnected either way.
     func disconnect(_ c: AIClient) {
         do {
             switch c.kind {
@@ -177,22 +285,46 @@ final class IntegrationsModel {
                 let text = (try? String(contentsOfFile: file, encoding: .utf8)) ?? ""
                 try backup(file)
                 try write(Self.removeTomlBlock(text), to: file)
-            case .claudeCode:
-                if let cli = Self.claudeCLI() {
-                    _ = Shell.run(cli, ["mcp", "remove", "mac-cleaner", "-s", "user"], timeout: 60)
+            case .claudeCode(let config):
+                // A remove that leaves Mac Cleaner registered is a failure: nothing else (the skill) is touched then.
+                if let removed = claude(["mcp", "remove", "mac-cleaner", "-s", "user"]) {
+                    if claudeEntry(config) != nil {
+                        throw Self.failure("claude mcp remove failed (\(Self.detail(removed))); Mac Cleaner is still registered with Claude Code, so its skill was kept too")
+                    }
                 } else {
-                    try editJSON(Self.home + "/.claude.json") { d in
+                    try editJSON(config) { d in
                         var servers = d["mcpServers"] as? [String: Any] ?? [:]
                         servers["mac-cleaner"] = nil
                         d["mcpServers"] = servers
                     }
                 }
             }
+            var note = "", partial = false
             if let dir = c.skillsDir {
-                let skill = URL(fileURLWithPath: dir).appendingPathComponent(SkillText.name)
-                if FileManager.default.fileExists(atPath: skill.path) { _ = AppEngine.trash(skill) }
+                let folder = InstalledSkills.folderPath(in: dir)
+                let place = Scanner.tilde(URL(fileURLWithPath: folder))
+                switch skills.state(at: folder) {
+                case .absent:
+                    skills.forget(folder)
+                case .owned(let v, _):
+                    switch AppOwnedTrash.trashSkill(v, source: "Disconnect \(c.name)") {
+                    case .kept(let why):
+                        note = " Its skill in \(place) was kept: \(why)."   // still there and Mac Cleaner's: record kept
+                    case .moved:
+                        skills.forget(folder)
+                        note = " Its skill was moved to the Trash."
+                    case .movedUnrecorded(let recovery):
+                        // It left its place, so the record goes; the message says how to get it back.
+                        skills.forget(folder)
+                        partial = true
+                        note = " Its skill was moved to the Trash (\(recovery)), but couldn't be added to Mac Cleaner's Trash list; "
+                            + "to restore it, drag \((recovery as NSString).lastPathComponent) out of the Trash in Finder back to \(place)."
+                    }
+                case .notOwned(let why):
+                    note = " The \(SkillText.name) skill folder in \(place) was kept: \(why)."
+                }
             }
-            message = ("Removed from \(c.name).", false)
+            message = ("Removed from \(c.name).\(note)", partial)
         } catch {
             message = ("\(c.name): \(error.localizedDescription)", true)
         }
@@ -218,7 +350,7 @@ final class IntegrationsModel {
         panel.prompt = "Save skill here"
         guard panel.runModal() == .OK, let dir = panel.url else { return }
         do {
-            try installSkill(in: dir.path)
+            _ = try InstalledSkills.saveCopy(in: dir.path)
             message = ("Saved \(SkillText.name)/SKILL.md in \(Scanner.tilde(dir)).", false)
         } catch {
             message = (error.localizedDescription, true)
@@ -226,12 +358,6 @@ final class IntegrationsModel {
     }
 
     // MARK: - File helpers
-
-    private func installSkill(in dir: String) throws {
-        let folder = URL(fileURLWithPath: dir).appendingPathComponent(SkillText.name)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try write(SkillText.markdown, to: folder.appendingPathComponent("SKILL.md").path)
-    }
 
     private func readJSON(_ file: String) -> [String: Any]? {
         guard let d = FileManager.default.contents(atPath: file) else { return nil }

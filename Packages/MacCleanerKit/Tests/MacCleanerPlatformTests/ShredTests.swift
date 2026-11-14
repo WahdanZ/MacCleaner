@@ -396,6 +396,47 @@ struct ShredRaceTests {
         }
     }
 
+    @Test func anOccupiedStagingSlotIsNeverReplaced() throws {   // exclusive move into staging
+        // Another process puts something at the staging name the first file would get ("1"). The move fails instead
+        // of replacing it: the reviewed file stays where it was, unchanged; the unexpected item stays untouched and is
+        // reported through the work folder left behind; nothing after it is touched.
+        let box = try Sandbox()
+        try box.file("item/a", "secret"); try box.file("item/b", "next")
+        let t = try snapshot(shredFS(), box.path("item"))
+        let root = box.root
+        var hooks = ShredHooks()
+        hooks.beforeMove = { _ in
+            guard let stage = (try? FileManager.default.contentsOfDirectory(atPath: root))?
+                    .first(where: { $0.hasPrefix(LocalFileSystem.shredStagingPrefix) }) else { return }
+            try? Data("intruder".utf8).write(to: URL(fileURLWithPath: root + "/" + stage + "/1"))
+        }
+        let r = try shred(shredFS(hooks), t)
+        #expect(r.filesOverwritten == 0 && r.damaged.isEmpty && r.estimatedFreedBytes == 0)
+        #expect(text(box, "item/a") == "secret" && text(box, "item/b") == "next")
+        guard let kept = r.kept.first, case .failed(let why) = kept.reason else { Issue.record("\(r.kept)"); return }
+        #expect(kept.path == box.path("item/a") && why.contains("already taken"), "\(kept.path): \(why)")
+        let left = r.kept.first { $0.reason == .stagingLeftBehind }
+        #expect(left.flatMap { try? String(contentsOfFile: $0.path + "/1", encoding: .utf8) } == "intruder", "\(r.kept)")
+    }
+
+    @Test func aShortWriteInTheRealOverwriteIsReportedAsDamaged() throws {   // overwriteZeros accounting, end to end
+        // Only `pwrite` is replaced (it writes half of what it is asked); the real overwrite helper runs. The bytes
+        // it wrote count, so the file is reported as damaged (put back at its own name), and the item stops.
+        let box = try Sandbox()
+        try box.file("item/a", String(repeating: "s", count: 4096)); try box.file("item/b", "next")
+        let t = try snapshot(shredFS(), box.path("item"))
+        var hooks = ShredHooks()
+        hooks.pwrite = { fd, buf, n, off in pwrite(fd, buf, n / 2, off) }
+        let r = try shred(shredFS(hooks), t)
+        #expect(r.filesOverwritten == 0 && text(box, "item/b") == "next")
+        #expect(r.damaged == [box.path("item/a")], "\(r.damaged)")
+        guard let kept = r.kept.first, case .failed(let why) = kept.reason else { Issue.record("\(r.kept)"); return }
+        #expect(kept.path == box.path("item/a") && why.contains("damaged"), "\(why)")
+        let data = try Data(contentsOf: URL(fileURLWithPath: box.path("item/a")))
+        #expect(data.count == 4096 && data.prefix(2048).allSatisfy { $0 == 0 } && data.suffix(2048).allSatisfy { $0 == UInt8(ascii: "s") })
+        #expect(noStaging(box))
+    }
+
     @Test func anEntryProtectedDuringTheShredStopsTheItem() throws {   // #2, §4 per-entry protection
         let box = try Sandbox()
         for n in ["a", "b", "c"] { try box.file("item/" + n, n) }
@@ -404,5 +445,44 @@ struct ShredRaceTests {
         let r = try shred(shredFS(), t, protection: { $0 == b ? "Protected in Settings" : nil })
         #expect(!box.exists("item/a") && text(box, "item/b") == "b" && text(box, "item/c") == "c")
         #expect(r.kept.first == KeptEntry(path: b, reason: .protected("Protected in Settings")) && r.filesOverwritten == 1)
+    }
+}
+
+@Suite("Shred: the overwrite helper")
+struct ShredOverwriteHelperTests {
+    @Test func aShortWriteIsCountedAndStopsTheOverwrite() throws {
+        // The real helper on a real file; on its second call pwrite returns a positive short count. Every byte it
+        // reported is counted (and is zero on disk), and it stops with an error instead of going on.
+        let box = try Sandbox()
+        let size = 3 << 20, half = 1 << 19   // three 1 MB chunks; the second write stops half-way
+        try box.file("f", String(repeating: "x", count: size))
+        let fd = open(box.path("f"), O_RDWR | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        let calls = Box(0)
+        let r = LocalFileSystem.overwriteZeros(fd, from: 0, to: off_t(size), write: { fd, buf, n, off in
+            calls.value += 1
+            return pwrite(fd, buf, calls.value == 2 ? half : n, off)
+        })
+        #expect(r.error != nil && calls.value == 2)
+        #expect(r.written == off_t((1 << 20) + half), "\(r.written)")
+        let data = try Data(contentsOf: URL(fileURLWithPath: box.path("f")))
+        #expect(data.count == size && data.prefix { $0 == 0 }.count == Int(r.written) && data.last == UInt8(ascii: "x"))
+    }
+
+    @Test func aFailedWriteCountsOnlyWhatWasWritten() throws {
+        // pwrite fails outright on the second call: only the first chunk counts, and the error is reported.
+        let box = try Sandbox()
+        try box.file("f", String(repeating: "x", count: 2 << 20))
+        let fd = open(box.path("f"), O_RDWR | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        let calls = Box(0)
+        let r = LocalFileSystem.overwriteZeros(fd, from: 0, to: off_t(2 << 20), write: { fd, buf, n, off in
+            calls.value += 1
+            if calls.value == 2 { errno = EIO; return -1 }
+            return pwrite(fd, buf, n, off)
+        })
+        #expect(r.written == off_t(1 << 20) && r.error?.contains("writing failed") == true, "\(r)")
     }
 }

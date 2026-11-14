@@ -12,8 +12,8 @@ import MacCleanerCore
 //    (O_NOFOLLOW_ANY) and checked against the reviewed parent; everything else is relative to open folder
 //    descriptors (openat, fstatat, renameat, unlinkat), never following links. Swapping a folder for a link after
 //    that can't redirect the work.
-// 2. Move, then check, then act. Each file or link is moved (renameat) into a private staging folder (random name,
-//    mode 700) next to the item and checked there. A file is checked against its reviewed identity, its link count
+// 2. Move, then check, then act. Each file or link is moved (renameatx_np with RENAME_EXCL, so an occupied staging
+//    name is never replaced) into a private staging folder (random name, mode 700) next to the item and checked there. A file is checked against its reviewed identity, its link count
 //    (exactly 1) and its flags (no lock) before the move, after the move, on the open descriptor immediately before
 //    the overwrite, and once more before the unlink. Anything else is moved back (RENAME_EXCL, never overwriting)
 //    and kept.
@@ -54,6 +54,8 @@ public struct ShredSnapshot: Sendable, Hashable {
 struct ShredHooks: Sendable {
     /// Replaces the real overwrite: given the open file and the range, returns bytes written and an error.
     var overwrite: (@Sendable (Int32, off_t, off_t) -> (written: off_t, error: String?))?
+    /// Replaces only the `pwrite` call inside the real overwrite (`overwriteZeros`), to make it see a short write.
+    var pwrite: LocalFileSystem.PositionalWrite?
     /// Before the parent folder is opened.
     var beforeStart: (@Sendable () -> Void)?
     /// After a file or link passed its check in place, right before it is moved to staging. Gets its path.
@@ -238,8 +240,11 @@ extension LocalFileSystem {
                 hooks?.beforeMove?(e.path)
                 serial += 1
                 let tmp = "\(serial)"
-                guard renameat(dirfd, name, sfd, tmp) == 0 else {
-                    return keep(e.path, .failed("it couldn't be moved (\(String(cString: strerror(errno))))"))
+                // Exclusive: an occupied staging slot (something put there by another process) is never replaced.
+                guard renameatx_np(dirfd, name, sfd, tmp, UInt32(RENAME_EXCL)) == 0 else {
+                    let why = errno == EEXIST ? "its place in the work folder was already taken by something else, so it wasn't moved"
+                                              : "it couldn't be moved (\(String(cString: strerror(errno))))"
+                    return keep(e.path, .failed(why))
                 }
                 hooks?.afterMove?(e.path, stagePath + "/" + tmp)
                 var moved = stat()
@@ -274,7 +279,8 @@ extension LocalFileSystem {
                 }
                 defer { Darwin.close(fd) }
                 let size = opened.st_size
-                let done = hooks?.overwrite?(fd, 0, size) ?? Self.overwriteZeros(fd, from: 0, to: size)
+                let writer = hooks?.pwrite ?? Self.systemPwrite
+                let done = hooks?.overwrite?(fd, 0, size) ?? Self.overwriteZeros(fd, from: 0, to: size, write: writer)
                 if let why = done.error {
                     let left = putBack(tmp, dirfd, name)
                     if done.written > 0 { r.damaged.append(left ?? e.path) }
@@ -314,7 +320,7 @@ extension LocalFileSystem {
                 for _ in 0..<5 {
                     var grown = stat()
                     guard fstat(fd, &grown) == 0, grown.st_size > covered else { break }
-                    let extra = hooks?.overwrite?(fd, covered, grown.st_size) ?? Self.overwriteZeros(fd, from: covered, to: grown.st_size)
+                    let extra = hooks?.overwrite?(fd, covered, grown.st_size) ?? Self.overwriteZeros(fd, from: covered, to: grown.st_size, write: writer)
                     if let why = extra.error {
                         r.warnings.append("\(name): another app added data while it was shredded, and that part couldn't be overwritten (\(why))")
                         break
@@ -367,15 +373,24 @@ extension LocalFileSystem {
         a.st_dev == b.st_dev && a.st_ino == b.st_ino && (a.st_mode & S_IFMT) == (b.st_mode & S_IFMT)
     }
 
+    /// `pwrite(2)`'s shape, so a test can make the real write helper see a short or failed write.
+    typealias PositionalWrite = @Sendable (Int32, UnsafeRawPointer?, Int, off_t) -> Int
+    static let systemPwrite: PositionalWrite = { pwrite($0, $1, $2, $3) }
+
     /// Writes zeros over [from, to) of an open file and flushes it to the disk. Returns bytes written and an error.
-    static func overwriteZeros(_ fd: Int32, from: off_t, to: off_t) -> (written: off_t, error: String?) {
+    /// `written` counts every byte a write reported, including those of a short write, so a file that was partly
+    /// overwritten is never reported as untouched. A short write stops the overwrite (fail closed).
+    static func overwriteZeros(_ fd: Int32, from: off_t, to: off_t,
+                               write: PositionalWrite = systemPwrite) -> (written: off_t, error: String?) {
         let chunk = [UInt8](repeating: 0, count: 1 << 20)
         var offset = from
         while offset < to {
             let n = Int(min(off_t(chunk.count), to - offset))
-            let w = chunk.withUnsafeBytes { pwrite(fd, $0.baseAddress, n, offset) }
-            guard w == n else { return (offset - from, "writing failed") }
-            offset += off_t(n)
+            let w = chunk.withUnsafeBytes { write(fd, $0.baseAddress, n, offset) }
+            if w > 0 { offset += off_t(w) }
+            guard w == n else {
+                return (offset - from, w < 0 ? "writing failed (\(String(cString: strerror(errno))))" : "writing stopped part-way")
+            }
         }
         guard fcntl(fd, F_FULLFSYNC) == 0 || fsync(fd) == 0 else { return (offset - from, "couldn't flush to disk") }
         return (offset - from, nil)

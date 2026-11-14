@@ -18,6 +18,10 @@
 #   * a terminal approval (ToolApproval .terminal / .yesFlag) made: the CLI (after its TTY prompt or --yes) and the
 #     self-test; MCPServer.ConfirmedPreview made: only MCPServer.approve (its initializer is fileprivate)
 #   * inside MacCleanerKit, approvals are issued only by CleanupExecutor itself
+#   * the Shredder (M01-04c-2): its snapshot is taken only by ShredReview (the one place a review is built) and by the
+#     package; the overwrite-then-delete disposition is named only by the review, the protection rules, the Shredder model's plan guard and the self-test;
+#     the Platform's overwriteAndRemove is reached only through the executor; ShredEngine is gone; the snapshot-counting
+#     seam (`shredSnapshotter:`) is passed only by the self-test
 set -u
 cd "$(dirname "$0")/.."
 
@@ -73,5 +77,33 @@ only_in "confirmed previews made" 'ConfirmedPreview\(' MacCleaner \
     MacCleaner/MCPServer.swift
 only_in "approvals issued inside MacCleanerKit" '\.(approve|issue)\(' Packages/MacCleanerKit/Sources \
     Packages/MacCleanerKit/Sources/MacCleanerFeatures/CleanupExecutor.swift
+
+# The Shredder (M01-04c-2). One snapshot per item, taken where the review is built; the executor does the shredding.
+only_in "shred snapshots taken in the app" 'shredSnapshot\(' MacCleaner \
+    MacCleaner/ShredReview.swift MacCleaner/SelfTest.swift
+only_in "shred snapshots taken inside MacCleanerKit" 'shredSnapshot\(' Packages/MacCleanerKit/Sources \
+    Packages/MacCleanerKit/Sources/MacCleanerPlatform/LocalFileSystem+Shred.swift
+only_in "overwrite-then-delete named in the app" 'overwriteThenDelete' MacCleaner \
+    MacCleaner/ShredReview.swift MacCleaner/AppProtection.swift MacCleaner/Shredder.swift MacCleaner/SelfTest.swift
+only_in "overwriteAndRemove called in the app" 'overwriteAndRemove\(' MacCleaner
+only_in "overwriteAndRemove inside MacCleanerKit" 'overwriteAndRemove\(' Packages/MacCleanerKit/Sources \
+    Packages/MacCleanerKit/Sources/MacCleanerPlatform/LocalFileSystem+Shred.swift \
+    Packages/MacCleanerKit/Sources/MacCleanerFeatures/CleanupExecutor.swift \
+    Packages/MacCleanerKit/Sources/MacCleanerCore/CleanupFileSystem.swift
+# Executor runs in the app: ApprovedTrash.swift (the Trash path: moveToTrash) and Shredder.swift (the approved shred).
+only_in "cleanup executor runs (.execute) in the app" '\.execute[[:space:]]*\(' MacCleaner \
+    MacCleaner/ApprovedTrash.swift MacCleaner/Shredder.swift
+only_in "the removed ShredEngine (app)" 'ShredEngine' MacCleaner
+only_in "the removed ShredEngine (package sources)" 'ShredEngine' Packages/MacCleanerKit/Sources
+only_in "the removed ShredEngine (package tests)" 'ShredEngine' Packages/MacCleanerKit/Tests
+only_in "the snapshot-counting seam passed" 'shredSnapshotter' MacCleaner \
+    MacCleaner/ShredReview.swift MacCleaner/SelfTest.swift
+# One shred flow only: the Shredder screen builds its review (ShredReview.snapshots + ReviewBuild.shred) and runs it;
+# nothing else may build a shred plan that could be approved elsewhere. Dispositions are never built from raw values.
+only_in "shred reviews listed (ShredReview.snapshots)" 'ShredReview\.snapshots[[:space:]]*\(' MacCleaner \
+    MacCleaner/Shredder.swift MacCleaner/SelfTest.swift
+only_in "shred reviews built (ReviewBuild.shred)" 'ReviewBuild\.shred[[:space:]]*\(' MacCleaner \
+    MacCleaner/Shredder.swift MacCleaner/SelfTest.swift
+only_in "dispositions made from raw values" 'Disposition\(rawValue' MacCleaner
 
 exit $status

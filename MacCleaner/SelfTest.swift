@@ -133,7 +133,14 @@ enum SelfTest {
                                                          "preview_id": keepPreview?["preview_id"] as? String ?? ""])) as? [String: Any]
         check("MCP move_to_trash refuses protected even with an approved confirm",
               (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
-        check("Shredder refuses protected (same rule)", ShredEngine.reason(keep) != nil)
+        let shredRule = { (u: URL) in AppProtection().refusal(path: u.path, disposition: .overwriteThenDelete) }
+        check("Shredder refuses protected (same rule)", shredRule(keep) != nil)
+        check("the Shredder rule refuses a protected folder's contents", shredRule(keep.appendingPathComponent("inner/file.txt")) != nil)
+        check("the Shredder rule allows an unprotected item in the home folder", shredRule(sandbox.appendingPathComponent("loose.txt")) == nil)
+        check("the Shredder rule refuses items outside the home folder (/private/tmp, /Applications)",
+              shredRule(URL(fileURLWithPath: "/private/tmp/x")) != nil
+              && shredRule(URL(fileURLWithPath: "/Applications/Example.app")) != nil
+              && shredRule(URL(fileURLWithPath: "/Applications/Safari.app")) != nil)
         check("existing protected items are still protected", savedProtected.allSatisfy { ProtectedPaths.all.contains($0) })
         check("a protected folder hides what is inside it in any letter case (RISK-012)",
               ProtectedPaths.isInsideProtected(URL(fileURLWithPath: keep.path.uppercased() + "/inner"))
@@ -749,233 +756,9 @@ enum SelfTest {
         }
         approvals.asked = []; approvals.answer = true
 
-        print("Audit fixes: Shredder")
-        func shredDir(_ name: String, file: String = "f.txt", text: String = "secret") -> (URL, URL) {
-            let d = sandbox.appendingPathComponent(name), f = d.appendingPathComponent(file)
-            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
-            fm.createFile(atPath: f.path, contents: Data(text.utf8))
-            return (d, f)
-        }
-        func text(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
-        /// No staging folder may be left next to the item.
-        func noStaging(_ folder: URL) -> Bool {
-            !((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).contains { $0.hasPrefix(ShredEngine.stagingPrefix) }
-        }
-        let (dA, fA) = shredDir("shred-links", text: "keep")
-        let other = sandbox.appendingPathComponent("shred-other-link.txt")
-        try? fm.linkItem(at: fA, to: other)
-        let rA = ShredEngine.shred(dA)
-        check("refuses a folder holding a hard link; the other copy is untouched",
-              rA.refused != nil && fm.fileExists(atPath: dA.path) && text(other) == "keep")
-        let (dB, fB) = shredDir("shred-protected")
-        ProtectedPaths.set([fB.path])
-        check("re-checks protection right before shredding", ShredEngine.shred(dB).refused != nil && fm.fileExists(atPath: fB.path))
-        ProtectedPaths.set(savedProtected)
-        let (dC, fC) = shredDir("shred-locked")
-        try? fm.setAttributes([.immutable: true], ofItemAtPath: fC.path)
-        check("refuses a locked file instead of calling it shredded", ShredEngine.shred(dC).refused != nil && fm.fileExists(atPath: fC.path))
-        try? fm.setAttributes([.immutable: false], ofItemAtPath: fC.path)
-        let (dD, _) = shredDir("shred-normal")
-        try? fm.createDirectory(at: dD.appendingPathComponent("sub/deeper"), withIntermediateDirectories: true)
-        fm.createFile(atPath: dD.appendingPathComponent("sub/deeper/g.txt").path, contents: Data("g".utf8))
-        let rD = ShredEngine.shred(dD)
-        check("overwrites and deletes a normal folder with sub-folders", rD.removed && rD.overwritten == 2 && rD.kept.isEmpty
-              && !fm.fileExists(atPath: dD.path) && noStaging(sandbox))
-        check("refuses items outside the home folder",
-              ShredEngine.reason(URL(fileURLWithPath: "/private/tmp/x")) != nil
-              && ShredEngine.reason(URL(fileURLWithPath: "/Applications/Example.app")) != nil)
-
-        print("Shredder fails closed (SAFE-01)")
-        // Write failure on the second of three files, with nothing written: the first is shredded, the failed
-        // one and the one after it stay in place with their content, and the result says so.
-        let (dE, _) = shredDir("shred-writefail", file: "a.txt", text: "A")
-        let eB = dE.appendingPathComponent("b.txt"), eC = dE.appendingPathComponent("c.txt")
-        fm.createFile(atPath: eB.path, contents: Data("B".utf8))
-        fm.createFile(atPath: eC.path, contents: Data("C".utf8))
-        var eCalls = 0
-        var eHooks = ShredEngine.Hooks()
-        eHooks.overwrite = { fd, from, to in
-            eCalls += 1
-            return eCalls == 2 ? (0, "writing failed") : ShredEngine.overwrite(fd, from: from, to: to)
-        }
-        let rE = ShredEngine.shred(dE, hooks: eHooks)
-        check("a failed write keeps that file and everything after it in place; nothing un-overwritten is deleted",
-              !rE.removed && rE.refused == nil && rE.overwritten == 1 && rE.damaged.isEmpty
-              && !fm.fileExists(atPath: dE.appendingPathComponent("a.txt").path)
-              && text(eB) == "B" && text(eC) == "C" && fm.fileExists(atPath: dE.path) && noStaging(dE.deletingLastPathComponent()))
-        check("partial result is reported: what was kept and how many files of the total",
-              rE.kept.contains { $0.hasPrefix("b.txt: writing failed") } && rE.kept.contains { $0.contains("2 of 3 file(s) were kept") })
-        // Write fails half-way: the file is kept but reported as damaged (its start is already zeroed).
-        let (_, fHalf) = shredDir("shred-halfwrite", text: "0123456789")
-        var halfHooks = ShredEngine.Hooks()
-        halfHooks.overwrite = { fd, from, to in
-            let half = ShredEngine.overwrite(fd, from: from, to: from + (to - from) / 2)
-            return (half.written, "writing failed")
-        }
-        let rHalf = ShredEngine.shred(fHalf, hooks: halfHooks)
-        check("a write that fails half-way keeps the file and reports it as damaged, not shredded",
-              !rHalf.removed && rHalf.overwritten == 0 && rHalf.damaged == ["f.txt"]
-              && text(fHalf) == "\0\0\0\0\056789" && noStaging(fHalf.deletingLastPathComponent()))
-        let (_, fF) = shredDir("shred-flushfail", text: "F")
-        var fHooks = ShredEngine.Hooks()
-        fHooks.overwrite = { _, _, _ in (0, "couldn't flush to disk") }
-        let rF = ShredEngine.shred(fF, hooks: fHooks)
-        check("a failed flush keeps the file", !rF.removed && rF.overwritten == 0 && fm.fileExists(atPath: fF.path))
-        // An unreadable folder inside: its files would be deleted unseen, so the whole item is refused.
-        let (dG, fG) = shredDir("shred-unreadable", text: "G")
-        let gLocked = dG.appendingPathComponent("sub")
-        try? fm.createDirectory(at: gLocked, withIntermediateDirectories: true)
-        fm.createFile(atPath: gLocked.appendingPathComponent("hidden.txt").path, contents: Data("H".utf8))
-        chmod(gLocked.path, 0)
-        let rG = ShredEngine.shred(dG)
-        chmod(gLocked.path, 0o755)
-        check("refuses a folder with an unreadable folder inside, untouched",
-              rG.refused != nil && text(fG) == "G" && text(gLocked.appendingPathComponent("hidden.txt")) == "H")
-        // A file over 4 GB (sparse, takes no space): refused before anything changes.
-        let (dH, fH) = shredDir("shred-huge", text: "small")
-        let huge = dH.appendingPathComponent("huge.bin")
-        fm.createFile(atPath: huge.path, contents: nil)
-        if let fh = try? FileHandle(forWritingTo: huge) { try? fh.truncate(atOffset: 4_000_000_001); try? fh.close() }
-        let rH = ShredEngine.shred(dH)
-        check("refuses a folder holding a file over 4 GB, untouched",
-              rH.refused != nil && text(fH) == "small" && fm.fileExists(atPath: huge.path))
-        try? fm.removeItem(at: huge)
-        let (dK, fK) = shredDir("shred-fifo", text: "K")
-        mkfifo(dK.appendingPathComponent("pipe").path, 0o600)
-        check("refuses a folder holding a pipe, untouched", ShredEngine.shred(dK).refused != nil && text(fK) == "K")
-
-        print("Shredder races: other apps changing things mid-shred (SAFE-01)")
-        // Growth after overwrite: an app that has the file open appends right after the overwrite. The appended
-        // data must be overwritten too (checked through that app's own open handle).
-        let (_, fGrow) = shredDir("shred-grow", text: "secret-start")
-        let writer = open(fGrow.path, O_RDWR)
-        var growHooks = ShredEngine.Hooks()
-        let tail = Array("APPENDED-SECRET-DATA".utf8)
-        growHooks.afterOverwrite = { _ in
-            var st = stat(); fstat(writer, &st)
-            _ = tail.withUnsafeBytes { pwrite(writer, $0.baseAddress, tail.count, st.st_size) }
-        }
-        let rGrow = ShredEngine.shred(fGrow, hooks: growHooks)
-        var growSt = stat(); fstat(writer, &growSt)
-        var seen = [UInt8](repeating: 1, count: Int(growSt.st_size))
-        _ = seen.withUnsafeMutableBytes { pread(writer, $0.baseAddress, $0.count, 0) }
-        close(writer)
-        check("data appended after the overwrite is overwritten too, before the file is closed",
-              rGrow.removed && rGrow.overwritten == 1 && growSt.st_size == off_t(12 + tail.count)
-              && seen.allSatisfy { $0 == 0 } && !fm.fileExists(atPath: fGrow.path) && rGrow.warnings.isEmpty)
-        // Replacement before the move: another app saves a new version (atomic rename) right before the file is
-        // moved to staging. The new version must come back to its place untouched and not be overwritten.
-        let (dRep, _) = shredDir("shred-replace", file: "a.txt", text: "A")
-        let repB = dRep.appendingPathComponent("b.txt")
-        fm.createFile(atPath: repB.path, contents: Data("B-old".utf8))
-        var repHooks = ShredEngine.Hooks()
-        repHooks.beforeMove = { u in
-            guard u.lastPathComponent == "b.txt" else { return }
-            let fresh = dRep.appendingPathComponent(".b.txt.saving")
-            fm.createFile(atPath: fresh.path, contents: Data("B-new".utf8))
-            _ = rename(fresh.path, u.path)
-        }
-        let rRep = ShredEngine.shred(dRep, hooks: repHooks)
-        check("a file replaced right before it is moved is put back untouched, not overwritten or deleted",
-              !rRep.removed && text(repB) == "B-new" && rRep.kept.contains { $0.contains("replaced while shredding") }
-              && noStaging(sandbox))
-        // Changed after review: plan, then the file is edited, then shred runs the old plan.
-        let (dEdit, fEdit) = shredDir("shred-edited", text: "v1")
-        if case .success(let editPlan) = ShredEngine.plan(dEdit) {
-            Thread.sleep(forTimeInterval: 0.01)
-            try? "v2-longer".write(to: fEdit, atomically: false, encoding: .utf8)
-            let rEdit = ShredEngine.shred(editPlan)
-            check("a file edited after the review is kept as it is",
-                  !rEdit.removed && text(fEdit) == "v2-longer" && rEdit.kept.contains { $0.contains("changed since you reviewed") })
-        } else { check("a file edited after the review is kept as it is", false) }
-        // A new file appears in the folder after review: the folder stays, the new file is untouched.
-        let (dNew, _) = shredDir("shred-newfile", text: "x")
-        if case .success(let newPlan) = ShredEngine.plan(dNew) {
-            let late = dNew.appendingPathComponent("late.txt")
-            fm.createFile(atPath: late.path, contents: Data("late".utf8))
-            let rNew = ShredEngine.shred(newPlan)
-            check("a file added after the review is left untouched and the folder stays",
-                  !rNew.removed && rNew.overwritten == 1 && text(late) == "late"
-                  && rNew.kept.contains { $0.contains("new files appeared") })
-        } else { check("a file added after the review is left untouched and the folder stays", false) }
-        // Sub-folder swapped for a link to somewhere else, before shredding starts: nothing outside is touched.
-        let outsideDir = sandbox.appendingPathComponent("shred-outside")
-        try? fm.createDirectory(at: outsideDir, withIntermediateDirectories: true)
-        let outsideFile = outsideDir.appendingPathComponent("x.txt")
-        fm.createFile(atPath: outsideFile.path, contents: Data("outside".utf8))
-        let (dSw, _) = shredDir("shred-swapsub", file: "a.txt", text: "A")
-        let swSub = dSw.appendingPathComponent("sub")
-        try? fm.createDirectory(at: swSub, withIntermediateDirectories: true)
-        fm.createFile(atPath: swSub.appendingPathComponent("x.txt").path, contents: Data("inside".utf8))
-        var swHooks = ShredEngine.Hooks()
-        swHooks.beforeStart = {
-            _ = rename(swSub.path, dSw.appendingPathComponent("sub-moved").path)
-            try? fm.createSymbolicLink(at: swSub, withDestinationURL: outsideDir)
-        }
-        let rSw = ShredEngine.shred(dSw, hooks: swHooks)
-        check("a sub-folder swapped for a link before shredding: the link's target is untouched",
-              !rSw.removed && text(outsideFile) == "outside"
-              && text(dSw.appendingPathComponent("sub-moved/x.txt")) == "inside" && noStaging(sandbox))
-        // Sub-folder swapped for a link while its files are being shredded: work continues in the real folder
-        // (held open), the link's target is untouched, and the moved folder is left (it isn't where it was).
-        let (dSw2, _) = shredDir("shred-swapmid", file: "a.txt", text: "A")
-        let sw2Sub = dSw2.appendingPathComponent("sub")
-        try? fm.createDirectory(at: sw2Sub, withIntermediateDirectories: true)
-        fm.createFile(atPath: sw2Sub.appendingPathComponent("x.txt").path, contents: Data("inside".utf8))
-        var sw2Hooks = ShredEngine.Hooks()
-        sw2Hooks.beforeMove = { u in
-            guard u.lastPathComponent == "x.txt" else { return }
-            _ = rename(sw2Sub.path, dSw2.appendingPathComponent("sub-moved").path)
-            try? fm.createSymbolicLink(at: sw2Sub, withDestinationURL: outsideDir)
-        }
-        let rSw2 = ShredEngine.shred(dSw2, hooks: sw2Hooks)
-        check("a sub-folder swapped for a link mid-shred: the planned file is shredded, the link's target untouched",
-              !rSw2.removed && rSw2.overwritten == 2 && text(outsideFile) == "outside"
-              && !fm.fileExists(atPath: dSw2.appendingPathComponent("sub-moved/x.txt").path)
-              && (try? fm.destinationOfSymbolicLink(atPath: sw2Sub.path)) != nil
-              && rSw2.kept.contains { $0.contains("moved or replaced") })
-        // The folder holding the item is swapped for a link to another folder with an item of the same name.
-        let pp = sandbox.appendingPathComponent("shred-pp"), ppOther = sandbox.appendingPathComponent("shred-pp-other")
-        try? fm.createDirectory(at: pp.appendingPathComponent("item"), withIntermediateDirectories: true)
-        try? fm.createDirectory(at: ppOther.appendingPathComponent("item"), withIntermediateDirectories: true)
-        fm.createFile(atPath: pp.appendingPathComponent("item/f.txt").path, contents: Data("mine".utf8))
-        fm.createFile(atPath: ppOther.appendingPathComponent("item/f.txt").path, contents: Data("theirs".utf8))
-        var ppHooks = ShredEngine.Hooks()
-        ppHooks.beforeStart = {
-            _ = rename(pp.path, sandbox.appendingPathComponent("shred-pp-moved").path)
-            try? fm.createSymbolicLink(at: pp, withDestinationURL: ppOther)
-        }
-        let rPP = ShredEngine.shred(pp.appendingPathComponent("item"), hooks: ppHooks)
-        check("the item's folder swapped for a link: refused, nothing changed on either side",
-              rPP.refused != nil && text(ppOther.appendingPathComponent("item/f.txt")) == "theirs"
-              && text(sandbox.appendingPathComponent("shred-pp-moved/item/f.txt")) == "mine")
-        // Links inside are removed as links; a link as the item itself is refused.
-        let (dJ, _) = shredDir("shred-withlink", text: "J")
-        let shredLinkTarget = sandbox.appendingPathComponent("shred-link-target.txt")
-        fm.createFile(atPath: shredLinkTarget.path, contents: Data("outside".utf8))
-        try? fm.createSymbolicLink(at: dJ.appendingPathComponent("link"), withDestinationURL: shredLinkTarget)
-        let rJ = ShredEngine.shred(dJ)
-        check("a link inside a folder is removed, its target untouched",
-              rJ.removed && rJ.overwritten == 1 && !fm.fileExists(atPath: dJ.path) && text(shredLinkTarget) == "outside")
-        let rootLink = sandbox.appendingPathComponent("shred-root-link")
-        try? fm.createSymbolicLink(at: rootLink, withDestinationURL: shredLinkTarget)
-        check("refuses a link as the item itself", ShredEngine.shred(rootLink).refused != nil
-              && text(shredLinkTarget) == "outside" && (try? fm.destinationOfSymbolicLink(atPath: rootLink.path)) != nil)
-        // The staging folder can't be removed afterwards (here: another app drops a file into it). The item's
-        // own files are shredded, but the result must not say "removed": something stayed behind.
-        let (dLeft, _) = shredDir("shred-leftover", text: "L")
-        var leftHooks = ShredEngine.Hooks()
-        var stagingSeen: URL?
-        leftHooks.beforeStagingCleanup = { stage in
-            stagingSeen = stage
-            fm.createFile(atPath: stage.appendingPathComponent("intruder.txt").path, contents: Data("x".utf8))
-        }
-        let rLeft = ShredEngine.shred(dLeft, hooks: leftHooks)
-        check("a staging folder that can't be removed means the result is not 'removed', and says where it is",
-              !rLeft.removed && rLeft.overwritten == 1 && rLeft.leftover == stagingSeen?.path && rLeft.leftover != nil
-              && rLeft.kept.contains { $0.contains(stagingSeen?.path ?? "?") } && !fm.fileExists(atPath: dLeft.path))
-        if let stagingSeen { try? fm.removeItem(at: stagingSeen) }
-        check("no staging folders are left anywhere in the test area", noStaging(sandbox))
+        // The Shredder's own safety checks now live in the package tests (Packages/MacCleanerKit/Tests, ShredTests.swift and
+        // ShredExecutorTests.swift) and in "Shredder review" / "Shredder screen" below; see "04c-2: what happened to each
+        // Shredder self-test" in docs/architecture/M01-04C_DESIGN.md.
 
         print("Audit fixes: update signatures")
         let signer = Curve25519.Signing.PrivateKey()
@@ -1531,6 +1314,8 @@ extension SelfTest {
         sharedFileLocking(dir: dir)
         mcpAndCLITrash(dir: dir, runID: runID)
         engineTrash(dir: dir, runID: runID)
+        shredReview(dir: dir, runID: runID, savedProtected: savedProtected)
+        shredScreen(dir: dir, runID: runID, savedProtected: savedProtected)
         uninstallAndAlerts(dir: dir, runID: runID, savedProtected: savedProtected)
         MainActor.assumeIsolated { installedSkills(dir: dir, runID: runID) }
 
@@ -1845,6 +1630,410 @@ extension SelfTest {
         #else
         print("  - CLI moves in a separate process: run in the test-hooks build only (its Trash is isolated there)")
         #endif
+    }
+
+    // MARK: The Shredder review: snapshots, protection over every entry, overlap, outcome mapping (M01-04c-2)
+
+    static func shredReview(dir: URL, runID: String, savedProtected: [String]) {
+        print("Shredder review: one snapshot per item, protection over every entry, outcome mapping (M01-04c-2)")
+        let fm = FileManager.default
+        let base = dir.appendingPathComponent("shred-review-\(runID)")
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { ProtectedPaths.set(savedProtected) }
+        func file(_ u: URL, _ text: String = "x") -> URL {
+            try? fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: u)
+            return u
+        }
+
+        // rootState: gone / same / other (a different file put at the same path)
+        let f = file(base.appendingPathComponent("state.txt"), "one")
+        let planned = (try? LocalFileSystem().identity(at: AppCleanup.physicalPath(f))) ?? nil
+        guard let planned else { check("rootState: could read the planned file", false); return }
+        check("rootState: the same file is .same", ShredReview.rootState(planned) == .same)
+        try? Data("changed and longer".utf8).write(to: f)   // damaged in place: still the same file
+        check("rootState: a file changed in place is still .same", ShredReview.rootState(planned) == .same)
+        try? fm.removeItem(at: f)
+        check("rootState: a removed file is .gone", ShredReview.rootState(planned) == .gone)
+        _ = file(f, "other")
+        check("rootState: a different file at the same path is .other", ShredReview.rootState(planned) == .other)
+        check("rootState: a path below a plain file is .gone (ENOTDIR)",
+              ShredReview.rootState(FileIdentity(path: AppCleanup.physicalPath(f) + "/x", device: 1, inode: 1, kind: .file, size: 0, modificationNanos: 0)) == .gone)
+
+        // classify, with real outcome types
+        func id(_ path: String, _ kind: FileIdentity.Kind = .file) -> FileIdentity {
+            FileIdentity(path: path, device: 1, inode: UInt64(path.hashValue & 0xffff), kind: kind, size: 1, modificationNanos: 0)
+        }
+        let parent = id(base.path, .directory), root = id(base.path + "/item", .directory)
+        let tree = CleanupTarget.tree(parent: parent, root: root, entries: [id(base.path + "/item/a"), id(base.path + "/item/b")])
+        func outcome(_ r: ItemOutcome.Result, files: Int? = nil, warnings: [String] = []) -> ItemOutcome {
+            ItemOutcome(candidateID: "c", target: tree, result: r, warnings: warnings, removedFiles: files)
+        }
+        func c(_ r: ItemOutcome.Result, _ s: ShredReview.RootState, files: Int? = nil, warnings: [String] = []) -> ShredReview.ShredItemResult {
+            ShredReview.classify(outcome: outcome(r, files: files, warnings: warnings), planned: tree, rootState: s)
+        }
+        let note = ShredReview.otherItemNote
+        let removedGone = c(.removed(bytes: 7), .gone, files: 2, warnings: ["w"])
+        check("classify: removed and gone is shredded, row removed, bytes and warnings carried",
+              removedGone.countedBytes == 7 && removedGone.disposition == .remove && removedGone.removedAnything && removedGone.warnings == ["w"])
+        for s in [ShredReview.RootState.same, .other, .unknown] {
+            let r = c(.removed(bytes: 7), s)
+            check("classify: removed but something is at the path (\(s)) counts it and blocks the row",
+                  r.countedBytes == 7 && r.disposition == .block(ShredReview.note(for: s)) && r.removedAnything)
+        }
+        let staging = KeptEntry(path: base.path + "/.maccleaner-shred-x", reason: .stagingLeftBehind)
+        let stagingOnly = c(.partiallyDone(freedBytes: 5, kept: [staging], damaged: []), .gone, files: 2)
+        check("classify: only the work folder left, root gone: shredded, says where the folder is",
+              stagingOnly.disposition == .remove && stagingOnly.countedBytes == 5 && stagingOnly.message.contains(staging.path)
+              && stagingOnly.message.contains("work folder"))
+        let stagingFewFiles = c(.partiallyDone(freedBytes: 5, kept: [staging], damaged: []), .gone, files: 1)
+        check("classify: a work folder left but not every file removed is partial, not 'shredded'",
+              stagingFewFiles.message.contains("partly") && stagingFewFiles.disposition == .remove)
+        let stagingNilFiles = c(.partiallyDone(freedBytes: 5, kept: [staging], damaged: []), .gone)
+        check("classify: unknown file count is never trusted as complete", stagingNilFiles.message.contains("partly"))
+        let stagingSame = c(.partiallyDone(freedBytes: 5, kept: [staging], damaged: []), .same, files: 2)
+        check("classify: work folder left but the root is still there is partial and keeps the row",
+              stagingSame.disposition == .keep && stagingSame.message.contains("partly"))
+        let keptA = KeptEntry(path: base.path + "/item/a", reason: .failed("locked"))
+        let partialSame = c(.partiallyDone(freedBytes: 3, kept: [keptA], damaged: [base.path + "/item/b"]), .same, files: 0)
+        check("classify: partial with the root still there keeps the row and lists kept and damaged entries",
+              partialSame.disposition == .keep && partialSame.countedBytes == 3 && partialSame.removedAnything
+              && partialSame.message.contains(keptA.path) && partialSame.message.contains("item/b"))
+        check("classify: partial with the root gone removes the row",
+              c(.partiallyDone(freedBytes: 3, kept: [keptA], damaged: []), .gone, files: 1).disposition == .remove)
+        check("classify: an unknown root state has its own note",
+              ShredReview.note(for: .unknown) == "Couldn't check what is at this path now; it was not touched"
+              && ShredReview.note(for: .other) == note && ShredReview.unknownItemNote != note)
+        for s in [ShredReview.RootState.other, .unknown] {
+            let r = c(.partiallyDone(freedBytes: 3, kept: [keptA], damaged: []), s, files: 1)
+            check("classify: partial with a different or unknown item at the root (\(s)) blocks the row",
+                  r.disposition == .block(ShredReview.note(for: s)) && r.message.contains(ShredReview.note(for: s)))
+        }
+        let emptyPartial = c(.partiallyDone(freedBytes: 0, kept: [], damaged: []), .same)
+        check("classify: a partial outcome with nothing listed doesn't crash and counts nothing",
+              emptyPartial.countedBytes == 0 && !emptyPartial.removedAnything && emptyPartial.disposition == .keep)
+        check("classify: skipped (missing) removes the row, counts nothing",
+              c(.skipped(.missing), .gone).disposition == .remove && c(.skipped(.missing), .gone).countedBytes == 0
+              && c(.skipped(.missing), .gone).message.contains("no longer there"))
+        let changed = c(.skipped(.changed(.replaced)), .same)
+        check("classify: skipped (changed) keeps the row and counts nothing", changed.disposition == .keep && changed.countedBytes == 0 && !changed.removedAnything)
+        let unexpected = c(.trashed(bytes: 9, recoveryPath: "/x"), .gone)
+        check("classify: a Trash result for a shred is unexpected: counts nothing, keeps the row, says where to look",
+              unexpected.countedBytes == 0 && unexpected.disposition == .keep && !unexpected.removedAnything
+              && unexpected.message == "Unexpected result; check \(root.path)")
+        let failed = c(.failed("can't be read"), .same)
+        check("classify: failed keeps the row, counts nothing, says nothing was changed",
+              failed.disposition == .keep && failed.countedBytes == 0 && failed.message.contains("Nothing was changed"))
+        let already = c(.failed("it stopped. Nothing was changed."), .same)
+        check("classify: doesn't repeat 'Nothing was changed'",
+              already.message.components(separatedBy: "othing was changed").count == 2)
+        check("classify: permission denied keeps the row, counts nothing",
+              c(.permissionDenied("no access"), .same).disposition == .keep && c(.permissionDenied("no access"), .same).countedBytes == 0)
+
+        // ShredReview.snapshots: protection, strict links, overlap, one snapshot per item
+        let home = SafetyGuard.home
+        let protectedDir = base.appendingPathComponent("protected-dir")
+        _ = file(protectedDir.appendingPathComponent("secret.txt"))
+        let withLink = base.appendingPathComponent("with-link")
+        _ = file(withLink.appendingPathComponent("a.txt"))
+        try? fm.createSymbolicLink(at: withLink.appendingPathComponent("to-protected"), withDestinationURL: protectedDir)
+        let plain = base.appendingPathComponent("plain")
+        _ = file(plain.appendingPathComponent("inner/b.txt"))
+        let inner = plain.appendingPathComponent("inner")
+        let single = file(base.appendingPathComponent("single.txt"))
+        ProtectedPaths.set(savedProtected + [protectedDir.path])
+        var calls: [String] = []
+        let counted: ShredReview.Snapshotter = { calls.append($0); return LocalFileSystem().shredSnapshot(at: $0) }
+        let rows = ShredReview.snapshots([("p", protectedDir), ("l", withLink), ("plain", plain), ("inner", inner),
+                                          ("s1", single), ("s2", single), ("ok", file(base.appendingPathComponent("ok.txt")))],
+                                         shredSnapshotter: counted)
+        func row(_ id: String) -> ShredReviewRow? { rows.first { $0.id == id } }
+        check("snapshots: a protected root is blocked and never snapshotted", row("p")?.blockedReason != nil && !calls.contains(AppCleanup.physicalPath(protectedDir)))
+        check("snapshots: a link inside that points at a protected path blocks the item", row("l")?.blockedReason != nil && row("l")?.snapshot == nil)
+        check("snapshots: a plain item is ready, with a candidate and display bytes",
+              row("plain")?.snapshot != nil && row("plain")?.candidate?.targets.count == 1 && (row("plain")?.allocatedBytes ?? 0) > 0)
+        check("snapshots: an item inside another is blocked as already included", row("inner")?.blockedReason == "Already included in plain" && row("plain")?.snapshot != nil)
+        check("snapshots: the same item twice is blocked once", row("s1")?.snapshot != nil && row("s2")?.blockedReason == "Already included in single.txt")
+        check("snapshots: an unrelated item stays ready", row("ok")?.snapshot != nil)
+        let expected = [withLink, plain, inner, single, single, base.appendingPathComponent("ok.txt")].map { AppCleanup.physicalPath($0) }
+        check("snapshots: the snapshot function ran exactly once per item that reached it", calls == expected)
+        check("snapshots: nothing in the review changed any file", fm.fileExists(atPath: single.path) && fm.fileExists(atPath: protectedDir.appendingPathComponent("secret.txt").path))
+        _ = home
+    }
+
+    // MARK: The Shredder screen end to end: review off the main thread, approval, executor (M01-04c-2)
+
+    static func shredScreen(dir: URL, runID: String, savedProtected: [String]) {
+        print("Shredder screen: review → approval → executor → list, History and message (M01-04c-2)")
+        let fm = FileManager.default
+        let base = dir.appendingPathComponent("shred-screen-\(runID)")
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { ProtectedPaths.set(savedProtected) }
+        @discardableResult func make(_ rel: String, _ text: String = "data") -> URL {
+            let u = base.appendingPathComponent(rel)
+            try? fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: u)
+            return u
+        }
+        func spin(_ done: () -> Bool) {
+            let end = Date().addingTimeInterval(30)
+            while !done() && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        }
+        func text(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
+        func shredRecords() -> [CleanupRecord] { MainActor.assumeIsolated { HistoryStore.shared.records.filter { $0.title == "Files Shredded" } } }
+        @MainActor func review(_ m: ShredderModel, _ urls: [URL]) -> ReviewRequest? {
+            m.add(urls)
+            let got = Slot<ReviewRequest>()
+            m.prepareReview { got.value = $0 }
+            spin { got.value != nil }
+            return got.value
+        }
+        @MainActor func confirm(_ m: ShredderModel, _ r: ReviewRequest) {
+            m.message = nil
+            ReviewConfirmation.confirm(r)
+            spin { m.message != nil }
+        }
+        let recordsAtStart = shredRecords().count
+
+        MainActor.assumeIsolated {
+            // 1. An approved folder with sub-folders
+            let m1 = ShredderModel()
+            let tree = make("tree/a.txt", String(repeating: "a", count: 5000))
+            make("tree/sub/deep/b.txt", String(repeating: "b", count: 5000))
+            let base1 = base.appendingPathComponent("tree")
+            guard let r1 = review(m1, [base1]) else { check("review: the sheet was presented", false); return }
+            check("review: the sheet lists the item ready with its measured size and a shred plan",
+                  r1.items.first?.blocked == nil && (r1.items.first?.size ?? 0) > 0 && r1.trashPlan != nil
+                  && m1.items.first?.isPreview == false && !m1.preparing)
+            check("review: the plan's disposition is overwrite-then-delete for module shredder",
+                  r1.trashPlan?.entries.allSatisfy { $0.disposition == .overwriteThenDelete && $0.candidate.module == "shredder" } == true)
+            confirm(m1, r1)
+            check("an approved shred removes the folder and its sub-folders and the row", !fm.fileExists(atPath: base1.path) && m1.items.isEmpty)
+            let recs = shredRecords()
+            let newest = recs.max { $0.date < $1.date }
+            check("History has 'Files Shredded' with the report's estimate and a measured free-space change",
+                  recs.count == recordsAtStart + 1 && newest?.outcome == .deleted && m1.lastReport != nil
+                  && newest?.bytes == m1.lastReport?.freedBytes && (newest?.bytes ?? 0) > 0 && newest?.measuredFreeChange != nil)
+            check("the message says 'about' and isn't an error", m1.message?.text.contains("Overwrote and deleted about") == true && m1.message?.isError == false)
+            _ = tree
+
+            // 2. Everything blocked: nothing runs
+            let m2 = ShredderModel()
+            let hard1 = make("blk/hard1.txt"), hard2 = base.appendingPathComponent("blk/hard2.txt")
+            link(hard1.path, hard2.path)
+            let locked = make("blk/locked.txt")
+            chflags(locked.path, UInt32(UF_IMMUTABLE))
+            let target = make("blk/target.txt")
+            let lnk = base.appendingPathComponent("blk/lnk")
+            try? fm.createSymbolicLink(at: lnk, withDestinationURL: target)
+            let outside = URL(fileURLWithPath: "/private/tmp/maccleaner-selftest-\(runID)-x")
+            let r2 = review(m2, [hard1, locked, lnk, outside])
+            check("review: a hard link, a locked file, a link as the item and an item outside home are all blocked rows",
+                  r2?.items.count == 4 && r2?.items.allSatisfy { $0.blocked != nil } == true && m2.ready.isEmpty)
+            check("review: with no ready row there is no plan, so confirm has nothing to approve", r2?.trashPlan == nil && r2?.allowed.isEmpty == true)
+            if let r2 { confirm(m2, r2) }
+            check("a nil approval shreds nothing and says so",
+                  m2.message?.text.hasPrefix("Nothing was shredded") == true && m2.message?.isError == true
+                  && [hard1, hard2, locked, target].allSatisfy { fm.fileExists(atPath: $0.path) } && text(hard1) == "data")
+            chflags(locked.path, 0)
+
+            // 3. A refused approval
+            let m3 = ShredderModel()
+            let t3 = make("t3/a.txt")
+            if let r3 = review(m3, [base.appendingPathComponent("t3")]), let plan = r3.trashPlan {
+                m3.message = nil
+                Task { @MainActor in await m3.shred(rows: [], approval: .refused(plan: plan, reason: "No approval was issued")) }
+                spin { m3.message != nil }
+                check("a refused approval shreds nothing and says why",
+                      m3.message?.text.contains("Nothing was shredded") == true && m3.message?.text.contains("No approval was issued") == true
+                      && text(t3) == "data" && m3.items.count == 1)
+            } else { check("refused approval: review was built", false) }
+
+            // 4. Edited between review and confirm
+            let m4 = ShredderModel()
+            make("t4/keep.txt", "untouched"); let edited = make("t4/edit.txt", "reviewed")
+            if let r4 = review(m4, [base.appendingPathComponent("t4")]) {
+                try? Data("reviewed and then edited".utf8).write(to: edited)
+                confirm(m4, r4)
+                check("a file edited after review is kept, reported, and the row stays",
+                      text(edited) == "reviewed and then edited" && m4.message?.isError == true && m4.items.count == 1
+                      && fm.fileExists(atPath: base.appendingPathComponent("t4").path))
+            } else { check("edited after review: review was built", false) }
+
+            // 5. Protected after review
+            let m5 = ShredderModel()
+            let t5 = make("t5/a.txt")
+            if let r5 = review(m5, [base.appendingPathComponent("t5")]) {
+                ProtectedPaths.set(savedProtected + [base.appendingPathComponent("t5").path])
+                confirm(m5, r5)
+                ProtectedPaths.set(savedProtected)
+                check("an item protected after review is skipped and nothing is touched",
+                      text(t5) == "data" && m5.message?.isError == true && m5.items.count == 1)
+            } else { check("protected after review: review was built", false) }
+
+            // 6. Changed between add and review: the sheet shows the fresh size or blocked state, not the preview
+            let m6 = ShredderModel()
+            let f6 = make("t6/grow.txt", "tiny"), f6b = make("t6/later-linked.txt")
+            m6.add([f6, f6b])
+            check("add: rows appear at once, sized off the main thread (preview, not reviewed)",
+                  m6.items.count == 2 && m6.items.allSatisfy { $0.isPreview && $0.blocked == nil })
+            try? Data(repeating: 7, count: 300_000).write(to: f6)
+            link(f6b.path, base.appendingPathComponent("t6/other-name").path)
+            let got6 = Slot<ReviewRequest>()
+            m6.prepareReview { got6.value = $0 }
+            let busyAdd = { m6.add([base.appendingPathComponent("t6/x")]); return m6.items.count }()
+            check("while a review is prepared, Add does nothing and the model is busy", m6.preparing && busyAdd == 2 && m6.busy)
+            spin { got6.value != nil }
+            let grown = got6.value?.items.first { $0.id == f6.path }
+            check("review: the sheet shows the item's fresh size, not the preview",
+                  (grown?.size ?? 0) >= 300_000 && m6.items.first { $0.id == f6.path }?.isPreview == false)
+            check("review: an item that became a hard link after it was added is blocked now",
+                  got6.value?.items.first { $0.id == f6b.path }?.blocked != nil && m6.items.first { $0.id == f6b.path }?.blocked != nil)
+
+            // 7. The builder's perform does nothing
+            let rows7 = ShredReview.snapshots([(id: "p", url: make("t7/a.txt"))])
+            let called = Slot<Bool>()
+            let req7 = ReviewBuild.shred(rows: rows7) { _, _ in called.value = true }
+            req7.perform(["p"])
+            check("builder: perform does nothing; only the approved path runs the model", called.value == nil && text(base.appendingPathComponent("t7/a.txt")) == "data")
+            check("builder: the request is the permanent, acknowledged 'Shred' review",
+                  req7.verb == "Shred" && req7.needsAcknowledgement && req7.items.first?.note == "cannot be recovered"
+                  && req7.items.first?.size == rows7.first?.allocatedBytes)
+
+            // 8. Root replaced after shredding: the replacement stays, blocked, untouched
+            let x8 = make("t8/x.txt", "reviewed")
+            let rows8 = ShredReview.snapshots([(id: x8.path, url: x8)])
+            if let plan8 = ReviewBuild.shred(rows: rows8, perform: { _, _ in }).trashPlan, let target8 = plan8.candidates.first?.targets.first {
+                let m8 = ShredderModel()
+                m8.add([x8])
+                try? fm.removeItem(at: x8)
+                make("t8/x.txt", "a new file that must survive")
+                let out = ItemOutcome(candidateID: x8.path, target: target8, result: .removed(bytes: 100), removedFiles: 1)
+                let rep8 = CleanupReport(planDigest: plan8.digest, outcomes: [out], wasCancelled: false)
+                m8.finish(report: rep8, plan: plan8, rootStates: ShredderModel.rootStates(report: rep8, plan: plan8), freeBefore: 0, freeAfter: 0)
+                check("a different item at the path after shredding stays in the list, blocked, and is untouched",
+                      text(x8) == "a new file that must survive" && m8.items.first?.blocked == ShredReview.otherItemNote
+                      && m8.message?.text.contains("different item") == true)
+            } else { check("replaced root: plan was built", false) }
+
+            // 9. Gone, but its work folder is left behind
+            let d9 = make("t9/item/a.txt")
+            let rows9 = ShredReview.snapshots([(id: d9.deletingLastPathComponent().path, url: d9.deletingLastPathComponent())])
+            if let plan9 = ReviewBuild.shred(rows: rows9, perform: { _, _ in }).trashPlan, let target9 = plan9.candidates.first?.targets.first {
+                let m9 = ShredderModel()
+                m9.add([d9.deletingLastPathComponent()])
+                try? fm.removeItem(at: d9.deletingLastPathComponent())
+                let staging = KeptEntry(path: base.path + "/t9/.maccleaner-shred-abc", reason: .stagingLeftBehind)
+                let out = ItemOutcome(candidateID: plan9.candidates[0].id, target: target9,
+                                      result: .partiallyDone(freedBytes: 50, kept: [staging], damaged: []), removedFiles: 1)
+                let before = shredRecords().count
+                let rep9 = CleanupReport(planDigest: plan9.digest, outcomes: [out], wasCancelled: false)
+                m9.finish(report: rep9, plan: plan9, rootStates: ShredderModel.rootStates(report: rep9, plan: plan9), freeBefore: 5, freeAfter: 3)
+                check("an item gone with a work folder left behind leaves the list and says where the folder is",
+                      m9.items.isEmpty && m9.message?.text.contains("work folder") == true && m9.message?.text.contains(staging.path) == true
+                      && m9.message?.isError == true)
+                check("…and History records it with a free-space change of at least zero",
+                      shredRecords().count == before + 1 && shredRecords().max { $0.date < $1.date }?.measuredFreeChange == 0)
+            } else { check("leftover work folder: plan was built", false) }
+
+            // 5b. One file inside protected after review: an item that holds a protected file is refused whole (the root check),
+            // so nothing in it is touched (the executor's per-entry check is covered by the package tests)
+            let m5b = ShredderModel()
+            let a5b = make("t5b/a.txt", "A"), b5b = make("t5b/b.txt", "B"), c5b = make("t5b/c.txt", "C")
+            if let r5b = review(m5b, [base.appendingPathComponent("t5b")]) {
+                ProtectedPaths.set(savedProtected + [AppCleanup.physicalPath(b5b)])
+                confirm(m5b, r5b)
+                ProtectedPaths.set(savedProtected)
+                check("an item holding a file protected after review is refused whole: nothing in it is touched",
+                      text(a5b) == "A" && text(b5b) == "B" && text(c5b) == "C" && m5b.message?.isError == true)
+            } else { check("a file protected after review: review was built", false) }
+
+            // 10. A real partial result (#7): the second of three files is edited after review. The first is shredded,
+            // the edited one and the one after it stay, and the message says how far it got.
+            let m10 = ShredderModel()
+            let a10 = make("t10/a.txt", "A"), b10 = make("t10/b.txt", "B"), c10 = make("t10/c.txt", "C")
+            if let r10 = review(m10, [base.appendingPathComponent("t10")]) {
+                try? Data("B edited after review".utf8).write(to: b10)
+                confirm(m10, r10)
+                let msg = m10.message?.text ?? ""
+                check("a stopped shred keeps the failed file and the rest, and the row stays",
+                      !fm.fileExists(atPath: a10.path) && text(b10) == "B edited after review" && text(c10) == "C" && m10.items.count == 1)
+                check("a partial result says how far it got: 'stopped after N of M file(s)' and 'only partly'",
+                      msg.contains("stopped after 1 of 3 file(s)") && msg.contains("1 item(s) only partly") && m10.message?.isError == true)
+                check("a partial result names what was kept, at its current path", msg.contains(b10.path) || msg.contains(AppCleanup.physicalPath(b10)))
+            } else { check("partial result: review was built", false) }
+
+            // 11. A file overwritten part-way and kept (#8) is named as damaged in the message (a real outcome needs a
+            // failing disk write, which only the package tests can make; the model's mapping is fed the outcome shape).
+            let d11 = make("t11/item/a.txt", "AAAAAAAA"); make("t11/item/b.txt", "B")
+            let rows11 = ShredReview.snapshots([(id: "t11", url: d11.deletingLastPathComponent())])
+            if let plan11 = ReviewBuild.shred(rows: rows11, perform: { _, _ in }).trashPlan, let target11 = plan11.candidates.first?.targets.first {
+                let m11 = ShredderModel()
+                m11.add([d11.deletingLastPathComponent()])
+                let out = ItemOutcome(candidateID: "t11", target: target11,
+                                      result: .partiallyDone(freedBytes: 0, kept: [KeptEntry(path: AppCleanup.physicalPath(d11), reason: .failed("damaged: writing failed"))],
+                                                             damaged: [AppCleanup.physicalPath(d11)]), removedFiles: 0)
+                let rep11 = CleanupReport(planDigest: plan11.digest, outcomes: [out], wasCancelled: false)
+                m11.finish(report: rep11, plan: plan11, rootStates: ShredderModel.rootStates(report: rep11, plan: plan11), freeBefore: 0, freeAfter: 0)
+                let msg = m11.message?.text ?? ""
+                check("a damaged file is named in the message and the row stays",
+                      msg.contains(AppCleanup.physicalPath(d11)) && msg.contains("partly overwritten") && m11.items.count == 1
+                      && m11.message?.isError == true)
+            } else { check("damaged file: plan was built", false) }
+
+            // 13. The same item spelled two ways is one row (N4)
+            let dir13 = base.appendingPathComponent("t13"); make("t13/sub/a.txt")
+            let m13 = ShredderModel()
+            m13.add([dir13, dir13.appendingPathComponent("sub").appendingPathComponent(".."), URL(string: "file://" + dir13.path + "/")!])
+            check("adding the same folder as …/dir, …/dir/sub/.. and …/dir/ gives one row, id = its standardized path",
+                  m13.items.count == 1 && m13.items.first?.id == dir13.standardizedFileURL.path)
+
+            // 14. A review with some rows blocked: the allowed ids are exactly the plan's candidates (N9)
+            let m14 = ShredderModel()
+            let ok14 = make("t14/ok.txt"), hl14 = make("t14/hard.txt")
+            link(hl14.path, base.appendingPathComponent("t14-alias").path)
+            let ok14b = make("t14/ok2/b.txt")
+            if let r14 = review(m14, [ok14, hl14, ok14b.deletingLastPathComponent()]) {
+                check("mixed review: the allowed row ids are exactly the plan's candidate ids",
+                      Set(r14.allowed.map(\.id)) == Set(r14.trashPlan?.candidates.map(\.id) ?? ["no plan"])
+                      && r14.allowed.count == 2 && r14.items.count == 3 && r14.items.contains { $0.blocked != nil })
+            } else { check("mixed review: review was built", false) }
+
+            // 15. A shred plan is never approved or run as a Trash move, and a Trash plan is never run as a shred (S1)
+            let m15 = ShredderModel()
+            let keep15 = make("t15/keep.txt", "keep")
+            let rows15 = ShredReview.snapshots([(id: "k15", url: keep15)])
+            let got15 = Slot<TrashApproval?>()
+            let shredReq = ReviewBuild.shred(rows: rows15) { _, approval in got15.value = .some(approval) }
+            check("a shred plan is refused by the Trash approval guard", shredReq.trashPlan.flatMap { AppCleanup.nonTrashRefusal($0) } != nil)
+            ReviewConfirmation.confirm(shredReq)
+            spin { got15.value != nil }
+            if case .some(.some(let shredApproval)) = got15.value {
+                let ran = wait { await AppCleanup.moveToTrash(shredApproval, source: "Self-test") }
+                check("a shred-disposition plan is refused by moveToTrash and nothing is touched",
+                      ran?.moved.isEmpty == true && ran?.problems.isEmpty == false && text(keep15) == "keep")
+            } else { check("a shred approval was issued for the guard test", false) }
+            if case .some(.some(let trashApproval)) = confirmTrashReview([make("t15/trash-me.txt", "trash")]) {
+                m15.message = nil
+                Task { @MainActor in await m15.shred(rows: [], approval: trashApproval) }
+                spin { m15.message != nil }
+                check("a Trash plan is refused by ShredderModel.shred and nothing is touched",
+                      m15.message?.text.contains("isn't a shred plan") == true && text(base.appendingPathComponent("t15/trash-me.txt")) == "trash")
+            } else { check("a Trash approval was issued for the guard test", false) }
+
+            // 16. Already shredding: a second request while busy is told so, not dropped silently (N1)
+            let m16 = ShredderModel()
+            m16.working = true
+            m16.message = nil
+            Task { @MainActor in await m16.shred(rows: [], approval: nil) }
+            spin { m16.message != nil }
+            check("a shred requested while one is running says 'Already shredding'", m16.message?.text == "Already shredding" && m16.working)
+        }
+
+        // 12. No shred work folder is left anywhere in the self-test area (#23).
+        let leftover = (fm.enumerator(atPath: dir.path)?.allObjects as? [String] ?? [])
+            .filter { ($0 as NSString).lastPathComponent.hasPrefix(LocalFileSystem.shredStagingPrefix) }
+        check("no shred work folders are left in the self-test area", leftover.isEmpty)
     }
 
     // MARK: SDK archives and System Data through the executor (M01-04b-3a)

@@ -21,6 +21,7 @@ enum AlertConfirmation {
             run(nil, shown.refusal ?? "It couldn't be identified. Scan again")
             return
         }
+        if let why = AppCleanup.nonTrashRefusal(plan) { run(.refused(plan: plan, reason: why), nil); return }
         Task { @MainActor in
             do {
                 run(.approved(ApprovedTrash(plan: plan, approval: try await AppCleanup.executor.approve(plan, by: .userInApp))), nil)

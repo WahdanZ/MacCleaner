@@ -235,14 +235,4 @@ enum ReviewBuild {
                       trashPlan: AppCleanup.trashPlan(items, module: "system-data"),
                       performApproved: { ok, approval in perform(chosen.filter { ok.contains($0.id) }, approval) })
     }
-
-    static func shred(_ items: [ShredderModel.Item], perform: @escaping ([ShredderModel.Item]) -> Void) -> ReviewRequest {
-        ReviewRequest(title: "Shred Permanently",
-                      explanation: "Shredding skips the Trash and cannot be undone.",
-                      items: items.map {
-                          ReviewItem(id: $0.id, name: $0.url.lastPathComponent, location: $0.url.path, size: $0.size,
-                                     action: .delete, risk: .review, note: "cannot be recovered", blocked: $0.blocked)
-                      },
-                      verb: "Shred", perform: { ok in perform(items.filter { ok.contains($0.id) }) })
-    }
 }

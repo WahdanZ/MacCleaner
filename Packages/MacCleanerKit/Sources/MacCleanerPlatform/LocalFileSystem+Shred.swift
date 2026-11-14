@@ -1,7 +1,7 @@
 import Foundation
 import MacCleanerCore
 
-// Overwrite-then-delete (the Shredder), moved here from the app's ShredEngine step for step (M01-04c). Two parts:
+// Overwrite-then-delete (the Shredder), moved here from the app's former Shredder engine step for step (M01-04c). Two parts:
 //
 // * `shredSnapshot(at:)` lists an item once, without following links, and either refuses it (nothing changed) or
 //   returns the exact `.tree` target to review, with its sizes from the same walk.

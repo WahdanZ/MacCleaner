@@ -65,7 +65,7 @@ There is no separate menu-bar helper process; the menu bar panel (`MenuBarPopove
 | Storage Map | `DiskMap*.swift`, `Treemap.swift`, `DirSize.swift` | `DiskScanner` (getattrlistbulk), `DirSize`, `SizeCache`, `WalkPool` |
 | System Data (TM snapshots, iOS backups, Messages attachments, Mail) | `SystemData.swift` | `SysItem`, `SysReport` |
 | Startup & Extensions (login items, launch agents/daemons, pref panes, plug-ins) | `SystemItems.swift` | `AppEngine.removeSystemItems` |
-| Shredder | `Shredder.swift` | `ShredEngine` |
+| Shredder | `Shredder.swift`, `ShredReview.swift` | `CleanupExecutor` (`overwriteThenDelete`); `ShredEngine` was removed in M01-04c (#46) |
 | Trash + Put Back | `Trash.swift`, `TrashView.swift` | `TrashLog`, `TrashOps` |
 | Review sheet (all destructive UI flows) | `Review.swift`, `ReviewBuilders.swift` | `ReviewCenter`, `ReviewRequest`, `ReviewBuild` |
 | History | `History.swift`, `SharedFile.swift` | `HistoryStore` (JSON file under a lock file) |
@@ -88,8 +88,10 @@ There is no separate menu-bar helper process; the menu bar panel (`MenuBarPopove
   `mv -n`, chowns only the staging dir (#16).
 * **Shell** — every subprocess has a time limit and process-group kill (#18).
 
+*Status at the audit.* M01-04 has since put Trash moves and the Shredder on `CleanupExecutor` (#35–#46); `ShredEngine` and `AppEngine.trash` are gone. The modules still on their own loop are listed in `ROADMAP_V2.md` (M01-06…11). The paragraph below describes the audited baseline.
+
 There is **no shared cleanup executor**: each module (`Cleaner.run`, `SDKEngine.remove`, `ProjectEngine`,
-`AppEngine`, `ShredEngine`, `DupFinder`, `TrashOps`) implements its own revalidate/execute/record loop.
+`AppEngine`, `ShredEngine` (since removed), `DupFinder`, `TrashOps`) implements its own revalidate/execute/record loop.
 There is **no `ScanOutcome`/completeness model**: enumerators in `Scanner.swift`, `Projects.swift`,
 `Duplicates.swift`, `Shredder.swift` use `errorHandler: { _, _ in true }`, so unreadable folders are skipped
 silently.
@@ -125,7 +127,7 @@ Swift 6 diagnostics already emitted in Swift 5 mode (baseline build): `Insights.
 | Measure | Value | How |
 |---|---|---|
 | Clean Release build | 73.7 s wall | `xcodebuild … -configuration Release CODE_SIGN_IDENTITY=- build` into a scratch SYMROOT |
-| Compiler warnings | 4 unique Swift warnings (+1 AppIntents notice) | build log |
+| Compiler warnings | 4 unique Swift warnings (+1 AppIntents notice) | build log. Re-measured on main `800c3cd` (M01-04d): the same 4, now enforced by `scripts/check-warnings.sh` and `scripts/warnings-baseline.txt` |
 | Self-test (real home not touched) | 197 passed / 2 failed, ~7 s | `CFFIXED_USER_HOME=<tmp>` with `Documents`, `Library/Caches`, `.cache`, `.Trash` pre-created |
 
 The two failures under a relocated home are fixture-environment issues, not product regressions:

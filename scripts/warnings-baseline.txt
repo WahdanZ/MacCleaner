@@ -1,0 +1,7 @@
+# Accepted Swift compiler warnings (M01-04d), from a clean Release build of main 800c3cd. All four are
+# Swift 6 language-mode diagnostics that M01-05 / M01-12 (strict concurrency, Swift 6 mode) remove.
+# The budget only goes down: delete a line when its warning is fixed; never add one. See scripts/check-warnings.sh.
+MacCleaner/Insights.swift: main actor-isolated static property 'keepDays' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode
+MacCleaner/Overview.swift: capture of 'buf' with non-Sendable type 'UnsafeMutableBufferPointer<Int64>' in a '@Sendable' closure
+MacCleaner/Overview.swift: capture of 'buf' with non-Sendable type 'UnsafeMutableBufferPointer<Int64>' in a '@Sendable' closure
+MacCleaner/Updates.swift: main actor-isolated static property 'repo' cannot be accessed from outside of the actor; this is an error in the Swift 6 language mode

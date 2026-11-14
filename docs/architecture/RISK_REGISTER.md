@@ -40,7 +40,7 @@ safety guarantee weaker than stated · **Low** = inconsistency with no known los
 | TrashGuard case/symlink bypass | #15 | `TrashGuard.key` lower-cases and resolves parent symlinks |
 | Weekly clean runs simulator commands | #15 | `AutoClean.select` only accepts file/folder actions |
 | MCP confirm without preview | #15 | `MCPServer.approve` single-use id, tool + digest bound (see RISK-004 for what remains) |
-| Shredder hard links / locked files | #15 | `ShredEngine.shred` refuses items with `st_nlink > 1` or unwritable files (see RISK-001 for what remains) |
+| Shredder hard links / locked files | #15 | `ShredEngine.shred` refused items with `st_nlink > 1` or unwritable files; `ShredEngine` is removed and the executor's `overwriteThenDelete` now applies the checks (M01-04c, #45/#46; see RISK-001 for what remains) |
 | Unsigned updates | #15 | `Updater.offerable` requires `.sig`; `prepare` checks SHA-256, Ed25519, bundle id, version, `codesign --verify --deep --strict`; swap with restore on failure |
 | Review runs live selection | #18 | `ReviewRequest.perform` receives reviewed ids |
 | Concurrent history/Trash log writes | #18 | `SharedFile` lock + re-read + write |

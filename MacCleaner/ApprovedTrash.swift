@@ -39,6 +39,13 @@ enum AppCleanup {
         try? LocalFileSystem().identity(at: physicalPath(url))
     }
 
+    /// Why a plan can't go through a Trash runner or approver: it holds something that isn't a Trash move (a shred, a
+    /// permanent delete, a command). nil for a plan that is Trash moves only. Defence in depth: a plan's disposition is
+    /// also checked by the executor, but a shred plan must never be approved or run as a Trash move.
+    static func nonTrashRefusal(_ plan: CleanupPlan) -> String? {
+        plan.entries.allSatisfy { $0.disposition == .trash } ? nil : "This isn't a Trash move; nothing was changed"
+    }
+
     /// A Trash plan from exactly the reviewed items that have a snapshot and aren't blocked. nil when there are none.
     static func trashPlan(_ items: [ReviewItem], module: String) -> CleanupPlan? {
         trashPlan(items.compactMap { i in
@@ -85,6 +92,7 @@ enum AppCleanup {
         case .approved(let a): approved = a
         case .refused(let plan, let reason): return TrashRun(problems: plan.candidates.map { ($0.id, reason) })
         }
+        if let why = nonTrashRefusal(approved.plan) { return TrashRun(problems: approved.plan.candidates.map { ($0.id, why) }) }
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         let sizes = Dictionary(approved.plan.candidates.map { ($0.id, $0.estimatedBytes) }, uniquingKeysWith: { a, _ in a })
         let record = recordMove, after = afterRecording
@@ -272,22 +280,6 @@ struct TrashRun: Sendable {
     /// Each planned item's outcome, by id.
     var outcomes: [String: ItemOutcome.Result] = [:]
     var report: CleanupReport?
-}
-
-/// The app's protection rules for the executor, read as they are when asked.
-struct AppProtection: ProtectionChecking {
-    func refusal(path: String, disposition: Disposition) -> String? {
-        let url = URL(fileURLWithPath: path)
-        switch disposition {
-        case .trash:
-            return TrashGuard.reason(url)
-        case .permanentDelete:
-            if let why = ProtectedPaths.reason(url) { return why }
-            return SafetyGuard.isAllowed(url, allowContainer: true) ? nil : "Outside the folders Mac Cleaner may delete"
-        case .overwriteThenDelete, .quarantine, .command:
-            return "Not handled by the cleanup executor yet"
-        }
-    }
 }
 
 /// Carries a run's result out of a detached task (written once before the semaphore is signalled).

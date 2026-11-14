@@ -1,7 +1,8 @@
 # M01-04c — Shredder through the cleanup executor (design, for review)
 
-Status: revision 2, approved. **04c-1 (Core, Platform, executor, package tests) is implemented in the PR that adds this
-file; 04c-2 (the app) is not started.** Base: `main` at c49f6e7.
+Status: revision 2, approved. **04c-1 (Core, Platform, executor, package tests) is merged (#45). 04c-2 (the app) is
+implemented on `m01-04c-2-shred-app`**, with the amendments from its pre-implementation Opus review listed under
+"04c-2 amendments" below. Base: `main` at c49f6e7 (04c-1), dda092d (04c-2).
 Two pull requests:
 
 - **04c-1** adds the Core and Platform pieces with package tests. The app doesn't use them yet.
@@ -235,6 +236,66 @@ The **package** tests use real files with `LocalFileSystem`'s internal test hook
 | Estimates | History gets `bytes` = the report's estimate **and** `measuredFreeChange` set; the message says "about" | self-test |
 | Gone + leftover | everything shredded, staging left (hook) → the outcome has only `stagingLeftBehind` and the root is gone → counted as shredded, row removed, message gives the work-folder path, History counts it | package (outcome) and self-test (the model's pure mapping, real and synthetic outcomes) |
 | Gone + kept in staging | a file that couldn't be put back stays in staging, the root is gone → reported as partly shredded with the staging path, not as shredded | package and self-test |
+
+## 04c-2 amendments (pre-implementation Opus review)
+
+These refine §1b, §2c, §4 and §5. Where they differ from the text above, they win.
+
+- **Root identity, not existence (§2c).** After a run, the item's path is compared with the reviewed root:
+  `.gone` (nothing there), `.same` (device, inode and kind match; modification time is ignored, so a damaged
+  file still counts as the same item), `.other` or `.unknown`. A different item at the path is never removed
+  from the list and never treated as what was left of the item. Its row stays, blocked with "A different item
+  is now at this path; it was not touched". The "shredded, leftover work folder" case also requires `.gone`
+  and `removedFiles` equal to the number of planned files. Any other outcome, such as a Trash result, is
+  reported as unexpected, and nothing is counted.
+- **Snapshots off the main thread (§1b).** Shred starts one background pass (`ShredReview.snapshots`). For each
+  item it checks the root's protection, takes one `shredSnapshot`, checks every entry's protection on that
+  snapshot (strict: a link inside the item that points at a protected item blocks it), and checks overlap
+  (an item inside another listed item, or the same item twice, is blocked). Its rows (`ShredReviewRow`, which
+  only that pass can create) feed the screen, the sheet and the plan. Add, remove, drop and Shred are disabled
+  while it runs, and a stale result is discarded.
+- **The approved plan, unchanged (§5).** The approved plan runs through `AppCleanup.executor.execute` without
+  any filtering (filtering would change the digest) and never through the Trash helper. With no approval, or
+  a refused one, nothing is shredded.
+- **Approval-site rules (§5).** The builder lives in `ShredReview.swift` and the rule in `AppProtection.swift`,
+  so the rules can be enforced file by file. `shredSnapshot(`, `overwriteThenDelete`, `overwriteAndRemove(`,
+  `.execute(` and the self-test seam each have an allow-list, and `ShredEngine` is banned.
+- **Known limit.** `HistoryStore` ignores records of 0 bytes, so a shred whose estimate is exactly 0 adds no
+  History row.
+
+## 04c-2: what happened to each Shredder self-test
+
+The app's own Shredder engine (`ShredEngine`) and its self-test sections were removed in 04c-2. Every check was compared with its replacement by fixture and assertions before it was deleted. Where the package test was weaker, it was strengthened first (marked below). The app-only rules (`AppProtection`, the review, the message, History) are tested end to end in the self-test sections "Shredder review" and "Shredder screen".
+
+| Old self-test check | Replacement | Same fixture and assertions? | Action |
+|---|---|---|---|
+| refuses a folder holding a hard link; the other copy is untouched | `ShredTests.swift:58` `hardLinksAreRefusedAsTheItemOrInside`; self-test `Shredder screen` "a hard link, a locked file, a link as the item and an item outside home are all blocked rows" | yes. Same fixture (a hard link elsewhere); the package test also asserts the other copy and the item are unchanged (assertion added in this stage). The old self-test's "item still exists" is asserted as `item/a` content | deleted |
+| re-checks protection right before shredding | `ShredExecutorTests.swift:55` `protectedAtExecutionTheItemIsSkipped`; `ShredTests.swift:462` `anEntryProtectedDuringTheShredStopsTheItem`; self-tests "an item protected after review is skipped and nothing is touched" and "an item holding a file protected after review is refused whole: nothing in it is touched" | yes in intent and assertions (refused or skipped, file intact). Differs: the old test protected the item before the run; the new ones protect it after review, which is stricter (end to end through `AppProtection` and the executor). The self-test proves the executor's root check refuses an item that holds a protected file; the per-entry stop during a shred is covered by the package test `ShredTests.swift` `anEntryProtectedDuringTheShredStopsTheItem` | deleted (ported) |
+| refuses a locked file instead of calling it shredded | `ShredTests.swift:70` `lockedUnreadableHugeSpecialAndLinkItemsAreRefused`; self-test blocked-rows check (locked) | yes. Same fixture; assertion that the file is still there with its content added to the package test | deleted |
+| overwrites and deletes a normal folder with sub-folders | `ShredTests.swift:115` `aFolderWithSubfoldersIsOverwrittenAndRemoved`; self-test "an approved shred removes the folder and its sub-folders and the row" and "History has 'Files Shredded'…" | yes. The package fixture now has the same `sub/deeper/` nesting; asserts complete, 2 files, tree gone, no staging folder, empty warnings (plus the block-based estimate) | deleted |
+| refuses items outside the home folder | self-test "the Shredder rule refuses items outside the home folder (/private/tmp, /Applications)" and the blocked outside-home row | yes: the same two paths the old check used, now against `AppProtection`'s `.overwriteThenDelete` rule (`ShredEngine.reason` is gone) | ported |
+| a failed write keeps that file and everything after it in place; nothing un-overwritten is deleted | `ShredTests.swift:136` `aFailedWriteKeepsThatFileAndEverythingAfterIt` | yes. Three files, the first overwrite succeeds and the next fails; asserts first gone, b and c intact with content, kept is the failed file with "writing failed", nothing damaged, folder stays, no staging | deleted |
+| partial result is reported: what was kept and how many files of the total | `ShredTests.swift:136` (what was kept, with why); self-test "a partial result says how far it got: 'stopped after N of M file(s)' and 'only partly'" | the package test asserts the kept entry and reason; the wording is the app's, tested end to end with a real executor outcome (a file edited after review in a three-file item: 1 of 3 shredded, the others kept). The old exact text ("2 of 3 file(s) were kept") is replaced by "stopped after 1 of 3 file(s)" | deleted (ported) |
+| a write that fails half-way keeps the file and reports it as damaged, not shredded | `ShredTests.swift:152` `aWriteFailingHalfWayIsReportedAsDamaged`; `ShredTests.swift:444` `aShortWriteInTheRealOverwriteIsReportedAsDamaged`; self-test "a damaged file is named in the message and the row stays" | yes. The package test now asserts the exact content (`\0\0\0ret data`: zeroed start, rest as it was), damaged = that file, not overwritten, no staging. The message naming the damaged path is the new self-test (fed the outcome shape through `finish`; a failing disk write can't be made without the package hooks) | deleted (ported) |
+| a failed flush keeps the file | `ShredTests.swift:167` `aFailedFlushKeepsTheFile` | yes (0 overwritten, file kept, not complete, no staging) | deleted |
+| refuses a folder with an unreadable folder inside, untouched | `ShredTests.swift:70` `lockedUnreadableHugeSpecialAndLinkItemsAreRefused` | yes. Assertions added in this stage: the top file and the hidden file keep their content after the refusal | deleted |
+| refuses a folder holding a file over 4 GB, untouched | `ShredTests.swift:70` (same test) | yes. Sibling small file added and asserted untouched, the sparse file still there | deleted |
+| refuses a folder holding a pipe, untouched | `ShredTests.swift:70` (same test) | yes. Sibling file added and asserted untouched | deleted |
+| data appended after the overwrite is overwritten too, before the file is closed | `ShredTests.swift:219` `dataAppendedAfterTheOverwriteIsOverwrittenToo` | yes. Strengthened in this stage to the old exact assertions: size 12 + tail, all zero through the other app's handle, file gone, no warning | deleted |
+| a file replaced right before it is moved is put back untouched, not overwritten or deleted | `ShredTests.swift:247` `aFileReplacedRightBeforeTheMoveIsPutBackUntouched`; `ShredTests.swift:258` `aFileReplacedByAnAtomicSaveRightBeforeTheMoveIsPutBackUntouched` (new) | yes. The new test uses the old fixture (a, then b replaced by an atomic rename right before its move): a overwritten, b = the new version, kept as changed after review, no staging | deleted (ported to a package test) |
+| a file edited after the review is kept as it is | `ShredTests.swift:273` `aFileEditedAfterReviewIsKeptAsItIs`; self-test "a file edited after review is kept, reported, and the row stays" | yes | deleted |
+| a file added after the review is left untouched and the folder stays | `ShredTests.swift:282` `entriesAddedAfterReviewAreUntouchedAndTheirFolderStays` | yes, and stronger (added file and added folder, a replaced file, kept = the folder, not empty) | deleted |
+| a sub-folder swapped for a link before shredding: the link's target is untouched | `ShredTests.swift:306` `aSubfolderSwappedForALinkBeforeStartingLeavesTheTargetUntouched` | yes. The hook now moves the folder away (as the old test did) instead of deleting it, and the test asserts the moved folder's content and no staging | deleted |
+| a sub-folder swapped for a link mid-shred: the planned file is shredded, the link's target untouched | `ShredTests.swift:318` `aSubfolderSwappedForALinkMidShredLeavesTheTargetUntouched` | yes. Fixture now has the top file `a` too (2 files overwritten), the moved file is not shredded, the link is still a link to the outside folder, the target is intact | deleted |
+| the item's folder swapped for a link: refused, nothing changed on either side | `ShredTests.swift:336` `theItemsFolderSwappedForALinkIsRefusedWithNothingChanged` | yes (refused as replaced; both sides keep their content; no staging) | deleted |
+| a link inside a folder is removed, its target untouched | `ShredTests.swift:176` `aLinkInsideIsRemovedAndItsTargetIsUntouched` | yes. A file next to the link was added to the fixture, so 1 file overwritten, tree gone, target intact | deleted |
+| refuses a link as the item itself | `ShredTests.swift:70` `lockedUnreadableHugeSpecialAndLinkItemsAreRefused`; self-test blocked-rows check (link as the item) | yes. Assertions added: the target keeps its content and the link is still a link | deleted |
+| a staging folder that can't be removed means the result is not 'removed', and says where it is | `ShredTests.swift:183` `aStagingFolderThatCantBeRemovedIsReportedWithItsPath`; self-test "an item gone with a work folder left behind leaves the list and says where the folder is" | yes (gone, 1 file, kept = only the staging folder, not complete). The model's mapping is the self-test (synthetic outcome of the same shape) | deleted |
+| no staging folders are left anywhere in the test area | `noStaging` in the package tests listed above; self-test "no shred work folders are left in the self-test area" | yes: asserted after every package fixture that shreds, and after the app's end-to-end shreds | deleted (ported) |
+
+Summary: 23 old checks, plus the "Shredder refuses protected (same rule)" check, which stays in the self-test and now checks `AppProtection` (and a protected folder's contents, an unprotected home item, /Applications). Of the 23: 17 deleted as exactly covered by a package test, 6 deleted after being ported (outside-home rule, protection after review, partial wording, damaged named in the message, the atomic-save replacement test, no staging left). No check was dropped without an equivalent. Added in this stage: one package test, the strengthened assertions above, and the self-tests for a real partial result, an item holding a protected file (refused whole at the root check; the per-entry stop during a shred is the package test `anEntryProtectedDuringTheShredStopsTheItem`) and a damaged file in the message.
+
+Limits: the damaged-file message (#8) and the work-folder message use outcomes of the real shape fed through `ShredderModel.finish`, because only the package's internal hooks can make a disk write fail. Their executor behaviour is covered by the package tests above.
 
 ## Trade-offs
 

@@ -48,16 +48,21 @@ guards are written for that and **fail toward refusing** on a case-sensitive APF
 | User protection (`UserProtection`) | case-folded | A folder differing only in case from a protected one is also protected (stricter, never looser). |
 | Move to Trash (`TrashRules`: structural, sensitive) | case-folded key | A separate `~/documents` folder is refused as a system folder (stricter). Its contents follow the normal rules. |
 | Permanent delete allow-list (`PermanentDeleteRules`) | exact, on the resolved path | Only the real `~/Library/Caches` etc. qualify; a look-alike `~/library/caches` is a different folder and is never swept. |
+| Shredder "inside the home folder" (`AppProtection.shredReason`) | exact, parent links resolved | A case-distinct folder such as `/Users/ME` is not your home and is refused; the Trash rules (case-folded) still apply first. |
 
 Verified on a case-sensitive APFS disk image (2026-11-13): the isolated self-test passes 258/258 with the test home
 on that volume, and a separate lowercase `~/documents` is refused by Move to Trash.
 
-## 3. Shredder semantics (on `main` since #26)
+## 3. Shredder semantics (since #26; through the cleanup executor since M01-04c-2)
 
-* **Plan at review.** When an item is added, it is listed without following links and every entry's identity
-  is recorded (device, inode, type; size and modification time for files). It is refused untouched if any
-  folder can't be read completely, any entry is a hard link, locked, unwritable, over 4 GB, a pipe/socket/device,
-  or the item itself is a link. Shredding executes this reviewed plan.
+* **Snapshot at review.** When the review sheet opens, each item is listed once, off the main thread, without
+  following links, and every entry's identity is recorded (device, inode, type, link count, flags; size and
+  modification time for files). The sheet's sizes, its blocked rows and the approved plan all come from that one
+  snapshot; the size shown when an item is added is a labelled preview and never feeds the plan. An item is
+  refused untouched if any folder can't be read completely, any entry is a hard link, locked, unwritable, over
+  4 GB, a pipe/socket/device, protected (a link inside it pointing at a protected item counts), on another
+  volume, or inside another listed item, or if the item itself is a link. Only `ReviewConfirmation` approves the
+  plan, and the executor runs exactly that plan.
 * **Work through open folders.** The item's folder is opened once and checked against the plan; everything else
   is relative to open folder descriptors (`openat`, `fstatat`, `renameat`, `unlinkat`, no link following).
 * **Move, check, act.** Each file or link is moved into a private staging folder (random name, mode 0700, same
@@ -79,11 +84,14 @@ on that volume, and a separate lowercase `~/documents` is refused by Move to Tra
   data, and SSD wear levelling remaps blocks. FileVault (full-disk encryption) is the effective protection.
   Mac Cleaner never promises unrecoverability.
 
-### 3a. The executor's overwrite-then-delete (M01-04c-1, not used by the app yet)
+### 3a. The executor's overwrite-then-delete (M01-04c-1; the app's only shred path since 04c-2)
 
-The same steps now also exist in MacCleanerPlatform (`LocalFileSystem.shredSnapshot` / `overwriteAndRemove`),
-run by the cleanup executor for an approved `.tree` target. The app switches to it in 04c-2
-(`docs/architecture/M01-04C_DESIGN.md`). It keeps every guarantee above and adds:
+These steps live in MacCleanerPlatform (`LocalFileSystem.shredSnapshot` / `overwriteAndRemove`) and are run by
+the cleanup executor for an approved `.tree` target (`docs/architecture/M01-04C_DESIGN.md`). The app's old
+`ShredEngine` is removed, and `scripts/check-approval-sites.sh` keeps it out. After a run the app compares the
+item's path with the reviewed identity (device, inode, kind): a different item now at that path stays listed,
+blocked and untouched, and is never reported as shredded. Freed space is reported as an estimate ("about"),
+with the measured free-space change stored in History. It keeps every guarantee above and adds:
 
 * **Exactly the approved tree.** It visits only the target's entries and never lists a folder to decide what to
   delete. An entry that wasn't reviewed is never opened, moved or deleted, and keeps its folder (`rmdir` fails).

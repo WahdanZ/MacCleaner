@@ -41,7 +41,7 @@ struct InstalledSkills {
     enum State {
         /// Nothing at that path.
         case absent
-        /// Mac Cleaner's, unchanged; `current` when it holds this version's text.
+        /// Mac Cleaner's, unchanged; `current` when it holds this version's text. An older text is kept as it is.
         case owned(Verified, current: Bool)
         /// The person's (or not provably Mac Cleaner's): never changed or removed. Says why.
         case notOwned(String)
@@ -152,34 +152,82 @@ struct InstalledSkills {
         return (folder, r)
     }
 
-    /// Replaces an unchanged, older Mac Cleaner skill's text with this version's (written beside it, then renamed over
-    /// it) and records the new file.
-    func update(_ skill: Verified) throws {
-        if let why = Self.recheck(skill) { throw Problem.failed("The skill in \(skill.folder.path) was kept: \(why)") }
-        let data = Data(SkillText.markdown.utf8)
-        let target = skill.folder.path + "/" + Self.fileName, temp = target + ".maccleaner-new"
-        try Self.write(data, to: temp)
-        guard rename(temp, target) == 0 else {
-            let why = String(cString: strerror(errno))
-            unlink(temp)
-            throw Problem.failed("The skill in \(skill.folder.path) couldn't be updated (\(why))")
-        }
-        guard let file = try? LocalFileSystem().identity(at: target) else {
-            forget(skill.folder.path)
-            throw Problem.failed("The skill in \(skill.folder.path) was updated but couldn't be checked; it isn't recorded as Mac Cleaner's")
-        }
-        var r = skill.record
-        r.fileDevice = file.device; r.fileInode = file.inode; r.sha256 = Self.sha256(data)
-        setRecord(r, for: skill.folder.path)
-    }
-
-    /// Undoes `install` when the rest of Connect failed: removes the folder it just made, only if it is still exactly
-    /// what was installed. nil when removed; otherwise why it was left (still recorded, so Disconnect can find it).
-    func undoInstall(folder: String, record: Record) -> String? {
+    /// Undoes `install` when the rest of Connect failed: removes the folder it just made, only if it is provably
+    /// exactly what was installed at the moment it is removed. Each item is first moved to a new private name (atomic,
+    /// never replacing anything) and only what was moved is checked — the recorded folder, holding only the recorded
+    /// SKILL.md with the recorded content — then the file is unlinked and the folder removed (rmdir: only if empty).
+    /// Anything else is moved back untouched. nil when removed; otherwise why it was left (and where, if it couldn't be
+    /// moved back). `afterCheck` runs between the ownership check and the first move (the self-test changes things
+    /// there).
+    func undoInstall(folder: String, record: Record, afterCheck: () -> Void = {}) -> String? {
         guard case .owned(let v, _) = state(at: folder), v.record == record else { return "it changed after it was installed" }
-        guard unlink(folder + "/" + Self.fileName) == 0, rmdir(folder) == 0 else { return String(cString: strerror(errno)) }
+        afterCheck()
+        let parentPath = (folder as NSString).deletingLastPathComponent, leaf = (folder as NSString).lastPathComponent
+        let parent = open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
+        guard parent >= 0 else { return "its folder couldn't be opened" }
+        defer { close(parent) }
+        // 1. The folder itself, held under a private name while it is checked and emptied.
+        let held: String
+        switch Self.take(parent, leaf, matches: { st in
+            let f = FileIdentity(path: folder, stat: st)
+            return f.kind == .directory && f.device == record.folderDevice && f.inode == record.folderInode
+        }) {
+        case .failure(let why): return why.text
+        case .success(let name): held = name
+        }
+        func giveBack(_ why: String) -> String {
+            if renameatx_np(parent, held, parent, leaf, UInt32(RENAME_EXCL)) == 0 { return why }
+            return why + "; it is in \(parentPath)/\(held)"
+        }
+        let dir = openat(parent, held, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard dir >= 0 else { return giveBack("it couldn't be opened") }
+        defer { close(dir) }
+        // 2. Its SKILL.md, held under a private name inside it: the recorded file with the recorded content.
+        let heldFile: String
+        switch Self.take(dir, Self.fileName, matches: { st in
+            let f = FileIdentity(path: folder + "/" + Self.fileName, stat: st)
+            return f.kind == .file && f.device == record.fileDevice && f.inode == record.fileInode
+        }) {
+        case .failure(let why): return giveBack(why.text)
+        case .success(let name): heldFile = name
+        }
+        let fd = openat(dir, heldFile, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        var st = stat()
+        let content: Data? = fd >= 0 && fstat(fd, &st) == 0 && UInt64(st.st_ino) == record.fileInode
+            ? FileHandle(fileDescriptor: fd, closeOnDealloc: false).readDataToEndOfFile() : nil
+        if fd >= 0 { close(fd) }
+        guard let content, Self.sha256(content) == record.sha256 else {
+            let back = renameatx_np(dir, heldFile, dir, Self.fileName, UInt32(RENAME_EXCL)) == 0
+            return giveBack("its \(Self.fileName) was edited" + (back ? "" : "; it is named \(heldFile)"))
+        }
+        // Nothing else may be in the folder (checked while both are held under names only this run uses).
+        guard (try? FileManager.default.contentsOfDirectory(atPath: parentPath + "/" + held)) == [heldFile] else {
+            let back = renameatx_np(dir, heldFile, dir, Self.fileName, UInt32(RENAME_EXCL)) == 0
+            return giveBack("it holds files Mac Cleaner didn't put there" + (back ? "" : "; its \(Self.fileName) is named \(heldFile)"))
+        }
+        // 3. Only now: the file proven to be ours is unlinked, then the folder (rmdir: only if empty).
+        guard unlinkat(dir, heldFile, 0) == 0 else {
+            let back = renameatx_np(dir, heldFile, dir, Self.fileName, UInt32(RENAME_EXCL)) == 0
+            return giveBack("its \(Self.fileName) couldn't be removed" + (back ? "" : "; it is named \(heldFile)"))
+        }
+        guard unlinkat(parent, held, AT_REMOVEDIR) == 0 else { return giveBack("it holds files Mac Cleaner didn't put there") }
         forget(folder)
         return nil
+    }
+
+    /// Moves `name` in `dir` to a fresh private name (RENAME_EXCL: never replaces anything) and checks what was moved
+    /// with `matches` (links are never followed). The private name when it matches; otherwise it is moved back (or, if
+    /// its name was taken meanwhile, left under the private name, which the refusal says).
+    private static func take(_ dir: Int32, _ name: String, matches: (stat) -> Bool) -> Result<String, Refusal> {
+        let held = ".maccleaner-undo-" + UUID().uuidString
+        guard renameatx_np(dir, name, dir, held, UInt32(RENAME_EXCL)) == 0 else {
+            return .failure(Refusal(text: errno == ENOENT ? "it's no longer there" : "it couldn't be moved (\(String(cString: strerror(errno))))"))
+        }
+        var st = stat()
+        if fstatat(dir, held, &st, AT_SYMLINK_NOFOLLOW) == 0, matches(st) { return .success(held) }
+        let what = name == fileName ? "its \(fileName) was replaced" : "it isn't the folder Mac Cleaner installed"
+        if renameatx_np(dir, held, dir, name, UInt32(RENAME_EXCL)) == 0 { return .failure(Refusal(text: what)) }
+        return .failure(Refusal(text: what + "; it was left named \(held)"))
     }
 
     /// "Save skill folder": writes this version's skill as a new folder in `dir` the person picked. Never overwrites

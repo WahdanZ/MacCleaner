@@ -2163,7 +2163,7 @@ extension SelfTest {
         check("a Connect whose skill can't be installed doesn't change the config",
               model2.message?.isError == true && model2.message?.text.contains("couldn't be installed") == true && !fm.fileExists(atPath: config.path))
 
-        // 7. An unchanged skill an earlier version installed (recorded) is updated to this version's text.
+        // 7. An unchanged skill an earlier version installed (recorded) is kept as it is: never rewritten.
         try? fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
         try? "an older version's text".write(to: skillFile, atomically: false, encoding: .utf8)
         let fsys = LocalFileSystem()
@@ -2172,11 +2172,139 @@ extension SelfTest {
                                                                      fileInode: f.inode, sha256: InstalledSkills.sha256(Data("an older version's text".utf8)))) {
             store.set([folder: String(decoding: json, as: UTF8.self)], forKey: InstalledSkills.key)
         }
-        let before7 = owned(current: false)
+        let before7 = owned(current: false), inode7 = inode(skillFile)
         let c7 = connect()
-        check("Connect updates an unchanged older Mac Cleaner skill to this version's text and records the new file",
-              before7 && c7?.text.contains("Skill installed") == true && text() == SkillText.markdown && owned())
+        check("Connect keeps an older Mac Cleaner skill as it is (never rewrites a skill folder) and says so",
+              before7 && c7?.isError == false && c7?.text.contains("earlier version installed was kept") == true
+              && text() == "an older version's text" && inode(skillFile) == inode7 && owned(current: false) && connected())
         reset()
+
+        // 7b. Undoing an install (a Connect that failed) removes only what is provably the installed folder at the moment
+        // of removal: changes made after the ownership check and before the removal are left untouched.
+        func undo(_ change: () -> Void) -> String?? {
+            guard let made = try? skills.install(in: skillsDir.path) else { return nil }
+            return .some(skills.undoInstall(folder: made.folder, record: made.record, afterCheck: change))
+        }
+        func noLeftovers(_ dir: String) -> Bool {
+            !((try? fm.contentsOfDirectory(atPath: dir)) ?? []).contains { $0.hasPrefix(".maccleaner-undo-") }
+        }
+        let u1 = undo { try? fm.removeItem(at: skillFile); try? "the person's own skill".write(to: skillFile, atomically: false, encoding: .utf8) }
+        check("undoing an install never removes a SKILL.md replaced after the check",
+              u1??.contains("replaced") == true && text() == "the person's own skill" && noLeftovers(folder) && noLeftovers(skillsDir.path))
+        reset()
+        let u2 = undo { try? (SkillText.markdown + "edited").write(to: skillFile, atomically: false, encoding: .utf8) }
+        check("…nor one edited in place after the check",
+              u2??.contains("edited") == true && text() == SkillText.markdown + "edited" && noLeftovers(folder) && noLeftovers(skillsDir.path))
+        reset()
+        let moved7 = skillsDir.appendingPathComponent("moved-away")
+        let u3 = undo {
+            try? fm.moveItem(atPath: folder, toPath: moved7.path)
+            try? fm.createDirectory(atPath: folder, withIntermediateDirectories: false)
+            try? "a new folder's skill".write(to: skillFile, atomically: false, encoding: .utf8)
+        }
+        check("…nor a folder replaced after the check (and the moved original is untouched too)",
+              u3??.contains("isn't the folder") == true && text() == "a new folder's skill"
+              && text(moved7.appendingPathComponent("SKILL.md")) == SkillText.markdown && noLeftovers(skillsDir.path))
+        try? fm.removeItem(at: moved7); reset()
+        let extra7 = URL(fileURLWithPath: folder).appendingPathComponent("notes.md")
+        let u4 = undo { try? "mine".write(to: extra7, atomically: true, encoding: .utf8) }
+        check("…nor a folder that gained a file after the check: the file and SKILL.md both stay",
+              u4??.contains("holds files") == true && text(extra7) == "mine" && text() == SkillText.markdown
+              && noLeftovers(folder) && noLeftovers(skillsDir.path))
+        reset()
+        let u5 = undo {}
+        check("an unchanged installed folder is removed by the undo, and its record forgotten",
+              u5 == .some(nil) && !fm.fileExists(atPath: folder) && !recorded() && noLeftovers(skillsDir.path))
+        reset()
+
+        // 7c. Claude Code through its command line (a fake): registration is replaced only after the old one is removed,
+        // restored if the new one can't be added, and Disconnect touches the skill only once the server is really gone.
+        final class FakeClaude {
+            let config: URL
+            var failRemove = false, failAdd = false, failRestore = false, installed = true
+            var calls: [String] = []
+            init(_ config: URL) { self.config = config }
+            var entry: [String: Any]? {
+                get {
+                    let d = (try? Data(contentsOf: config)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                    return (d?["mcpServers"] as? [String: Any])?["mac-cleaner"] as? [String: Any]
+                }
+                set {
+                    var d = (try? Data(contentsOf: config)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                    var servers = d["mcpServers"] as? [String: Any] ?? [:]
+                    servers["mac-cleaner"] = newValue
+                    d["mcpServers"] = servers
+                    try? JSONSerialization.data(withJSONObject: d).write(to: config)
+                }
+            }
+            func run(_ args: [String]) -> (status: Int32, output: String?)? {
+                guard installed else { return nil }
+                calls.append(args.prefix(2).joined(separator: " "))
+                switch args[1] {
+                case "remove": if failRemove { return (1, "remove refused") }; entry = nil
+                case "add": if failAdd { return (1, "add refused") }; entry = ["type": "stdio", "command": args[args.count - 2], "args": [args[args.count - 1]]]
+                case "add-json":
+                    if failRestore { return (1, "restore refused") }
+                    entry = (try? JSONSerialization.jsonObject(with: Data(args[args.count - 1].utf8))) as? [String: Any]
+                default: return (2, "unknown")
+                }
+                return (0, "")
+            }
+        }
+        let ccDir = base.appendingPathComponent("claude")
+        let ccConfig = ccDir.appendingPathComponent("claude.json"), ccSkills = ccDir.appendingPathComponent("skills")
+        try? fm.createDirectory(at: ccSkills, withIntermediateDirectories: true)
+        let cc = AIClient(id: "selftest-claude", name: "SelfTestClaude", detail: "", kind: .claudeCode(config: ccConfig.path),
+                          skillsDir: ccSkills.path, presence: ccDir.path)
+        let fake = FakeClaude(ccConfig)
+        let ccModel = IntegrationsModel(clients: [cc], skills: skills, claude: { fake.run($0) })
+        let ccFolder = InstalledSkills.folderPath(in: ccSkills.path)
+        let older: [String: Any] = ["type": "stdio", "command": "/old/Mac Cleaner", "args": ["--mcp"]]
+        func ccMessage(_ connect: Bool) -> (text: String, isError: Bool)? {
+            if connect { ccModel.connect(cc) } else { ccModel.disconnect(cc) }
+            return ccModel.message
+        }
+        func entryIs(_ e: [String: Any]?) -> Bool { (fake.entry as NSDictionary?) == (e as NSDictionary?) }
+        func ccReset() { try? fm.removeItem(atPath: ccFolder); skills.forget(ccFolder); try? fm.removeItem(at: ccConfig) }
+
+        fake.entry = older; fake.failAdd = true
+        let k1 = ccMessage(true)
+        check("a Claude Code registration that can't be added restores the previous one, says so, and undoes the skill",
+              k1?.isError == true && k1?.text.contains("previous Mac Cleaner registration was restored") == true
+              && entryIs(older) && !fm.fileExists(atPath: ccFolder) && fake.calls == ["mcp remove", "mcp add", "mcp add-json"])
+        ccReset(); fake.calls = []
+        fake.entry = older; fake.failRestore = true
+        let k2 = ccMessage(true)
+        check("…and says truthfully when the previous one couldn't be restored either",
+              k2?.isError == true && k2?.text.contains("removed and couldn't be restored") == true && fake.entry == nil)
+        ccReset(); fake.calls = []; fake.failAdd = false; fake.failRestore = false
+        fake.entry = older; fake.failRemove = true
+        let k3 = ccMessage(true)
+        check("a previous registration that can't be removed is left as it was, and nothing is added",
+              k3?.isError == true && k3?.text.contains("left as it was") == true && entryIs(older) && fake.calls == ["mcp remove"]
+              && !fm.fileExists(atPath: ccFolder))
+        ccReset(); fake.calls = []; fake.failRemove = false
+        let k4 = ccMessage(true)
+        let registered: [String: Any] = ["type": "stdio", "command": SkillText.serverCommand, "args": ["--mcp"]]
+        check("Connect registers through the command line and installs the skill",
+              k4?.isError == false && entryIs(registered) && fake.calls == ["mcp add"] && fm.fileExists(atPath: ccFolder))
+        fake.calls = []
+        let k5 = ccMessage(true)
+        check("…and changes nothing when it is already registered as needed", k5?.isError == false && fake.calls.isEmpty && entryIs(registered))
+        fake.failRemove = true
+        let k6 = ccMessage(false)
+        check("a Disconnect whose remove fails reports that the server is still registered, and keeps the skill",
+              k6?.isError == true && k6?.text.contains("still registered") == true && entryIs(registered)
+              && text(URL(fileURLWithPath: ccFolder).appendingPathComponent("SKILL.md")) == SkillText.markdown)
+        fake.failRemove = false
+        let k7 = ccMessage(false)
+        check("…and once the remove works, the server is gone and the skill moved to the Trash",
+              k7?.isError == false && fake.entry == nil && k7?.text.contains("moved to the Trash") == true && !fm.fileExists(atPath: ccFolder))
+        ccReset(); fake.installed = false; fake.calls = []
+        let k8 = ccMessage(true)
+        check("without the command line, Connect writes the registration into the config file",
+              k8?.isError == false && entryIs(registered) && fake.calls.isEmpty)
+        ccReset()
 
         // 8. Save skill folder (a place the person picked): never overwrites, never recorded, so never removed.
         let saveDir = base.appendingPathComponent("saved")

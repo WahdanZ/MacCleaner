@@ -117,9 +117,12 @@ the items the script reported MOVED) and `InstalledSkills.Verified` (an ownershi
 identities, SHA-256 — written only after Mac Cleaner created both, and still matching). The folder's exact contents are
 checked before approving and again as the executor's precondition, after which the executor checks its identity.
 Staging is logged `restorable: false` (Put Back points to Finder). Connect never overwrites a skill folder that isn't
-provably Mac Cleaner's (an unrecorded one, even with matching text, an edited one, one with other files), installs the
-skill before changing the config and removes it again if the config can't be changed; Disconnect still disconnects the
-server when it keeps the skill, and says so; Save skill folder never overwrites and is never recorded. `AppEngine.trash`
+provably Mac Cleaner's (an unrecorded one, even with matching text, an edited one, one with other files) and never
+rewrites one (an older version's skill is kept as it is), installs the skill before changing the config and removes it
+again if the config can't be changed — only after moving the folder and its SKILL.md to private names and proving what
+was moved is the recorded folder, file and content (anything else is moved back). Claude Code's registration is replaced
+only after the old one was removed, and restored if the new one can't be added; Disconnect touches the skill only once
+the server is really gone, still disconnects the server when it keeps the skill, and says so; Save skill folder never overwrites and is never recorded. `AppEngine.trash`
 is removed. `scripts/check-approval-sites.sh` keeps `.appOwned`, executor creation, these moves and their proofs in
 their files. History records an uninstall as moved to the Trash only for what reached it (#41).
 **Not guaranteed:** another process running as you could change the staging folder (0700, yours after the step) or the

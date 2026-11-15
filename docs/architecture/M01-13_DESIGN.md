@@ -70,11 +70,11 @@ fix (a new review-only app) take effect under frozen v1 without a new version.
 target is `.file` or `.directoryContents` (never `.command`, `.tree`); every target path matches a rule: a `.file` target's
 path against an `.item` pattern, and for a `.directoryContents` target **the folder against a `.contentsOf` pattern and every
 reviewed entry's path against the same rule's exclusions** (so `DiagnosticReports` inside a contents rule is refused); no path
-has an excluded component; the target's device equals `homeDevice` (passed in; the function does no I/O); and `tightening`
+has an excluded component; the target's device equals `homeDevice` and the home prefix (both passed in; the function does no I/O); and `tightening`
 refuses nothing. Anything else is `.refused(.outsideScope)`. There is no "everything except".
 
 **Letter case.** Literal and `oneOf` components of **allow** patterns match **exactly** on the resolved path (a look-alike
-differing in case is not admitted, even on a case-insensitive volume); **exclusions are compared case-folded** (an
+differing in case is not admitted, even on a case-insensitive volume); **exclusions are compared case-folded** (`lowercased()`, locale-independent; Unicode normalization is left to the volume, which APFS ignores) (an
 exclusion also catches a look-alike). Both fail toward refusing, as in SAFETY_MODEL §2a.
 
 **v1 never references app or Core constants** (`SafetyGuard.*`, `PermanentDeleteRules.*`, `Scanner.claimedLibraryCaches`,
@@ -90,14 +90,14 @@ today's effective scope (`AutoClean.select` + `narrowed` over what `Scanner.plan
 
 | v1 rule | pattern | exclusions / notes |
 |---|---|---|
-| fixed dev caches | the 29 exact paths in **Appendix A** (item or contents, as `Scanner` gives them) | the 9 `recommended: false` statics (archives, Gradle wrapper, Maven, Ivy, NuGet packages, CocoaPods repos, conda) are **not** in it |
-| device support | `.contentsOf(~/Library/Developer/Xcode/<oneOf literal [iOS, watchOS, tvOS, macOS, visionOS]> DeviceSupport)` | |
+| fixed dev caches | the 28 exact paths in **Appendix A** (item or contents, as `Scanner` gives them) | the `recommended: false` statics (archives, Gradle wrapper, Maven, Ivy, NuGet packages, CocoaPods repos, the 6 conda folders: 12 paths) are **not** in it |
+| device support | `.contentsOf(~/Library/Developer/Xcode/<oneOf ["iOS DeviceSupport", "watchOS DeviceSupport", "tvOS DeviceSupport", "macOS DeviceSupport", "visionOS DeviceSupport"]>)` | |
 | editor caches | `.item(~/Library/Application Support/<oneOf the literal editor folders>/<oneOf [Cache, CachedData, Code Cache, CachedExtensionVSIXs, GPUCache, logs]>)` | editor folder list copied as literals in 13-1 (golden) |
 | `~/.cache` tools | `.item(~/.cache/<oneOf the 12 autoDotCache names>)` | model caches (huggingface, torch) and `uv` (kept by default) stay manual |
 | app caches | `.item(~/Library/Caches/<anyOne>)` | excluded: prefix `.`, prefix `com.apple.`, the names Scanner "claims" (`Yarn`, `Homebrew`, `CocoaPods`, `pip`, `JetBrains`, `com.apple.dt.Xcode`, `io.github.wahdanz.maccleaner`, `local.maccleaner`), and **`com.spotify.client`** (review-only today, "offline music"); `skipIfAppRunning` |
 | sandboxed app caches | `.contentsOf(~/Library/Containers/<anyOne>/Data/Library/Caches)` | container name excluded when prefix `.` or `com.apple.`; `skipIfAppRunning` |
-| web / Electron caches | `.item(~/Library/Application Support/<anyOne>/<0..3 × anyOne>/<oneOf [Cache, Code Cache, GPUCache, DawnCache, DawnGraphiteCache, DawnWebGPUCache, ShaderCache, GrShaderCache]>)` and the same prefix + `Service Worker/<oneOf [CacheStorage, ScriptCache]>`; written out as the explicit fixed-depth patterns for 0, 1, 2 and 3 intermediate folders (Scanner's `collectWebCaches` visits depths 0–3) | top folder excluded: prefix `.`, prefix `com.apple.`, the editor folders, `MobileSync`, `CallHistoryDB`, `AddressBook`; intermediates exclude the extensions `app`, `bundle`, `framework`, `plugin` and links; `skipIfAppRunning` |
-| logs | `.item(~/Library/Logs/<anyOne>)` | excluded: `JetBrains` (its own rule), prefix `com.apple.`, **`DiagnosticReports`** (crash reports are kept); matches Scanner, which hands `.removeItems(children of Logs)` after the same filter; loose files directly in `Logs` are children too |
+| web / Electron caches | `.item(~/Library/Application Support/<anyOne>/<0..3 × anyOne>/<oneOf [Cache, Code Cache, GPUCache, DawnCache, DawnGraphiteCache, DawnWebGPUCache, ShaderCache, GrShaderCache]>)` and the same prefix + `Service Worker/<oneOf [CacheStorage, ScriptCache]>`; written out as the explicit fixed-depth patterns for 0, 1, 2 and 3 intermediate folders (Scanner's `collectWebCaches` visits depths 0–3) | top folder excluded: prefix `.`, prefix `com.apple.`, the editor folders, `MobileSync`, `CallHistoryDB`, `AddressBook`; intermediates exclude the extensions `app`, `bundle`, `framework`, `plugin`, links and **dot-prefixed folders** (today's walk skips hidden folders); `skipIfAppRunning` |
+| logs | `.item(~/Library/Logs/<anyOne>)` | excluded: `JetBrains` (its own rule), prefix `com.apple.`, **prefix `.` (so never a work folder; narrower than today)**, **`DiagnosticReports`** (crash reports are kept); matches Scanner, which hands `.removeItems(children of Logs)` after the same filter; loose files directly in `Logs` are children too |
 
 The "app caches" classes are a class **by shape**: the cache of any app installed later at an in-pattern path qualifies. That
 is what v1 means. **The scope guarantee, stated precisely: new *locations* and new *categories* always need new consent; a new *member* of an already-permitted path class (a newly installed app's cache folder) does not.** The Enable sheet must say so in plain words ("This also covers the caches of apps you install later, in the same folders") next to the list of folders; the sheet's text is part of the versioned scope (changing it is a new version) and 13-2 has a self-test that the sheet shows it. The class is bounded by depth, literals, exclusions, `safeRegenerable`,
@@ -107,30 +107,35 @@ protection, `skipIfAppRunning` and the cap. Everything a *new code path* could a
 **retiring** it (`retired: true`: the policy pauses until the user grants a newer version), never by editing it.
 `tightening` handles the opposite case, a *safety fix*, without a new consent.
 
-### 3c. Unattended byte cap (a strict limit)
+### 3c. Unattended byte cap (a strict limit on the run's accounted charge)
 
-Nobody reviews the run, so v1 has a cap: **`maxBytesPerRun = 20 GB`** (approved by the reviewer as v1's budget; frozen with v1
-and in the scope digest; a different number is a new version). It is a **strict limit on what the run may free**, enforced by
-**charging before removing**, not a planning estimate:
+Nobody reviews the run, so v1 has a cap: **`maxBytesPerRun = 20 GB`** (approved by the reviewer as v1's budget; frozen with
+v1 and in the scope digest; a different number is a new version). It is enforced by **charging before removing**, and the
+guarantee is stated precisely: **the run's accounted charge never exceeds the cap.** The disk's real change can still differ
+(a file can grow between the `fstatat` and the `unlinkat`; APFS clones and snapshots change what is actually freed), which is
+why history reports **confirmed freed bytes separately** from the charge (3f).
 
-- **The charge** for a file is its **allocated size**, taken from the entry's identity, **whether or not it is hard-linked** (a
-  hard-linked file frees nothing but is still charged, so charged ≥ freed always). Folders and links charge 0.
-- **`stop` gets the next entry's charge.** The Platform walk calls `stop(chargedSoFarInItem, nextEntryCharge)` before each entry;
-  the gate refuses an entry when `charged + nextEntryCharge > maxBytesPerRun`, and updates its run total as entries are removed.
-  A refused entry is kept like any stopped entry (3d). So the run **cannot free more than 20 GB**, whatever the planning estimate
-  said; the overshoot is zero by construction. (A file that grew after its identity was captured fails the identity check and is
-  skipped, not removed.)
-- **Planning** still uses estimates, to choose what to attempt: admitted units are taken **smallest estimate first** (ties by
-  path), a greedy fill while the running estimate stays within the cap; the rest are **not planned** and listed as
-  `deferred (over the run limit)`. Smallest-first maximizes what the run can clean and doesn't let one rule or path order starve
-  the others week after week.
-- **Deferral granularity:** a unit is a **candidate's `.file` target** for item rules (one `~/.cache/pip` folder, one app's cache)
-  and **one reviewed entry** for contents rules (each entry of DerivedData is its own removal in the executor).
-- **A single item bigger than the cap:** not planned when its estimate says so, and listed each run as "larger than the run limit,
-  clean it from the app". If the estimate was wrong, the strict charge stops the walk at the cap and the item is `.partiallyDone`
-  (kept entries reported). So "never cleaned by the schedule" holds for items known to be over the cap; an item of unknown size
-  can be partly cleaned, never beyond the cap.
-- It only narrows today's behaviour (today there is none). Notification and history say so when it triggers.
+- **What is charged.** *Every* entry the walk removes is charged its `st_blocks * 512` from the walk's own fresh `fstatat`
+  (the item's `FileIdentity` has only a logical size, and nested entries have no captured identity): files whatever their link
+  count, and also folders and links. (`LocalFileSystem.freed` adds a folder's and a link's own blocks to the freed total, so charging them 0
+  would let freed exceed charged.) Hard-linked files are charged although unlinking them frees nothing: the charge is
+  conservative by design.
+- **Where the check runs.** The Platform calls `stop(nextEntryCharge)` **immediately before every `unlinkat` and `rmdir`** in the
+  walk, and for an item that is a plain file (no walk) right before its unlink, using the stat taken in staging, putting the file
+  back if refused. The gate **adds each charge it approves**, without being told the outcome, so it needs no report from the
+  executor and no per-item counter. It refuses when `charged + next > maxBytesPerRun` (or revoked). A refusal stops the rest of
+  the walk (parent loops included); **after a stop no further folder is `rmdir`'d**; the unvisited entries and the folders
+  holding them are kept (3d).
+- **Planning** uses estimates to choose what to attempt: admitted units smallest-estimate first (ties by path), greedy fill within
+  the cap; the rest are **not planned** and listed as `deferred (over the run limit)` (this stops one rule or path order from starving
+  the others every week).
+- **Per-item pre-check.** Right before each item the runner re-measures its allocated size (a fresh walk) against the remaining
+  budget and **defers the item if it doesn't fit**, instead of starting something the cap would cut. The per-entry stop is only the
+  backstop for a size that changed in between. So an item known to exceed the cap is never started; an item that grew
+  can still end `.partiallyDone`. **A stop mid-item (cap or revoke) leaves a partly cleaned folder; for package caches (Gradle,
+  pnpm, Go module cache) that can break builds until they are rebuilt**, and the record and the notification say which items were partly cleaned.
+- **Deferral granularity:** a unit is a candidate's `.file` target for item rules and **one reviewed entry** for contents rules.
+- It only narrows today's behaviour (today there is none).
 
 ### 3d. Stored consent, policy approval and execution: one chain
 
@@ -139,8 +144,8 @@ stored consent --validate--> ValidatedPolicy + PolicyGate --approve(under:gate:)
  (data)         (Core)        (made together, at run start)   (executor)             (one-shot)      (executor)  (PolicyGate)
 ```
 
-What enforces it, stated honestly: **access control plus the sites script**, not the type system alone. `ValidatedPolicy`,
-`PolicyGate` and `GatedApproval` have initializers that are `package`-internal to MacCleanerKit (like `CleanupApproval`), so
+What enforces it, stated honestly: **access control plus the sites script**, not the type system alone. `AutomationPolicy`, `AutomationScope`, `AutomationCatalog`, `ValidatedPolicy`,
+`PolicyGate` and `GatedApproval` have initializers that are `package`-level (the precedent is `ApprovalLedger`; `CleanupApproval.init` is `internal`), so
 app code can only obtain them through `AutomationConsent.validate`, `approve(under:gate:)`, and the catalog. But
 `AutomationConsent` is an ordinary Codable value and `validate` is public, so an app file that builds a consent
 with the current catalog digest gets a `ValidatedPolicy`. **That is stopped by `check-approval-sites.sh`** (3g), which is the
@@ -150,11 +155,11 @@ accidents and a stale or corrupted store, not code written to forge it (8.3).
 - **`AutomationConsent`** (stored): `{ policyId, grantedVersion, grantedScopeDigest, grantedAt, source: .user, revokedAt? }`.
   The scope is never read from storage. Written only by `AutomationConsentStore` (app target), only from the Settings
   sheet's Enable and Revoke.
-- **`validate(in: catalog, now:)`** fails closed (`.revoked`, `.unknownVersion`, `.retired`, `.digestMismatch`,
+- **`AutomationConsent.validate(now:)`** checks against the **built-in** `AutomationCatalog` only (a `package` overload taking a catalog exists for tests; app code can't make a wider catalog or policy). It fails closed (`.revoked`, `.unknownVersion`, `.retired`, `.digestMismatch`,
   `.grantedInTheFuture`) and returns the `ValidatedPolicy` **and creates its `PolicyGate`**. **The gate is created and
-  registered at validation, i.e. at the start of a run** (3e step 2), before the minutes-long scan and measure. The app's
-  `AutomationGateRegistry` (main actor) holds the live gate. A Revoke at any later moment (during scan, during
-  planning, during execution) flips it synchronously, no actor hop, before `revokedAt` is persisted. `approve` refuses an
+  registered at validation, i.e. at the start of a run** (3e step 2), before the minutes-long scan and measure. The gate is **one-shot**: it is consumed by `approve` (one approval per gate) and closed when `execute` finishes, and validation and gate registration happen in the same main-actor turn. The `ValidatedPolicy` carries the `tightening` captured at run start, so `approve` can't be handed a weaker one. The app's
+  `AutomationGateRegistry` (main actor) holds every outstanding gate. A Revoke at any later moment (during scan, during
+  planning, during execution) flips **all outstanding gates** synchronously, no actor hop, before `revokedAt` is persisted. `approve` refuses an
   inactive gate, so a revoke during the scan means nothing is approved or deleted.
 - **`CleanupExecutor.approve(_ plan:, under:, gate:)`** calls `admits` for **every** entry and refuses the whole plan with
   `outsidePolicyScope(candidateID:)` if one is out (the runner filters first, 3e), then issues `.standingPolicy(id:version:)`
@@ -167,15 +172,15 @@ accidents and a stale or corrupted store, not code written to forge it (8.3).
 - **The gate is a new input to the run loop.** Today `halt()` reads only the cancellation state and the `stopped` reason
   (`CleanupExecutor.swift` `execute`), and `precondition` runs only after an item's protection check. 13-1 adds the gate to
   `halt()` (so it is read before every target, including the first) and passes it down.
-- **Revocation and the cap inside a long deletion.** `CleanupFileSystem.remove` gains a `@Sendable (_ chargedSoFarInItem: Int64, _ nextEntryCharge: Int64) -> String?`
-  `stop` parameter (nil for interactive runs, behaviour unchanged), called by the Platform before **each entry** with the bytes
-  charged so far in this item and the next entry's charge (3c). The gate is also asked **before the item is moved into its staging folder**, so a revoke before
+- **Revocation and the cap inside a long deletion.** `CleanupFileSystem.remove` gains a `@Sendable (_ nextEntryCharge: Int64) -> String?`
+  `stop` parameter, **which is the protocol requirement with no default implementation**; the old two-argument form remains only as an extension that forwards `stop: nil` (so existing calls compile and interactive behaviour is unchanged, while a conformer can never silently ignore `stop`), called by the Platform before **each entry** with the
+  next entry's charge (3c). The gate is also asked **before the item is moved into its staging folder**, so a revoke before
   an item starts leaves it in place (`LocalFileSystem.remove` renames the item into staging before it visits any entry, so
   without this check the item's path would be absent for the whole walk). A non-nil reason is treated like a refused
   `protection` for the rest of the walk: **fail closed**; the entries not visited are kept, the folders holding them are kept and
   put back with the existing machinery (the put-back already works for a non-empty folder), and the item is `.partiallyDone`.
   After a revoke at most the one entry being removed completes.
-  - **Name retaken during the walk.** If an app recreates the item's path while the walk runs, the put-back's
+  - **Put-back failures outside the walk** (a mismatch, a protection refusal, or the single-file stop) throw a `PlatformError`, which the executor reports as `.failed(text)`, not as `stagingLeftBehind`; history maps both to "work folder left behind, at <path>". **Name retaken during the walk.** If an app recreates the item's path while the walk runs, the put-back's
     `RENAME_EXCL` fails and the remainder stays in the staging folder (`~/Library/Caches/.<staging>…`). That is already how the
     Platform reports it (`KeptEntry.Reason.stagingLeftBehind` with the path). Unattended, it is therefore reported in history as a kept entry with its path, and 13-1 tests it.
   - **Size of the report.** A stop doesn't list every unvisited leaf: one `KeptEntry` per folder whose remaining contents
@@ -184,6 +189,31 @@ accidents and a stale or corrupted store, not code written to forge it (8.3).
     parsing `preconditionFailed(String)` for history), plus the `stop` parameter on every `CleanupFileSystem` conformer
     (fakes included). Every exhaustive `switch` over these in Core, Features and the app changes in the same PR.
 - `precondition` is kept for the per-item running-app check (3e).
+
+### 3d-2. Leftover work folders (`.maccleaner-rm-<uuid>`)
+
+A leftover is the **remainder of an approved item**: after a stop whose put-back failed (the name was retaken), or after a crash or
+SIGKILL mid-walk (then the whole unvisited item is still inside). It can hold entries that were kept because they changed after
+review or became protected, and its original name is recorded nowhere on disk (slot `item`), so path-based protection
+(`UserProtection`) can no longer be applied to it. Today `LocalFileSystem.entries` hides the prefix, but the executor handles every
+*reviewed* entry (`CleanupExecutor.contents`), `Scanner.children` lists hidden files, and `PermanentDeleteRules` doesn't refuse the
+prefix: a leftover in `~/Library/Logs`, or inside a contents-rule folder, could be deleted by the next unattended run.
+
+- **Central exclusion.** The prefix becomes a public Core constant (`CleanupWorkFolder.prefix`, today `LocalFileSystem.stagingPrefix`).
+  It is filtered in **every** discovery layer: `Scanner.children`, `Scanner.plan/measure` (so a folder's shown size excludes it),
+  the M01-06 candidate builder (an entry with the prefix is never a candidate or reviewed entry), and `LocalFileSystem.entries` (already).
+  Interactive and unattended scans alike, so `~/.cache/.maccleaner-rm-X` is no longer offered as a recommended candidate.
+- **Second check in `admits`.** A path with **any component** starting with the prefix (case-folded) is refused, so a future builder
+  that forgets the filter still can't get one admitted. (The v1 logs rule also excludes dot-prefixed names, which is narrower
+  than today; web-cache intermediates exclude dot-prefixed folders, as today's `.skipsHiddenFiles` walk does.)
+- **Never silently skipped, never silently deleted.** The runner records, in the `running` checkpoint, the item being worked on
+  (original path and work-folder path); kept entries already carry the work-folder path. **At launch and before each scheduled run**
+  the app lists the known parents for leftovers and reports "work folders left behind" with their paths (history, notification and a
+  Settings row). **Recovery is reviewed and never permanent deletion** (protection can't be re-verified): *Put Back* (`RENAME_EXCL` to the
+  original name, if it is free and the original path is known) or *Move to Trash*, each after the person sees the folder.
+  13-1 (Core): the constant and the `admits` refusal. 13-2: the central filter in the app's scan, detection and reporting. **A
+  separate stage, 13-2b, does the review UI** (Put Back / Move to Trash), because it is its own approval boundary.
+- A third-party folder that happens to use the prefix is never cleaned: a safe failure.
 
 ### 3e. The scheduled run (app target)
 
@@ -198,13 +228,18 @@ accidents and a stale or corrupted store, not code written to forge it (8.3).
    `Cleaner.run`, where a `.removeItems` list was all-or-nothing: it is now per path, which is narrower or equal. Then apply the byte cap (3c) and
    build the plan, disposition `.permanentDelete`. Check the gate is still active right before `approve`.
 4. `approve(under:gate:)` then `execute(plan, gated:)`: protection, identity revalidation, nothing followed through links; a changed,
-   protected or added-after-snapshot item is skipped and reported. The snapshot is seconds old.
+   protected or added-after-snapshot item is skipped and reported. The snapshot is seconds old; what actually protects against entries that appeared or changed since is the executor's creation/change-time cutoff and per-entry identity checks, not the age of the snapshot.
 5. **Running apps, fail conservative.** `skipIfAppRunning` rules skip an item when **any** of these holds: the owning app
    can't be determined from the path; the running-app list can't be read (the whole class is skipped); a running app's bundle
    id, name or executable name equals the folder name, starts with `<folder name>.`, or the folder name starts with `<key>.`
    (helper processes `com.x.app.helper` count). Asked again before each item (`precondition`), not only at planning.
    Best effort, not a lock (8.8).
 6. Record (3f), notify with **measured** results, `check()`, `refreshNextRun()`.
+
+**A crashed slot is spent.** `lastRun` is written only after a run (`Automation.swift:314–316`), so a crash before it would make `isDue` fire
+again on relaunch, and a crash loop could free the cap again at each launch. The runner therefore persists the slot as **attempted**
+(`auto.policyAttemptedSlot`) **before any deletion**, together with the `running` row, so the cap is **per slot**; a crashed slot
+doesn't retry until the next one.
 
 **Paused or refused runs.** A run that doesn't start writes at most **one "Not run" row per scheduled slot**: the runner stores
 the slot it last reported (`auto.policyReportedSlot`, the `lastSlot` date) because a paused run doesn't set `lastRun` and
@@ -247,9 +282,11 @@ entries rewritten per add. Hence: candidate rows plus every exception, exact cou
 decision §9.7 for the reviewer. If a run has more than 500 non-removed items, the first 500 are listed and the rest are in
 `itemCounts` with the text `N more not listed` (explicit, never silent).
 
+**Durability of the checkpoint.** `SharedFile.update` today writes with `Data.write(.atomic)` (no `fsync`, and it writes even if the lock wasn't taken), and `read` returns `[]` on a decode error, so a checkpoint into a corrupt file would overwrite every record. 13-2 therefore gives history a **dedicated durable write**: temp file, `F_FULLFSYNC`, `rename`, `fsync` of the folder, all **under the lock and failing closed** (`commit`, not `update`); it refuses to write when the file is *unreadable* (distinct from *missing*); and if a checkpoint can't be committed it returns a stop reason from `onItemFinished`, so the run halts **before the next candidate**. The checkpoint is written when the **last target of a candidate** finishes (`onItemFinished` fires per target, synchronously, before the next). Cost: a rewrite of up to 300 records plus a full sync per candidate, tens of ms each. History also needs a new API for **0-byte rows and replace-by-id** (`HistoryStore.add` drops `bytes <= 0` and records are immutable), and the `running` row stores the **PID and boot session** so a second GUI instance mid-run isn't mistaken for a dead one. The candidate list itself is bounded: the first 300 candidate rows are listed and the rest are in `itemCounts`, with `N more not listed`. Sleep doesn't interrupt a run; only a quit or crash does.
+
 **A run that dies: unknown is not zero.** The record is created at the start with `runStatus: running` (under the file lock,
 before the scan), carries `bytesKnown: false`, and is **checkpointed after each candidate finishes** with the progress confirmed
-so far (`confirmedBytes`, `confirmedItems`, same lock). At the end it is replaced by the final record (`bytesKnown: true`). If the
+so far (`confirmedBytes` = **freed as the file system reported it**, `confirmedItems`, same lock; separate from the charge, which is only the budget). At the end it is replaced by the final record (`bytesKnown: true`). If the
 app quits, crashes or the Mac sleeps in between, the next launch shows the row as `interrupted`: "at least *confirmedBytes* freed;
 the rest is **unknown**". It is **not** shown as "0 freed", and `totalDeleted` counts only `confirmedBytes`, labelled "at least".
 A completed run that removed nothing is a **confirmed zero** (`bytesKnown: true`, `bytes: 0`); the two are never merged. There is
@@ -327,8 +364,22 @@ Platform tests in Features/Platform.
   in staging); revoke **during the scan** (nothing approved); revoke after N entries of one folder with thousands of entries: no entry past
   N+1 removed, unvisited folders kept and put back, one `KeptEntry` per folder with the count, item `.partiallyDone` with
   `stopped`; **the item's name retaken during the walk**: remainder reported as `stagingLeftBehind` with its path. The same for the
-  byte cap: a low estimate **never frees more than the cap** (the next entry is refused when `charged + next > cap`, tested at the boundary), hard-linked files are charged (not 0), smallest-first planning, over-cap candidates deferred and
-  listed, a single item over the cap never partly run. Interactive removal with `stop: nil` behaves as before (existing tests unchanged and green).
+  byte cap: a low estimate **never frees more than the cap** (the next entry is refused when `charged + next > cap`, tested at the boundary), hard-linked files, folders and links are charged (charged ≥ freed is asserted over real trees, including folder/link blocks), smallest-first planning, over-cap candidates deferred and
+  listed, a an item the pre-check finds over the remaining budget is deferred and never started (a grown item can still end `.partiallyDone`, tested). Interactive removal with `stop: nil` behaves as before (existing tests unchanged and green).
+- **Charge accounting:** over real trees with nested folders, links and hard-linked files, the sum of charges is ≥ the freed bytes the
+  Platform reports; the single-file item path calls `stop` and puts the file back when refused; no `rmdir` after a stop; `stop`
+  is called before **every** unlink/rmdir (a counting fake); a conformer can't compile without implementing `stop`; the two-argument
+  forwarding form passes `nil`.
+- **Gate:** one-shot (a second `approve` with the same gate is refused); Revoke flips every outstanding gate; a gate kept from an
+  earlier run can't be reused; `tightening` captured at validation can't be replaced at `approve`; `validate(now:)` can't use a
+  caller's catalog outside tests (the `package` overload is not visible to the app).
+- **Work folders:** `admits` refuses any path component with the prefix, in any case; the Scanner and the builder never list one;
+  a leftover inside `~/Library/Logs`, inside a contents folder (DerivedData), and in `~/.cache` is never planned or deleted; the
+  checkpoint records the item in progress; detection finds a leftover left by a stop with a retaken name and by a simulated kill
+  mid-walk, and reports it without touching it.
+- **Crashed slot:** the attempted-slot marker is written before any deletion; a relaunch after a crash does not re-run the slot.
+- **Durable checkpoint:** a failed commit stops the run before the next candidate; an unreadable `history.json` is never overwritten;
+  replace-by-id and a 0-byte row work; a `running` row with another live PID isn't shown as interrupted.
 - **New Core cases:** `KeptEntry.Reason.stopped`, `SkipReason.revoked`, `SkipReason.runLimit` are produced, and every exhaustive
   switch compiles and is tested (Core, Features, app).
 - **Scheduled-run mapping (app self-test, temp home):** the merged `appcache.small` candidate with one out-of-pattern path: that
@@ -353,14 +404,20 @@ Platform tests in Features/Platform.
 
 | Stage | What | Level | Safety-critical |
 |---|---|---|---|
-| **13-1** | Core: `AutomationPolicy`/scope/patterns/catalog v1 (literals + Appendix A, golden file), `tightening`, `ValidatedPolicy`, `PolicyGate`, `AutomationConsent.validate`; executor `approve(under:gate:)`, nonce→gate map, `execute(_, gated:)`, `gateRequired`, `useAutomationPolicy`, gate in `halt()`; new `KeptEntry.Reason.stopped`, `SkipReason.revoked/.runLimit`; `CleanupFileSystem.remove(stop:)`, Platform walk and the pre-staging check, all conformers; package tests above. **App unchanged, unused** (the new enum cases' exhaustive switches in the app get the minimal update). | Senior | **yes** |
-| **13-2** | App: consent store + Settings sheet (toggle revokes/enables), gate registry, scheduled runner on the executor with the per-target filter and cap, history fields (`running` row, statuses, items, counts), migration and per-slot "Not run" row, **"Run safe clean now" through the review sheet** (Settings + menu-bar popover), sites script, self-tests; remove `AutoClean.run/select/narrowed`, `runClean(automatic:)` and the scheduled path's `Cleaner.run` use. **Waits for M01-06's caches candidate builder** (decision §9.3). | Senior | **yes** |
-| 13-3 | Docs: ARCHITECTURE_V2 §3a ("must re-enable" applies to the *new* scope; "listing every item" becomes "every candidate and every item not removed"), SAFETY_MODEL, RISK_REGISTER (close RISK-017), CURRENT_STATE, MIGRATION_PLAN, DECISIONS. | Junior | no |
+| **13-1** | Core: `AutomationPolicy`/scope/patterns/catalog v1 (literals + Appendix A, golden file; `package` initializers), `tightening`, `ValidatedPolicy`, one-shot `PolicyGate`, `AutomationConsent.validate(now:)`; the public work-folder prefix constant and the `admits` refusal; executor `approve(under:gate:)`, nonce→gate map, `execute(_, gated:)`, `gateRequired`, `useAutomationPolicy`, gate in `halt()`; new `KeptEntry.Reason.stopped`, `SkipReason.revoked/.runLimit`; `CleanupFileSystem.remove(stop:)` as the requirement (+ forwarding extension), the Platform walk's per-unlink/rmdir charge check, the single-file and pre-staging checks, both conformers (`LocalFileSystem`, test `FakeFS`); package tests above, including rewriting `CleanupExecutorTests.swift:346` (it calls the now-refused `approve(by: .standingPolicy)`). **App unchanged, unused**: `AutoClean.run` keeps deleting unattended without a gate until 13-2, so RISK-017 stays open until then. | Senior | **yes** |
+| **13-2** | App: consent store + Settings sheet (toggle revokes/enables), gate registry, scheduled runner on the executor with the per-target filter, cap, per-item pre-check and attempted-slot marker; central work-folder filter in `Scanner`; leftover detection and reporting; history fields, durable checkpoint, 0-byte/replace-by-id API, `SharedFile` fixes, migration and per-slot "Not run" row; **"Run safe clean now" through the review sheet** (Settings + menu-bar popover); sites script (allow the runner's `CleanupExecutor(`); self-tests; remove `AutoClean.run/select/narrowed`, `runClean(automatic:)` and the scheduled path's `Cleaner.run`. **Waits for M01-06's caches candidate builder.** | Senior | **yes** |
+| **13-2b** | Review UI for leftover work folders: Put Back (`RENAME_EXCL`) or Move to Trash after review, never permanent delete. | Senior | **yes** (approval boundary) |
+| 13-3 | Docs: ARCHITECTURE_V2 (remaining §3a/§5 wording), SAFETY_MODEL, RISK_REGISTER (close RISK-017), CURRENT_STATE, MIGRATION_PLAN, DECISIONS. | Junior | no |
 
-13-1 depends on nothing unmerged (the ledger, executor and Platform exist). 13-2 depends on 13-1 and M01-06. Hotspots 13-2 touches:
-`check-approval-sites.sh`, `SelfTest.swift`, `SelfTestSupport.swift`; 13-1 touches the executor, Platform and `CleanupFileSystem`
-conformers that M01-06 may also touch (not yet checked: conformer count and overlap, to be done with `worktree.sh overlap` at planning). 13-3 waits for M01-04d to merge.
-**No stage starts until this revision is approved and `SAFETY-CRITICAL APPROVED` is given.**
+**Sequencing with M01-06 (checked).** `CleanupFileSystem` has two conformers (`LocalFileSystem`, the test `FakeFS`); `ProtectionChecking` has three
+(`AppProtection`, `AppOwnedTrash.OneFolder`, the test `Protected`) and this design doesn't change that protocol; the only production
+caller of `remove` is `CleanupExecutor.swift:212`. M01-06 will edit `LocalFileSystem.removeContents`, the same walk 13-1 changes, and
+it must also add something `Cleaner.run` does today and the executor does not: **`makeOwnerWritable` for read-only folders** (the Go
+module cache, `go/pkg/mod`, is read-only, so its v1 entries would fail with `EACCES` on every run until then; a chmod also changes
+ctime, which interacts with the change-time cutoff). That chmod is its own safety-critical change. So **13-1 and M01-06 can't run in
+parallel**: recommended order is 13-1 first (a contract change M01-06 should build on), then M01-06 rebased on it with the chmod as a separate
+reviewed stage, then 13-2. Hotspots 13-2 touches: `check-approval-sites.sh`, `SelfTest.swift`, `SelfTestSupport.swift`, `SharedFile.swift`.
+13-3 waits for M01-04d to merge. **No stage starts until this revision is approved and `SAFETY-CRITICAL APPROVED` is given.**
 
 ## 8. Trade-offs and limits
 
@@ -372,7 +429,7 @@ conformers that M01-06 may also touch (not yet checked: conformer count and over
 6. **A stop mid-folder leaves a partly deleted folder** (kept entries stay, reported). If the name was retaken, the remainder stays in a hidden staging folder, reported with its path. No undo for permanently deleted entries.
 7. **`CleanupFileSystem.remove` changes** (new `stop` parameter, new Core enum cases) touch the shared executor/Platform, safety-critical, and may overlap with M01-06; sequenced in 13-1 with tests before anything uses it.
 8. **Running-app detection is best effort**, not a lock: an app can start between the check and the delete. Unknown or unreadable cases skip.
-9. **One executor per process:** the scheduled run and an interactive Trash/Shred wait for each other. Acceptable for an infrequent background run.
+9. **Several executors per process:** `ApprovedTrash` has one, `AppOwnedTrash` makes one per move, and the runner makes its own (so `check-approval-sites.sh`'s `CleanupExecutor(` rule must allow the runner's file). A scheduled and an interactive run therefore do **not** wait for each other; concurrent runs are safe because of `RENAME_EXCL` and the identity checks. The nonce→gate map and `gateRequired` live per executor instance, which is fine because a gated approval is made and used by the same one.
 10. **Unchanged limits (SAFETY_MODEL.md):** macOS has no "delete only if unchanged"; a process can write to a file it had open after the last check.
 11. **A run that dies** leaves an `interrupted` row with `bytesKnown: false` and the progress confirmed at the last checkpoint (per candidate); no per-item journal in this change.
 12. **Per-path filtering** replaces `Cleaner.run`'s all-or-nothing `.removeItems` handling: narrower or equal, and shown in the record.
@@ -391,9 +448,9 @@ conformers that M01-06 may also touch (not yet checked: conformer count and over
    every removed entry (§3f). This narrows ARCHITECTURE_V2 §3a "listing every item". *Raised by the design review; open for the reviewer's decision.*
 8. **The 20 GB cap value** (§3c) is a proposal. **APPROVED** by the reviewer as v1's budget; the semantics are a strict limit (§3c).
 
-## Appendix A. v1 fixed dev caches (the 29 exact paths)
+## Appendix A. v1 fixed dev caches (the 28 exact paths)
 
-Generated from `Scanner.plan()` at 800c3cd: every `dir(...)` target with `recommended: true` (the 9 `recommended: false` statics
+Generated from `Scanner.plan()` at 800c3cd: every `dir(...)` target with `recommended: true` (the 12 `recommended: false` static paths
 are excluded). Paths are relative to `~`. 13-1 turns this into the golden file; this table is the list under review.
 
 | shape | path | | shape | path |
@@ -440,9 +497,37 @@ app / sandboxed / web caches and logs (§3b). (The Xcode device-support folders 
 | S6 | `admits` entry checks, "reads only paths" over-claim, home device, letter case | Per-entry exclusion check, claim reworded, `homeDevice` input, case rule stated (§3a) |
 | S7 | History: crash mid-run, 300-record rewrite cost, unknown-tolerant status, `.deleted` on notRun | `running`/`interrupted` row, exceptions + counts (flagged as decision §9.7), string status, nil outcome (§3f) |
 | S8 | Run now, off/on, paused-slot key, all-or-nothing behaviour change | Run now stage and tests; off revokes, on re-grants; `auto.policyReportedSlot`; per-path filter before `approve` with tests (§3e, §6, §7, §8.12) |
-| S9 | Fixed list ended in "…" | Full list in Appendix A (29 paths) |
+| S9 | Fixed list ended in "…" | Full list in Appendix A (28 paths) |
 | N | SelfTest line citations; weak digest claim; duplicate precondition text; unrelated branch diff | Citations fixed (§6); claim softened (§8.3); duplicate removed; the extra files in the reviewer's diff came from a stale local `main`; against `origin/main` this PR changes **only** `M01-13_DESIGN.md` (`git diff origin/main...HEAD`) |
 
 Not checked by the reviewer and still to do before 13-1: the `CleanupFileSystem` conformer count and overlap with M01-06;
 `Staging` prefix interaction with later scans; `package`-init feasibility across Features/Platform. Whether to ask for an Opus
 review (`mc-safety-architect`) of this design before 13-1 is the user's call; it has not been requested.
+
+## 11. Responses to the Opus safety review (`mc-safety-architect`, on fdc9ae7: REQUEST CHANGES)
+
+Each claim was checked against the code before acting (`LocalFileSystem.freed` counts folder and link blocks; `Scanner.children` lists
+hidden files; the executor handles every reviewed entry whatever `entries` returned).
+
+| # | Finding | Resolution |
+|---|---|---|
+| B1 | "charged ≥ freed" and "overshoot zero" false: folders/links freed but charged 0; no allocated size in identities; plain-file items have no walk; gate never told about removals | **Confirmed.** Charge every entry `st_blocks*512` from the walk's `fstatat`; `stop(nextCharge)` before every unlink/rmdir incl. the single-file path; the gate adds each approved charge; wording now "accounted charge never exceeds the cap", charge and freed reported separately (§3c) |
+| B2 | Leftover `.maccleaner-rm-*` folders could be admitted and deleted unattended; protection can't be re-applied | **Confirmed.** Central exclusion in every discovery layer, a second refusal in `admits`, never silently skipped or deleted, reviewed recovery that is never permanent delete, own stage 13-2b (§3d-2, §7) |
+| S1 | Catalog forgeable via `validate(in:)` | `validate(now:)` uses the built-in catalog; policy/scope/catalog initializers `package` (§3d) |
+| S2 | Gate not one-shot | One-shot, consumed at `approve`, all outstanding gates flipped on revoke (§3d) |
+| S3 | Crash re-runs the slot | Attempted-slot marker before any deletion; the cap is per slot (§3e) |
+| S4 | Contradiction on over-cap items; partial package caches | Per-item pre-check + backstop; partial-cache risk documented (§3c, §6) |
+| S5 | "One executor per process" false | Corrected (§8.9) |
+| S6 | `stop` could be silently ignored via a default | The requirement takes `stop`; the two-argument form is a forwarding extension (§3d) |
+| S7 | Web-cache rule wider (hidden intermediates) | Dot-prefixed intermediates excluded (§3b) |
+| S8 | History durability | Dedicated durable write, fail-closed commit, unreadable-vs-missing, stop on failed checkpoint (§3f) |
+| S9 | M01-06 overlap; Go module cache read-only | Checked; sequencing and the chmod stage (§7) |
+| S10 | `tightening` a free runner parameter | Captured in `ValidatedPolicy` at validation (§3d) |
+| N | Appendix counts (28 / 12), DeviceSupport notation, case-folding, sleep, pre-walk put-back failures, rmdir after stop, 0-byte rows, interrupted detection by PID/boot, candidate list bound, `ApprovalLedger` precedent | All applied (§3a, §3b, §3c, §3d, §3f, Appendix A) |
+
+**Decisions the reviewer asked of the user**, with the recommendation applied in this revision (change on request):
+1. *Partial deletes at the cap:* per-item pre-check plus the per-entry backstop (recommended).
+2. *Leftover recovery:* reviewed Put Back or Move to Trash, never permanent delete, in its own stage 13-2b (recommended).
+3. *A crashed slot is spent* (recommended).
+4. *Sequencing:* 13-1, then M01-06 with the chmod as its own stage, then 13-2 (recommended).
+5. §9.7 (history lists exceptions and counts) is already approved by the user.

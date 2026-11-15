@@ -100,30 +100,36 @@ today's effective scope (`AutoClean.select` + `narrowed` over what `Scanner.plan
 | logs | `.item(~/Library/Logs/<anyOne>)` | excluded: `JetBrains` (its own rule), prefix `com.apple.`, **`DiagnosticReports`** (crash reports are kept); matches Scanner, which hands `.removeItems(children of Logs)` after the same filter; loose files directly in `Logs` are children too |
 
 The "app caches" classes are a class **by shape**: the cache of any app installed later at an in-pattern path qualifies. That
-is what v1 means, the consent sheet says so, and it is bounded by depth, literals, exclusions, `safeRegenerable`,
+is what v1 means. **The scope guarantee, stated precisely: new *locations* and new *categories* always need new consent; a new *member* of an already-permitted path class (a newly installed app's cache folder) does not.** The Enable sheet must say so in plain words ("This also covers the caches of apps you install later, in the same folders") next to the list of folders; the sheet's text is part of the versioned scope (changing it is a new version) and 13-2 has a self-test that the sheet shows it. The class is bounded by depth, literals, exclusions, `safeRegenerable`,
 protection, `skipIfAppRunning` and the cap. Everything a *new code path* could add at a **new location** is refused.
 
 **Adding a category = adding `v2`** (a new entry; `v1` untouched). A mistake in a shipped version is fixed by
 **retiring** it (`retired: true`: the policy pauses until the user grants a newer version), never by editing it.
 `tightening` handles the opposite case, a *safety fix*, without a new consent.
 
-### 3c. Unattended byte cap
+### 3c. Unattended byte cap (a strict limit)
 
-Nobody reviews the run, so v1 has a cap: **`maxBytesPerRun = 20 GB`** (a proposal for the reviewer to confirm before 13-1;
-frozen with v1 and in the scope digest; a different number is a new version). The cap is on **freed bytes as the executor
-reports them**, the same measure as the history row: hard-linked content counts 0 (nothing is freed), allocated size is
-used for estimates.
+Nobody reviews the run, so v1 has a cap: **`maxBytesPerRun = 20 GB`** (approved by the reviewer as v1's budget; frozen with v1
+and in the scope digest; a different number is a new version). It is a **strict limit on what the run may free**, enforced by
+**charging before removing**, not a planning estimate:
 
-- **Planning:** admitted units are taken **smallest estimate first** (ties by path), a greedy fill while the running
-  estimate stays within the cap; the rest are **not planned** and are listed as `deferred (over the run limit)`. Smallest-first
-  maximizes what the run can clean and doesn't let one rule or path order starve the others week after week.
+- **The charge** for a file is its **allocated size**, taken from the entry's identity, **whether or not it is hard-linked** (a
+  hard-linked file frees nothing but is still charged, so charged ≥ freed always). Folders and links charge 0.
+- **`stop` gets the next entry's charge.** The Platform walk calls `stop(chargedSoFarInItem, nextEntryCharge)` before each entry;
+  the gate refuses an entry when `charged + nextEntryCharge > maxBytesPerRun`, and updates its run total as entries are removed.
+  A refused entry is kept like any stopped entry (3d). So the run **cannot free more than 20 GB**, whatever the planning estimate
+  said; the overshoot is zero by construction. (A file that grew after its identity was captured fails the identity check and is
+  skipped, not removed.)
+- **Planning** still uses estimates, to choose what to attempt: admitted units are taken **smallest estimate first** (ties by
+  path), a greedy fill while the running estimate stays within the cap; the rest are **not planned** and listed as
+  `deferred (over the run limit)`. Smallest-first maximizes what the run can clean and doesn't let one rule or path order starve
+  the others week after week.
 - **Deferral granularity:** a unit is a **candidate's `.file` target** for item rules (one `~/.cache/pip` folder, one app's cache)
   and **one reviewed entry** for contents rules (each entry of DerivedData is its own removal in the executor).
-- **A single item bigger than the cap is never cleaned by the schedule.** It is listed each run as "larger than the run
-  limit, clean it from the app" rather than half-run. This is accepted (8.5).
-- **Execution:** the gate counts freed bytes per entry across the run. At the cap the gate stops the run (3d): the entry
-  being removed finishes or is kept per the stop rule, and every later unit is `skipped(runLimit)`. Estimates are logical, the stop is on measured
-  removal, so a low estimate can't run past it by more than the one entry in progress.
+- **A single item bigger than the cap:** not planned when its estimate says so, and listed each run as "larger than the run limit,
+  clean it from the app". If the estimate was wrong, the strict charge stops the walk at the cap and the item is `.partiallyDone`
+  (kept entries reported). So "never cleaned by the schedule" holds for items known to be over the cap; an item of unknown size
+  can be partly cleaned, never beyond the cap.
 - It only narrows today's behaviour (today there is none). Notification and history say so when it triggers.
 
 ### 3d. Stored consent, policy approval and execution: one chain
@@ -161,9 +167,9 @@ accidents and a stale or corrupted store, not code written to forge it (8.3).
 - **The gate is a new input to the run loop.** Today `halt()` reads only the cancellation state and the `stopped` reason
   (`CleanupExecutor.swift` `execute`), and `precondition` runs only after an item's protection check. 13-1 adds the gate to
   `halt()` (so it is read before every target, including the first) and passes it down.
-- **Revocation and the cap inside a long deletion.** `CleanupFileSystem.remove` gains a `@Sendable (Int64) -> String?`
+- **Revocation and the cap inside a long deletion.** `CleanupFileSystem.remove` gains a `@Sendable (_ chargedSoFarInItem: Int64, _ nextEntryCharge: Int64) -> String?`
   `stop` parameter (nil for interactive runs, behaviour unchanged), called by the Platform before **each entry** with the bytes
-  freed so far in this item. The gate is also asked **before the item is moved into its staging folder**, so a revoke before
+  charged so far in this item and the next entry's charge (3c). The gate is also asked **before the item is moved into its staging folder**, so a revoke before
   an item starts leaves it in place (`LocalFileSystem.remove` renames the item into staging before it visits any entry, so
   without this check the item's path would be absent for the whole walk). A non-nil reason is treated like a refused
   `protection` for the rest of the walk: **fail closed**; the entries not visited are kept, the folders holding them are kept and
@@ -222,13 +228,13 @@ are then deleted. It has its own stage entry and self-test (§6, §7).
 - `runStatus: String?` and `statusDetail: String?`. A **string**, not an enum with payloads: an older build or the CLI/MCP
   reading a status it doesn't know shows it as text and doesn't drop the record. Values: `running`, `completed`, `partial`,
   `cancelled`, `stoppedRevoked`, `stoppedRunLimit`, `failed`, `notRun`, `interrupted`.
-- `items: [RecordItem]?` and `itemCounts: [String: Int]?`. **What is listed:** every candidate/unit that was **not removed**
+- `items: [RecordItem]?` and `itemCounts: [String: Int]?`. **What is listed:** **every candidate with its identity (rule, path), scope (policy id, version) and final status**, and every unit that was **not removed**
   (skipped with its reason, kept entries with their reason and path, failed, permission denied, deferred over the run limit,
   outside scope) is listed **individually**, and each **removed** candidate is one row with its entry count and bytes. Exact
-  counts per result are always stored. Item results: `removed`, `partiallyDone`, `skipped(changed | protected | appRunning |
+  counts of successful, skipped, failed and deferred units are always stored. Item results: `removed`, `partiallyDone`, `skipped(changed | protected | appRunning |
   missing | addedAfterReview | cancelled | revoked | runLimit | outsideScope | preconditionFailed)`, `deferred(overRunLimit)`,
   `permissionDenied`, `failed`.
-- `bytes` = the sum over `removed` and `partiallyDone` freed bytes, **never the planned size** (today `AutoClean.run` adds a
+- `bytes` = the sum over `removed` and `partiallyDone` freed bytes **when the result is known** (`bytesKnown: true`), **never the planned size** (today `AutoClean.run` adds a
   target's whole planned size whenever `Cleaner.run` returns no error, which overstates a run that skipped anything).
   `measuredFreeChange` stays a separate measurement.
 - `outcome` is `.deleted` only when something was permanently removed; a `notRun` or fully skipped row has `outcome == nil`
@@ -241,9 +247,13 @@ entries rewritten per add. Hence: candidate rows plus every exception, exact cou
 decision §9.7 for the reviewer. If a run has more than 500 non-removed items, the first 500 are listed and the rest are in
 `itemCounts` with the text `N more not listed` (explicit, never silent).
 
-**A run that dies.** The record is created at the start with `runStatus: running` (written under the file lock before the scan)
-and replaced at the end. If the app quits, crashes or the Mac sleeps in between, the next launch shows that row as
-`interrupted: per-item results unknown`; per-item journaling is not added (limit 8.11). The row is never counted as freed.
+**A run that dies: unknown is not zero.** The record is created at the start with `runStatus: running` (under the file lock,
+before the scan), carries `bytesKnown: false`, and is **checkpointed after each candidate finishes** with the progress confirmed
+so far (`confirmedBytes`, `confirmedItems`, same lock). At the end it is replaced by the final record (`bytesKnown: true`). If the
+app quits, crashes or the Mac sleeps in between, the next launch shows the row as `interrupted`: "at least *confirmedBytes* freed;
+the rest is **unknown**". It is **not** shown as "0 freed", and `totalDeleted` counts only `confirmedBytes`, labelled "at least".
+A completed run that removed nothing is a **confirmed zero** (`bytesKnown: true`, `bytes: 0`); the two are never merged. There is
+no per-item journal (8.11): what survives a crash is progress to the last finished candidate.
 
 A cancelled or revoked run lists what was removed and what was left; skipped items are never counted as freed. The
 notification is made from the same data ("Freed 3.2 GB; 4 items skipped" / "Stopped: you turned the policy off after 1.1 GB").
@@ -275,7 +285,7 @@ sheet file and the self-test; nothing under the MCP/CLI files; no `AutomationCon
 | One path of a merged candidate is out of scope | that path dropped and listed; the others run |
 | A command / review / user-data / Trash item reaches the plan | `admits` refuses; ledger's generic check refuses again |
 | Another caller asks for `.standingPolicy`, or runs one without the gate | refused (`useAutomationPolicy`, `gateRequired`) |
-| App quits mid-run | row shows `interrupted`; nothing counted as freed |
+| App quits mid-run | row shows `interrupted`; freed bytes **unknown** (at least the confirmed amount), never 0 |
 | Two runs for one slot, or a run right after enabling | unchanged `isDue`/`armedAt` rules |
 | Mac asleep at the slot | catch-up on wake, unchanged |
 
@@ -317,7 +327,7 @@ Platform tests in Features/Platform.
   in staging); revoke **during the scan** (nothing approved); revoke after N entries of one folder with thousands of entries: no entry past
   N+1 removed, unvisited folders kept and put back, one `KeptEntry` per folder with the count, item `.partiallyDone` with
   `stopped`; **the item's name retaken during the walk**: remainder reported as `stagingLeftBehind` with its path. The same for the
-  byte cap (low estimate), hard-linked content counted as 0 freed, smallest-first planning, over-cap candidates deferred and
+  byte cap: a low estimate **never frees more than the cap** (the next entry is refused when `charged + next > cap`, tested at the boundary), hard-linked files are charged (not 0), smallest-first planning, over-cap candidates deferred and
   listed, a single item over the cap never partly run. Interactive removal with `stop: nil` behaves as before (existing tests unchanged and green).
 - **New Core cases:** `KeptEntry.Reason.stopped`, `SkipReason.revoked`, `SkipReason.runLimit` are produced, and every exhaustive
   switch compiles and is tested (Core, Features, app).
@@ -325,7 +335,7 @@ Platform tests in Features/Platform.
   path dropped and listed, the others run; `.removeItems` → `.file` per path; `.webCachesIn` → the `.removeItems` produced after
   `measure`; logs as `.removeItems` of children.
 - **History (self-test):** rows for completed, partial (kept entries), cancelled, stoppedRevoked, stoppedRunLimit, failed, notRun,
-  interrupted (a `running` row left behind); `bytes` = freed only; a 0-byte run is still recorded with `outcome == nil`; skipped,
+  interrupted (a `running` row left behind): shown as unknown with the checkpointed minimum, never as 0, and counted in `totalDeleted` only for the confirmed part; `bytes` = freed only; a 0-byte run is still recorded with `outcome == nil`; skipped,
   kept and deferred items are listed with reasons; counts match; more than 500 exceptions → explicit "N more not listed"; old
   records decode; an unknown `runStatus` string decodes and shows; the notification text comes from the same data.
 - **Running apps:** unknown owner skipped; unreadable running list skips the class; a helper-process bundle id skips its app;
@@ -364,7 +374,7 @@ conformers that M01-06 may also touch (not yet checked: conformer count and over
 8. **Running-app detection is best effort**, not a lock: an app can start between the check and the delete. Unknown or unreadable cases skip.
 9. **One executor per process:** the scheduled run and an interactive Trash/Shred wait for each other. Acceptable for an infrequent background run.
 10. **Unchanged limits (SAFETY_MODEL.md):** macOS has no "delete only if unchanged"; a process can write to a file it had open after the last check.
-11. **A run that dies** leaves an `interrupted` row without per-item results; no per-item journal in this change.
+11. **A run that dies** leaves an `interrupted` row with `bytesKnown: false` and the progress confirmed at the last checkpoint (per candidate); no per-item journal in this change.
 12. **Per-path filtering** replaces `Cleaner.run`'s all-or-nothing `.removeItems` handling: narrower or equal, and shown in the record.
 
 ## 9. Decisions (the reviewer's answers)
@@ -379,7 +389,7 @@ conformers that M01-06 may also touch (not yet checked: conformer count and over
 6. **Running-app check:** best-effort detection is accepted, provided uncertain cases fail conservatively (skip): unknown owner, unreadable list, helper-process ids (§3e.5); re-checked per item.
 7. **History detail:** the record lists every candidate and every item that was not removed, with exact counts for the rest, instead of
    every removed entry (§3f). This narrows ARCHITECTURE_V2 §3a "listing every item". *Raised by the design review; open for the reviewer's decision.*
-8. **The 20 GB cap value** (§3c) is a proposal. *Open for the reviewer's decision before 13-1.*
+8. **The 20 GB cap value** (§3c) is a proposal. **APPROVED** by the reviewer as v1's budget; the semantics are a strict limit (§3c).
 
 ## Appendix A. v1 fixed dev caches (the 29 exact paths)
 
@@ -414,8 +424,8 @@ app / sandboxed / web caches and logs (§3b). (The Xcode device-support folders 
 |---|---|---|
 | 1 | Prefix rules could admit new candidates under v1 | Ids never admit; allow-rules are fixed-depth path patterns with literal copies of every list; builder signals can only refuse (`tightening`); regression tests (§3a, §3b, §6 "Frozen scope") |
 | 2 | Boundary between consent, approval and execution; revocation inside long cleanup | One chain: `validate` (+ gate at run start) → `approve(under:gate:)` → `GatedApproval` → `execute(gated:)`; nonce→gate map, old entry points refuse; gate in `halt()` and a per-entry `stop` in `remove`, plus a check before the staging move (§3d, §6) |
-| 3 | No byte cap | 20 GB frozen in v1: smallest-first planning, measured-freed stop, deferral listed (§3c; value is open decision §9.8) |
-| 4 | History accuracy | Status string, freed-only bytes, every candidate and every exception listed, 0-byte and not-run rows, `running`/`interrupted` row, nil outcome when nothing was deleted (§3f) |
+| 3 | No byte cap | 20 GB frozen in v1: smallest-first planning, measured-freed stop, deferral listed (§3c; strict, charge-before-remove; value approved §9.8) |
+| 4 | History accuracy | Status string, freed-only bytes, every candidate and every exception listed, 0-byte and not-run rows, `running`/`interrupted` row with unknown (not zero) bytes and per-candidate checkpoints, nil outcome when nothing was deleted (§3f) |
 | 5 | `auto.weekly` → `auto.weeklyClean` | Corrected everywhere; the Today section names `AutoKeys.weekly` |
 
 **`mc-reviewer` findings on revision 3** (REQUEST CHANGES; each verified against the code before acting)

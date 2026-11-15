@@ -1,6 +1,6 @@
 # M01-13 — `AutomationPolicy` for the scheduled safe clean (design)
 
-Status: revision 1, **for review** (no code in this PR). Base: `main` at 800c3cd. Closes RISK-017; implements
+Status: revision 2, **for review** (no code in this PR); open questions answered with the recommended options (§9). Base: `main` at 800c3cd. Closes RISK-017; implements
 ARCHITECTURE_V2 §3a and D-011.
 
 Why a design first: this changes what is deleted with nobody present and what counts as an approval, so
@@ -233,19 +233,13 @@ warnings baseline; 13-3 must wait for it to merge to avoid editing the same docs
 8. **Unchanged limits (SAFETY_MODEL.md):** macOS has no "delete only if unchanged"; a process can write to a file it had
    open after the last check.
 
-## 9. Open questions for the reviewer
+## 9. Decisions (the reviewer chose the recommended option for each)
 
-1. **After an update adds a scope version**, an enabled policy should: **(A, recommended)** keep running the granted
-   version and offer a review; or (B) pause until re-enabled (matches ARCHITECTURE_V2's "must re-enable"; stricter,
-   but a Mac stops cleaning after every scope-adding update). ARCHITECTURE_V2 §3a wording ("the user must re-enable it
-   after seeing the new scope") fits A only for the *new* scope; this design updates that sentence if A is chosen.
-2. **Existing users:** pause (recommended) or auto-grant v1 as `.migrated`?
-3. **Sequencing:** wait for M01-06 (caches onto the executor) before 13-2 (recommended), or build the
-   `CleanTarget` → `CleanupCandidate` builder here for the scheduled subset only?
-4. **"Run safe clean now" button** (Settings): today a confirm alert then `AutoClean.run`. Recommended: it is a
-   person-started run, so it opens the normal review sheet with the policy-scope items preselected and is approved
-   `.userInApp`, not `.standingPolicy`. Alternative: keep an alert but record `.userInApp`.
-5. **History:** is adding `approvedBy` and `items` to `history.json` now acceptable, or should the scheduled run wait
-   for the JSONL session store?
-6. **Scope drift on `skipIfAppRunning`:** acceptable that "running" is judged by `NSWorkspace` bundle id/name/executable
-   keys as today (best effort, not a lock)?
+1. **After an update adds a scope version:** an enabled policy keeps running its granted version and offers a review of the
+   new one (A). 13-3 updates ARCHITECTURE_V2 §3a: "must re-enable" applies to the *new* scope only.
+2. **Existing installs:** paused until the user enables the policy once (fail closed), with one notification.
+3. **Sequencing:** 13-2 waits for M01-06's caches candidate builder; this task does not build a second one.
+4. **"Run safe clean now":** opens the normal review sheet with the policy-scope items preselected, approved `.userInApp`,
+   never `.standingPolicy`.
+5. **History:** `approvedBy` and `items` are added to `history.json` now as optional fields; they move with the JSONL store later.
+6. **Running-app check:** best effort by `NSWorkspace` bundle id, name and executable keys, as today; re-checked per item at execution time.

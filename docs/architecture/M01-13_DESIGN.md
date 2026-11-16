@@ -122,7 +122,7 @@ why history reports **confirmed freed bytes separately** from the charge (3f).
   conservative by design.
 - **Where the check runs.** The Platform calls `control.reserve(charge)` **immediately before every `unlinkat` and `rmdir`** in the
   walk, and for an item that is a plain file (no walk) right before its unlink, using the stat taken in staging, putting the file
-  back if refused. The gate **adds each charge it approves to its reserved total**; it needs no report of successes from the executor. It refuses when `charged + next > maxBytesPerRun` (or revoked). A refusal stops the rest of
+  back if refused. The gate **adds each charge it approves to its `reserved` total** (the "charged" figure above is this same total); it needs no report of successes from the executor. It refuses when `charged + next > maxBytesPerRun` (or revoked). A refusal stops the rest of
   the walk (parent loops included); **after a stop no further folder is `rmdir`'d**; the unvisited entries and the folders
   holding them are kept (3d).
 - **Reserved is not freed.** The gate tracks **`reserved`** (charges approved, the budget) and history separately records **`freed`** (what
@@ -130,7 +130,8 @@ why history reports **confirmed freed bytes separately** from the charge (3f).
   An entry whose `unlinkat`/`rmdir` **returned an error** (the entry is still there, nothing freed) is **released** by the Platform
   through `control.release(charge)`, so a run full of failures (the read-only Go module cache before M01-06's chmod, a locked file)
   can't spend the budget on nothing. Charging an entry whose unlink failed and not releasing it would also be safe (conservative),
-  but would let failures starve a run; `release` is allowed **only** for a syscall that reported failure, so `freed ≤ reserved` still holds. Tests:
+  but would let failures starve a run; `release` is allowed **only** for a syscall that reported failure, so `freed ≤ reserved` still holds. The gate **can't verify** that condition: it rests on the Platform's code at each site (`LocalFileSystem.swift` unlink/rmdir/single-file) and its tests, and the gate clamps `reserved` at zero.
+  **Stickiness:** once `reserve` refuses (cap or revoke) it **keeps refusing for the rest of the run**, so a smaller later entry or a parent loop can't slip through; the recursive `removeContents` has no abort path today, so 13-1 adds a stop flag that unwinds without further `rmdir`. **Thread safety:** the gate is lock-protected (`execute` is sequential, but a revoke arrives from the main actor while `reserve`/`release` run). **`freed`** is the Platform's pre-unlink stat estimate (`freed(s)`), as reported today; the confirmed figure is `measuredFreeChange`. Tests:
   success keeps the reservation, a failed unlink releases it, a skipped-by-stop entry never reserves, and `freed ≤ reserved` over real trees.
 - **Planning** uses estimates to choose what to attempt: admitted units smallest-estimate first (ties by path), greedy fill within
   the cap; the rest are **not planned** and listed as `deferred (over the run limit)` (this stops one rule or path order from starving
@@ -178,8 +179,7 @@ accidents and a stale or corrupted store, not code written to forge it (8.3).
 - **The gate is a new input to the run loop.** Today `halt()` reads only the cancellation state and the `stopped` reason
   (`CleanupExecutor.swift` `execute`), and `precondition` runs only after an item's protection check. 13-1 adds the gate to
   `halt()` (so it is read before every target, including the first) and passes it down.
-- **Revocation and the cap inside a long deletion.** `CleanupFileSystem.remove` gains a `control: RemovalControl?` parameter (a `Sendable` struct of two closures: `reserve(charge) -> String?`, the
-  stop check, and `release(charge)`, 3c), **which is the protocol requirement with no default implementation**; the old two-argument form remains only as an extension that forwards `control: nil` (so existing calls compile and interactive behaviour is unchanged, while a conformer can never silently ignore it). The Platform calls `reserve` before **each entry** with the
+- **Revocation and the cap inside a long deletion.** `CleanupFileSystem.remove` gains a `control: RemovalControl?` parameter (a `Sendable` struct of two closures: `reserve(charge) -> String?`, which is also the stop check (a revoke or the cap makes it refuse; a chmod step asks `reserve(0)`), and `release(charge)`, 3c), **which is the protocol requirement with no default implementation**; the old two-argument form remains only as an extension that forwards `control: nil` (so existing calls compile and interactive behaviour is unchanged, while a conformer can never silently ignore it). The Platform calls `reserve` before **each entry** with the
   next entry's charge (3c). The gate is also asked **before the item is moved into its staging folder**, so a revoke before
   an item starts leaves it in place (`LocalFileSystem.remove` renames the item into staging before it visits any entry, so
   without this check the item's path would be absent for the whole walk). A non-nil reason is treated like a refused
@@ -203,7 +203,7 @@ SIGKILL mid-walk (then the whole unvisited item is still inside). It can hold en
 review or became protected, and its original name is recorded nowhere on disk (slot `item`), so path-based protection
 (`UserProtection`) can no longer be applied to it. Today `LocalFileSystem.entries` hides the prefix, but the executor handles every
 *reviewed* entry (`CleanupExecutor.contents`), `Scanner.children` lists hidden files, and `PermanentDeleteRules` doesn't refuse the
-prefix: a leftover in `~/Library/Logs`, or inside a contents-rule folder, could be deleted by the next unattended run.
+prefix: a leftover that is a child of `~/Library/Logs` (hidden names aren't filtered there), or a kid of a `.removeContents` folder (which `Cleaner.run` lists with hidden files), could be deleted by the next unattended run. Not consumable at the top level today: `Library/Caches`, `Containers` and `Application Support` skip names starting with `.`, and `narrowed` drops any `~/.cache` child outside `autoDotCache`, so `~/.cache/.maccleaner-rm-X` is only **offered in the interactive list** as a recommended candidate. A work folder is created in the item's **own parent**, not a fixed folder, so the list of places is the parents of everything the run removes.
 
 - **Central exclusion.** The prefix becomes a public Core constant (`CleanupWorkFolder.prefix`, today `LocalFileSystem.stagingPrefix`).
   It is filtered in **every** discovery layer: `Scanner.children`, `Scanner.plan/measure` (so a folder's shown size excludes it),
@@ -216,7 +216,7 @@ prefix: a leftover in `~/Library/Logs`, or inside a contents-rule folder, could 
   (original path and work-folder path); kept entries already carry the work-folder path. **At launch and before each scheduled run**
   the app lists the known parents for leftovers and reports "work folders left behind" with their paths (history, notification and a
   Settings row). **Recovery is reviewed and never permanent deletion** (protection can't be re-verified): *Put Back* (`RENAME_EXCL` to the
-  original name, if it is free and the original path is known) or *Move to Trash*, each after the person sees the folder.
+  original name, if it is free and the original path is known) or *Move to Trash*, each after the person sees the folder. A leftover from a crash can contain directories with raised owner bits (§13.8); the Put Back row says so and offers to restore a mode only when the original is known, it never restores the folder silently.
   13-1 (Core): the constant and the `admits` refusal. 13-2: the central filter in the app's scan, detection and reporting. **A
   separate stage, 13-2b, does the review UI** (Put Back / Move to Trash), because it is its own approval boundary.
 - A third-party folder that happens to use the prefix is never cleaned: a safe failure.
@@ -244,14 +244,29 @@ prefix: a leftover in `~/Library/Logs`, or inside a contents-rule folder, could 
 
 **A crashed slot is spent.** `lastRun` is written only after a run (`Automation.swift:314–316`), so a crash before it would make `isDue` fire
 again on relaunch, and a crash loop could free the cap again at each launch. The runner therefore persists the slot as **attempted**
-**before any deletion**, together with the `running` row, so the cap is **per slot**; a crashed slot doesn't retry until the next one.
-`UserDefaults` is **not** durable against a crash (writes are flushed later), so the marker is not a `UserDefaults` key: it lives in
-the history's `running` row and in a small `AutomationState` file, written together with the **dedicated durable write** (3f:
-temp file, `F_FULLFSYNC`, `rename`, `fsync` of the folder, under the lock, `commit`, failing closed). **The order is fixed: validate,
-create the gate, durably commit the marker and the `running` row, and only then `approve` and `execute`. If the commit fails, no
-run starts** (a "Not run: couldn't record the attempt" row is tried, and the slot stays unspent only if nothing destructive could
-have happened). Tests: a counting file system shows zero removals when the commit fails; a simulated kill right after the commit
-leaves the slot spent on relaunch; the marker is read from the durable file, not from `UserDefaults`.
+**before any deletion**, so the cap is **per slot**; a crashed slot doesn't retry until the next one.
+
+- **`UserDefaults` is not durable against a crash**, so the marker is not a `UserDefaults` key. The **authoritative** store is a small
+  `AutomationState` file (`{ attemptedSlot, lastRunDate }`), written with the **dedicated durable write** (3f: temp file, `F_FULLFSYNC`,
+  `rename`, `fsync` of the folder, under the lock, `commit`, failing closed). The `running` history row is a second write and is
+  **informational**: two files can't be committed atomically, so the order is fixed.
+- **Order:** validate and create the gate → durably commit the **marker** → commit the `running` row → scan, plan, pre-check → `approve`
+  → `execute`. Nothing destructive precedes the marker. The scan therefore comes **after** the marker (a crash during a long scan also
+  spends the slot, which is accepted).
+- **A commit that fails is treated as possibly durable** (a `rename` can succeed and the directory `fsync` then fail), so **the slot is spent
+  whenever a commit was attempted**, and the process also remembers it in memory: **no run starts, no retry this slot, no retry every
+  5-minute tick**. If the marker is committed and the `running` row's commit fails, the run does not start either (a failed row is not
+  worth a deletion without a record). A "Not run: couldn't record the attempt" row is tried, best effort.
+- **`isDue` is fed from the durable file.** `isDue` only reads `lastRun` (`Automation.swift:67–70`), and the model's `lastRun` comes from
+  `UserDefaults`, so after a crash it would fire the slot again whatever the marker says. The `lastRun` given to `isDue` is therefore
+  **`max(UserDefaults lastRun, the marker's attemptedSlot)`, read from the durable file at launch and at each tick**.
+- **`approve` can't run before the commit:** the gate has a **`committed` latch** that the runner sets only after both writes, and
+  `approve(under:gate:)` refuses an uncommitted gate (the counting-file-system test is then a second line, not the only one).
+- `F_FULLFSYNC` can fail with `ENOTSUP` on some volumes; fail-closed then means the scheduled clean never runs there. **Accepted**, and
+  reported as "Not run: this volume can't make the record durable".
+- **Tests:** zero removals (counting file system) when the marker commit or the row commit fails; a simulated kill right after the
+  commit leaves the slot spent on relaunch and `isDue` false for it; a failing commit doesn't re-attempt on the next tick; the
+  `lastRun` fed to `isDue` is the max; `approve` refuses an uncommitted gate; the marker is read from the durable file, not `UserDefaults`.
 
 **Paused or refused runs.** A run that doesn't start writes at most **one "Not run" row per scheduled slot**: the runner stores
 the slot it last reported (`auto.policyReportedSlot`, the `lastSlot` date) because a paused run doesn't set `lastRun` and
@@ -296,8 +311,7 @@ decision §9.7 for the reviewer. If a run has more than 500 non-removed items, t
 
 **Durability of the checkpoint.** `SharedFile.update` today writes with `Data.write(.atomic)` (no `fsync`, and it writes even if the lock wasn't taken), and `read` returns `[]` on a decode error, so a checkpoint into a corrupt file would overwrite every record. 13-2 therefore gives history a **dedicated durable write**: temp file, `F_FULLFSYNC`, `rename`, `fsync` of the folder, all **under the lock and failing closed** (`commit`, not `update`); it refuses to write when the file is *unreadable* (distinct from *missing*); and if a checkpoint can't be committed it returns a stop reason from `onItemFinished`, so the run halts **before the next candidate**. The checkpoint is written when the **last target of a candidate** finishes (`onItemFinished` fires per target, synchronously, before the next). Cost: a rewrite of up to 300 records plus a full sync per candidate, tens of ms each. History also needs a new API for **0-byte rows and replace-by-id** (`HistoryStore.add` drops `bytes <= 0` and records are immutable), and the `running` row stores the **PID and boot session** so a second GUI instance mid-run isn't mistaken for a dead one. The candidate list itself is bounded: the first 300 candidate rows are listed and the rest are in `itemCounts`, with `N more not listed`. Sleep doesn't interrupt a run; only a quit or crash does.
 
-**A run that dies: unknown is not zero.** The record is created at the start with `runStatus: running` (under the file lock,
-before the scan), carries `bytesKnown: false`, and is **checkpointed after each candidate finishes** with the progress confirmed
+**A run that dies: unknown is not zero.** The record is created at the start with `runStatus: running` (under the file lock, right after the durable marker (3e) and before the scan), carries `bytesKnown: false`, and is **checkpointed after each candidate finishes** with the progress confirmed
 so far (`confirmedBytes` = **freed as the file system reported it**, `confirmedItems`, same lock; separate from the charge, which is only the budget). At the end it is replaced by the final record (`bytesKnown: true`). If the
 app quits, crashes or the Mac sleeps in between, the next launch shows the row as `interrupted`: "at least *confirmedBytes* freed;
 the rest is **unknown**". It is **not** shown as "0 freed", and `totalDeleted` counts only `confirmedBytes`, labelled "at least".
@@ -416,8 +430,8 @@ Platform tests in Features/Platform.
 
 | Stage | What | Level | Safety-critical |
 |---|---|---|---|
-| **13-0** | **Interim guard for the legacy scheduled clean** (app, small): the work-folder prefix is refused by `Scanner.children` and by `AutoClean.select` (any path component, case-folded), with self-tests that a planted `.maccleaner-rm-X` in `Logs`, a contents folder and `~/.cache` is never planned or deleted by the legacy path. No behaviour change otherwise. Independent of 13-1; ships first. | Senior | **yes** (it changes what the unattended clean may delete) |
-| **13-1** | Core: `AutomationPolicy`/scope/patterns/catalog v1 (literals + Appendix A, golden file; `package` initializers), `tightening`, `ValidatedPolicy`, one-shot `PolicyGate`, `AutomationConsent.validate(now:)`; the public work-folder prefix constant and the `admits` refusal; executor `approve(under:gate:)`, nonce→gate map, `execute(_, gated:)`, `gateRequired`, `useAutomationPolicy`, gate in `halt()`; new `KeptEntry.Reason.stopped`, `SkipReason.revoked/.runLimit`; `CleanupFileSystem.remove(stop:)` as the requirement (+ forwarding extension), the Platform walk's per-unlink/rmdir charge check, the single-file and pre-staging checks, both conformers (`LocalFileSystem`, test `FakeFS`); package tests above, including rewriting `CleanupExecutorTests.swift:346` (it calls the now-refused `approve(by: .standingPolicy)`). **App unchanged, unused**: `AutoClean.run` keeps deleting unattended without a gate until 13-2, so RISK-017 stays open until then. | Senior | **yes** |
+| **13-0** | **Interim guard for the legacy scheduled clean** (app, small): the work-folder prefix is refused at the legacy path's **single choke point, `Cleaner.remove`** (`Scanner.swift`, every deletion of the legacy path goes through it, including each kid of a `.removeContents` folder that `Cleaner.run` lists itself with `contentsOfDirectory`, hidden files included): it skips any path whose **last component** starts with the prefix (case-folded) and reports it, and `SafetyGuard.isAllowed` also refuses such a path. `Scanner.children` and `AutoClean.select` keep a second layer (any path component, case-folded) so the item isn't even planned or sized. Self-tests: a planted `.maccleaner-rm-X` as a kid of a contents folder, as a child of `Logs`, and in `~/.cache` (interactive list only) is never planned or deleted. **Limit, stated plainly:** a leftover nested *inside* a tree that the legacy path removes recursively with `fm.removeItem` can't be spared without replacing that call; that is no worse than what the legacy path deletes today, and it is why the wording is "never a top-level target or contents kid", not "never". Also covers the MCP `clean_caches` tool, which shares `Scanner.plan` and `Cleaner.run`. No behaviour change otherwise. Independent of 13-1; ships first. | Senior | **yes** (it changes what the unattended clean may delete) |
+| **13-1** | Core: `AutomationPolicy`/scope/patterns/catalog v1 (literals + Appendix A, golden file; `package` initializers), `tightening`, `ValidatedPolicy`, one-shot `PolicyGate`, `AutomationConsent.validate(now:)`; the public work-folder prefix constant and the `admits` refusal; executor `approve(under:gate:)`, nonce→gate map, `execute(_, gated:)`, `gateRequired`, `useAutomationPolicy`, gate in `halt()`; new `KeptEntry.Reason.stopped`, `SkipReason.revoked/.runLimit`; `CleanupFileSystem.remove(control:)` as the requirement (+ forwarding extension), the Platform walk's per-unlink/rmdir charge check, the single-file and pre-staging checks, both conformers (`LocalFileSystem`, test `FakeFS`); package tests above, including rewriting `CleanupExecutorTests.swift:346` (it calls the now-refused `approve(by: .standingPolicy)`). **App unchanged, unused**: `AutoClean.run` keeps deleting unattended without a gate until 13-2, so RISK-017 stays open until then. | Senior | **yes** |
 | **13-2** | App: consent store + Settings sheet (toggle revokes/enables), gate registry, scheduled runner on the executor with the per-target filter, cap, per-item pre-check and attempted-slot marker; central work-folder filter in `Scanner`; leftover detection and reporting; history fields, durable checkpoint, 0-byte/replace-by-id API, `SharedFile` fixes, migration and per-slot "Not run" row; **"Run safe clean now" through the review sheet** (Settings + menu-bar popover); sites script (allow the runner's `CleanupExecutor(`); self-tests; remove `AutoClean.run/select/narrowed`, `runClean(automatic:)` and the scheduled path's `Cleaner.run`. **Waits for M01-06's caches candidate builder.** | Senior | **yes** |
 | **13-2b** | Review UI for leftover work folders: Put Back (`RENAME_EXCL`) or Move to Trash after review, never permanent delete. | Senior | **yes** (approval boundary) |
 | 13-3 | Docs: ARCHITECTURE_V2 (remaining §3a/§5 wording), SAFETY_MODEL, RISK_REGISTER (close RISK-017), CURRENT_STATE, MIGRATION_PLAN, DECISIONS. | Junior | no |
@@ -426,7 +440,7 @@ Platform tests in Features/Platform.
 deletes unattended with no gate, as it does today. Rules for any release cut from `main` in that window: (1) **13-0 must be in it**, so
 the legacy path can't consume a leftover work folder (a risk that exists today, because `Scanner.children` lists hidden files and `remove`
 can leave a leftover); (2) 13-2 is preferably in the same release as the first M01-06 module that changes what the scheduled path
-lists, otherwise the legacy path is unchanged; (3) the release notes say the scheduled clean still runs under the old rules. The stricter
+lists, otherwise the legacy path is unchanged; (3) the release notes say the scheduled clean still runs under the old rules, **including that the 20 GB cap, the gate and revocation do not exist before 13-2 and that "Run safe clean now" is the same unreviewed `AutoClean.run`** (`Automation.swift:446`, `MenuBarPopover.swift:123`). The stricter
 alternative is to **disable the legacy scheduled clean** in any release before 13-2 (a kill switch that turns `AutoSchedule` off with a
 notification); it costs users their scheduled cleans until 13-2 and is **not** recommended, but it is the user's call (§12).
 
@@ -448,7 +462,7 @@ reviewed stage, then 13-2. Hotspots 13-2 touches: `check-approval-sites.sh`, `Se
 4. **Classes by shape stay open in membership.** v1 admits the cache of any app installed later at an in-pattern path. Bounded by depth, literals, exclusions, protection, running-app skip and the cap, and stated in the consent sheet.
 5. **The 20 GB cap** can defer a cleanup to the next run or a manual clean, and **a single item bigger than the cap is never cleaned by the schedule**. It never deletes more than today, only less.
 6. **A stop mid-folder leaves a partly deleted folder** (kept entries stay, reported). If the name was retaken, the remainder stays in a hidden staging folder, reported with its path. No undo for permanently deleted entries.
-7. **`CleanupFileSystem.remove` changes** (new `stop` parameter, new Core enum cases) touch the shared executor/Platform, safety-critical, and may overlap with M01-06; sequenced in 13-1 with tests before anything uses it.
+7. **`CleanupFileSystem.remove` changes** (new `control` parameter, new Core enum cases) touch the shared executor/Platform, safety-critical, and may overlap with M01-06; sequenced in 13-1 with tests before anything uses it.
 8. **Running-app detection is best effort**, not a lock: an app can start between the check and the delete. Unknown or unreadable cases skip.
 9. **Several executors per process:** `ApprovedTrash` has one, `AppOwnedTrash` makes one per move, and the runner makes its own (so `check-approval-sites.sh`'s `CleanupExecutor(` rule must allow the runner's file). A scheduled and an interactive run therefore do **not** wait for each other; concurrent runs are safe because of `RENAME_EXCL` and the identity checks. The nonce→gate map and `gateRequired` live per executor instance, which is fine because a gated approval is made and used by the same one.
 10. **Unchanged limits (SAFETY_MODEL.md):** macOS has no "delete only if unchanged"; a process can write to a file it had open after the last check.
@@ -525,7 +539,9 @@ Not checked by the reviewer and still to do before 13-1: the `CleanupFileSystem`
 `Staging` prefix interaction with later scans; `package`-init feasibility across Features/Platform. Whether to ask for an Opus
 review (`mc-safety-architect`) of this design before 13-1 is the user's call; it has not been requested.
 
-## 11. Responses to the Opus safety review (`mc-safety-architect`, on fdc9ae7: REQUEST CHANGES)
+## 11. Responses to the Opus safety review
+
+(These tables are historical: they use the older name `stop` for what revision 6 calls `control` (`reserve`/`release`).) (`mc-safety-architect`, on fdc9ae7: REQUEST CHANGES)
 
 Each claim was checked against the code before acting (`LocalFileSystem.freed` counts folder and link blocks; `Scanner.children` lists
 hidden files; the executor handles every reviewed entry whatever `entries` returned).
@@ -579,18 +595,21 @@ hook (`control` is asked before it).
 4. **Within the item and the home volume.** Never above the item, never across a device boundary, never into a mount.
 5. **Protection and the gate first.** `protection(path)` is asked before each directory's chmod; for an unattended run `control.reserve`
    is asked first too, so a revoked run **never starts a permission change** and a stopped run changes no more.
-6. **Original modes are recorded and restored.** Each directory's original mode is recorded before it is changed. If the walk stops
-   (revoke, cap, protection, failure, cancellation), every directory that **remains** (kept, or put back) gets its original mode back;
-   a restore that fails is reported (`KeptEntry` text and a warning), never ignored. Directories that are deleted need no restore.
+6. **Original modes are recorded and restored.** Each directory's full original mode (`st_mode & 07777`, not only the owner bits) is recorded before it is changed. Every directory that **remains** after the walk gets it back: on a stop (revoke, cap, protection, failure, cancellation) **and on normal completion** (a folder kept as `.notEmpty`, `.protected` or `.changedAfterReview`). The restore runs **while that directory's fd is still open, in the unwinding frame, and before the put-back or the root's rename** (the recursion closes fds and the put-back moves the folder); a restore that fails is reported (`KeptEntry` text and a warning), never ignored. Directories that are deleted need no restore.
 7. **The change-time cutoff isn't tripped by our own chmod** (chmod updates ctime): the "changed after review" check for an entry is made
    on a stat taken **before** that entry's chmod, and our chmod is excluded from it by ordering (check, then chmod, then delete, per entry);
    the cutoff for the rest of the tree is unchanged.
 8. **Interrupted cleanup** (crash/SIGKILL mid-walk) can leave directories with the extra owner bits inside a leftover work folder; that
    folder is reported as a leftover (3d-2) and its recovery is reviewed, so the extra bits are never a surprise on a folder the person keeps.
-9. **Fail closed.** If a chmod or a restore fails, the directory and what it holds are kept and reported; there is no escalation (no
+9. **Lazy, and narrower than the legacy path on purpose.** Today `Cleaner.remove` calls `makeOwnerWritable` only after a first `removeItem`
+   fails (`Scanner.swift:437–441`); the successor does the same: **a chmod happens only for a directory whose removal failed with
+   `EACCES`/`EPERM`**. `fchmod` needs an open fd, so a directory with no owner read/execute bit (for example mode 000 or 300) can't be opened
+   and is **kept and reported, with no path-based fallback** (the Go module cache, 0555, works). **ACLs are never touched** (no
+   `chmod -N`, no `acl_set`): a deny-delete ACL entry still blocks deletion, and the directory is kept.
+10. **Fail closed.** If a chmod or a restore fails, the directory and what it holds are kept and reported; there is no escalation (no
    `sudo`, no retry with a broader change).
 
-Regression tests (M01-06, real temp trees): a read-only tree is removed; only directories we own change, never files or links; a directory
+Regression tests (M01-06, real temp trees; the listed ones plus restore on normal completion for kept directories, restore before put-back and in the name-retaken-in-staging case, a mode-000 directory kept and reported with no fallback, a deny-delete ACL kept and untouched, `fchmod` `EPERM` on a `uchg` directory, and a simulated crash leaves raised bits only inside the staging folder): a read-only tree is removed; only directories we own change, never files or links; a directory
 **replaced by a symlink between the identity check and the chmod** is not followed and the target's mode is unchanged; a protected entry
 is not chmod'd; a foreign-owned directory is not chmod'd and is kept; a hard-linked file's mode is unchanged; an immutable (`uchg`)
 entry is kept; a stop mid-walk (revoke and cap) leaves every remaining directory at its **original mode** and reports a failed

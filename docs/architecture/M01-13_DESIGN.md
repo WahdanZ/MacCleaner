@@ -223,7 +223,7 @@ prefix: a leftover that is a child of `~/Library/Logs` (hidden names aren't filt
 
 ### 3e. The scheduled run (app target)
 
-1. `tick` finds the schedule due (unchanged `isDue`/`armedAt`) and `auto.weeklyClean` on; otherwise stops.
+1. `tick` finds the schedule due (unchanged `isDue`/`armedAt` (with `lastRun` fed from the marker, §3e)) and `auto.weeklyClean` on; otherwise stops.
 2. **Validate the stored consent and create the gate** (3d). On `Invalid`: no scan, no deletion, one "Not run" history row for
    this slot (below) and one notification per reason.
 3. Plan: scan as today (`Scanner.plan/measure/finalize`), build `CleanupCandidate`s through the caches builder (M01-06;
@@ -344,12 +344,12 @@ sheet file and the self-test; nothing under the MCP/CLI files; no `AutomationCon
 | Folder swapped for a symlink / replaced / newly protected between snapshot and delete | executor revalidation skips it |
 | App owning a cache starts after the snapshot, or can't be identified | skipped (`precondition`; unknown owner fails conservative) |
 | User turns it off during the scan, before an item, or inside one huge folder | gate refuses `approve`, or stops before the item / next entry; rest kept and reported |
-| Estimate too low, or caches are huge | stop at 20 GB freed; remaining units deferred and listed |
+| Estimate too low, or caches are huge | stop at the 20 GB accounted charge; remaining units deferred and listed |
 | One path of a merged candidate is out of scope | that path dropped and listed; the others run |
 | A command / review / user-data / Trash item reaches the plan | `admits` refuses; ledger's generic check refuses again |
 | Another caller asks for `.standingPolicy`, or runs one without the gate | refused (`useAutomationPolicy`, `gateRequired`) |
 | App quits mid-run | row shows `interrupted`; freed bytes **unknown** (at least the confirmed amount), never 0 |
-| Two runs for one slot, or a run right after enabling | unchanged `isDue`/`armedAt` rules |
+| Two runs for one slot, or a run right after enabling | unchanged `isDue`/`armedAt` (with `lastRun` fed from the marker, §3e) rules |
 | Mac asleep at the slot | catch-up on wake, unchanged |
 
 ## 5. Migration of existing installs
@@ -510,6 +510,8 @@ app / sandboxed / web caches and logs (§3b). (The Xcode device-support folders 
 
 ## 10. Responses to the review findings
 
+(§10 and §11 are historical: they use the older name `stop` for what revision 6 calls `control` (`reserve`/`release`).)
+
 **The user's five required fixes**
 
 | # | Finding | Resolution (where) |
@@ -539,9 +541,7 @@ Not checked by the reviewer and still to do before 13-1: the `CleanupFileSystem`
 `Staging` prefix interaction with later scans; `package`-init feasibility across Features/Platform. Whether to ask for an Opus
 review (`mc-safety-architect`) of this design before 13-1 is the user's call; it has not been requested.
 
-## 11. Responses to the Opus safety review
-
-(These tables are historical: they use the older name `stop` for what revision 6 calls `control` (`reserve`/`release`).) (`mc-safety-architect`, on fdc9ae7: REQUEST CHANGES)
+## 11. Responses to the Opus safety review (`mc-safety-architect`, on fdc9ae7: REQUEST CHANGES)
 
 Each claim was checked against the code before acting (`LocalFileSystem.freed` counts folder and link blocks; `Scanner.children` lists
 hidden files; the executor handles every reviewed entry whatever `entries` returned).

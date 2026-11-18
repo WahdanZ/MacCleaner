@@ -431,6 +431,39 @@ struct ExecutorRealDiskTests {
         #expect(fm.fileExists(atPath: outside + "/precious") && fm.fileExists(atPath: cache))
         #expect(try fm.contentsOfDirectory(atPath: cache).sorted() == ["added-later", "swap-me"])   // no staging left
     }
+
+    /// Pins today's cancellation on real files (M01-04d slice 4): cancelling the parent Task while the first item is
+    /// being moved lets that move finish, and the second item is skipped as cancelled and left on disk.
+    @Test func cancellingWhileTheFirstItemIsMovedLeavesTheSecondOnDisk() async throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("maccleaner-exec-cancel-\(UUID().uuidString)")
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let root = realPath(base.path)
+        let trash = root + "/trash"
+        try fm.createDirectory(atPath: trash, withIntermediateDirectories: true)
+        let one = root + "/one.txt", two = root + "/two.txt"
+        try Data("one".utf8).write(to: URL(fileURLWithPath: one))
+        try Data("two".utf8).write(to: URL(fileURLWithPath: two))
+        // The "Trash" is a folder in this sandbox. The first move cancels the running task, then really moves the file.
+        let fs = LocalFileSystem(trashMover: { url in
+            withUnsafeCurrentTask { $0?.cancel() }
+            let dest = URL(fileURLWithPath: trash).appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: dest)
+            return dest
+        })
+        let a = try #require(try fs.identity(at: one)), b = try #require(try fs.identity(at: two))
+        let p = try plan([.init(candidate("one", [.file(a)]), .trash), .init(candidate("two", [.file(b)]), .trash)])
+        let exec = CleanupExecutor(fileSystem: fs, protection: Protected())
+        let approval = try await exec.approve(p, by: .userInApp)
+        let report = try await Task { try await exec.execute(p, approval: approval) }.value
+        let r = results(report)
+        #expect(report.wasCancelled && !report.allSucceeded)
+        if case .trashed? = r[one] {} else { Issue.record("first item: \(String(describing: r[one]))") }
+        #expect(r[two] == .skipped(.cancelled))
+        #expect(!fm.fileExists(atPath: one) && fm.fileExists(atPath: trash + "/one.txt"))
+        #expect(fm.fileExists(atPath: two) && (try? String(contentsOfFile: two, encoding: .utf8)) == "two")
+    }
 }
 
 /// The path with every symlink resolved (realpath). URL.resolvingSymlinksInPath turns /private/var back into

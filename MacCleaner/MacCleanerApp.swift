@@ -16,6 +16,7 @@ enum Entry {
             print("trash-destination: " + (SelfTest.trashIsIsolated ? SelfTest.isolatedTrash.path : "system"))
             exit(0)
         }
+        TestHooks.installFromEnvironment()
         if args.count > 1 && args[1] == "--selftest-child" {
             exit(SelfTest.child(Array(args.dropFirst(2))))
         }

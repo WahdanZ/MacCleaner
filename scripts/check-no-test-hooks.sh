@@ -9,7 +9,7 @@ BIN="${1:?usage: check-no-test-hooks.sh [--expect-hooks] path/to/Mac Cleaner.app
 test -x "$BIN"
 N=$(strings -a "$BIN" | grep -c -e '--selftest-child' -e 'MACCLEANER_TEST_TRASH_DIR' -e 'MACCLEANER_TEST_TRASH_PROBE' \
   -e 'MACCLEANER_TEST_APPROVAL_PROBE' -e 'MACCLEANER_TEST_APPROVAL_DELAY_MS' -e 'MACCLEANER_TEST_HOME_PROBE' \
-  -e 'MACCLEANER_TEST_APP_RUNNING' -e 'MACCLEANER_TEST_APP_QUIT' || true)
+  -e 'MACCLEANER_TEST_APPROVAL_ANSWER' || true)
 if [ "$EXPECT" = 1 ]; then
   [ "$N" -gt 0 ] || { echo "✗ expected the test-hooks build to contain its test-only modes"; exit 1; }
   echo "✓ the test-hooks build contains its test-only mode (the check can see it)"

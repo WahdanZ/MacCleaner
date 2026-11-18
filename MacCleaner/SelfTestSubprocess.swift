@@ -31,7 +31,6 @@ extension SelfTest {
         private var inputClosed = false
 
         init?(home: String, extra: [String: String] = [:]) {
-            signal(SIGPIPE, SIG_IGN)   // a write to a child that already exited must fail, not kill the self-test
             guard let exe = Bundle.main.executableURL else { return nil }
             process.executableURL = exe
             process.arguments = ["--mcp"]
@@ -40,6 +39,8 @@ extension SelfTest {
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             do { try process.run() } catch { return nil }
+            // A write to a child that already exited must fail, not kill the self-test (this pipe only; not inherited).
+            _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         }
 
         func send(_ text: String) {
@@ -186,7 +187,7 @@ extension SelfTest {
     static func subprocessPins(dir: URL, runID: String) {
         print("MCP and CLI in separate processes: framing, ordering, exit codes, Trash refusals (M01-04d slice 4, pre-async baseline)")
         let home = SafetyGuard.home.path
-        guard home != accountHome?.path else {
+        guard let account = accountHome, home != account.path else {
             check("the throwaway home differs from the real home before any child process starts", false)
             return
         }
@@ -198,6 +199,7 @@ extension SelfTest {
         if subprocessTrashIsIsolated() && childHomeIsSandbox(home: home, scratch: dir) {
             mcpOrdering(home: home, dir: dir, runID: runID)
             mcpApprovalProbe(home: home, dir: dir, runID: runID)
+            mcpReplyAfterMove(home: home, dir: dir, runID: runID)
             cliTrashFiles(home: home, dir: dir, runID: runID)
             cliUnrecordedHumanOutput(home: home, dir: dir, runID: runID)
         }
@@ -364,8 +366,10 @@ extension SelfTest {
         defer { try? FileManager.default.removeItem(at: probe) }
         let r = runCLI(["status"], home: home, extra: ["MACCLEANER_TEST_HOME_PROBE": probe.path], scratch: scratch)
         let seen = (try? String(contentsOf: probe, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ok = r.code == 0 && seen == home && seen != accountHome?.path
-        check("a child process reports the self-test's throwaway home before any child that could move a file runs", ok)
+        let trash = runCLI(["status"], home: home, extra: ["MACCLEANER_TEST_TRASH_PROBE": "1"], scratch: scratch)   // the env destructive children get
+        let ok = r.code == 0 && seen == home && accountHome.map { seen != $0.path } == true
+            && trash.out.trimmingCharacters(in: .whitespacesAndNewlines) == "trash-destination: \(isolatedTrash.path)"
+        check("a child started with the destructive children's own environment reports the throwaway home and the isolated Trash before any child that could move a file runs", ok)
         if !ok { print("    (skipping the child-process checks that could move files: child home \"\(seen ?? "nil")\", exit \(r.code.map(String.init) ?? "killed"))") }
         return ok
     }
@@ -488,6 +492,40 @@ extension SelfTest {
         if let l = lines6.first { print("    (run-loop fingerprint today: \(l))") }
     }
 
+    // MARK: approved move: the reply comes only after the move
+
+    static func mcpReplyAfterMove(home: String, dir: URL, runID: String) {
+        let fm = FileManager.default
+        let f = sandboxFile(dir, "reply-after-move", runID, "moved by mcp")
+        let probe = dir.appendingPathComponent("approval-probe-move-\(runID).txt")
+        let trashBefore = isolatedTrashCount()
+        var first: [String: Any]?, second: [String: Any]?, status: Int32?
+        var goneWhenReplyRead = false, trashedWhenReplyRead = false
+        let ok = withMcpChild(home: home, extra: ["MACCLEANER_TEST_APPROVAL_PROBE": probe.path,
+                                                   "MACCLEANER_TEST_APPROVAL_DELAY_MS": "400",
+                                                   "MACCLEANER_TEST_APPROVAL_ANSWER": "yes"]) { c in
+            guard let pid = previewMove(c, id: 1, path: f.path) else { return }
+            c.send(confirmLine(2, path: f.path, previewID: pid))
+            c.send(rpc(3, "ping"))
+            first = c.readReply()
+            // Right after the confirm's reply is read, before the ping's: the move must already have happened.
+            goneWhenReplyRead = !fm.fileExists(atPath: f.path)
+            trashedWhenReplyRead = isolatedTrashCount() == trashBefore + 1
+            second = c.readReply()
+            status = c.finish().status
+        }
+        let moved = toolText(first)?.json?["moved_to_trash"] as? [String]
+        check("--mcp reply only after the move: an approved confirm (400 ms dialog, answer yes) asks once on the main thread (main=1)",
+              ok && probeLines(probe.path).count == 1 && probeLines(probe.path).first?["main"] == "1"
+              && probeLines(probe.path).first?["isMainThread"] == "true")
+        check("--mcp reply only after the move: the confirm's reply is the first line and reports the file moved",
+              replyID(first) == 2 && toolText(first)?.isError == false && moved == [Scanner.tilde(f)])
+        check("--mcp reply only after the move: when that reply is read the file is already gone from its place and in the isolated Trash",
+              goneWhenReplyRead && trashedWhenReplyRead)
+        check("--mcp reply only after the move: the ping's reply is second and EOF exits 0", replyID(second) == 3 && status == 0)
+        if let e = TrashLog.shared.present().first(where: { $0.original == AppCleanup.physicalPath(f) }) { _ = TrashOps.restore(e) }
+    }
+
     // MARK: 8. CLI trash-files: --yes vs. no TTY
 
     static func cliTrashFiles(home: String, dir: URL, runID: String) {
@@ -529,11 +567,13 @@ extension SelfTest {
         let lockBlocker = logDir.appendingPathComponent("trash-log.json.lock")
         try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
         let hadLock = fm.fileExists(atPath: lockBlocker.path)
+        let savedLock = hadLock ? try? Data(contentsOf: lockBlocker) : nil
         if hadLock { try? fm.removeItem(at: lockBlocker) }
         try? fm.createDirectory(at: lockBlocker, withIntermediateDirectories: false)   // the Put Back record can't be written
         let k1 = sandboxFile(dir, "cli-human-1", runID, "one"), k2 = sandboxFile(dir, "cli-human-2", runID, "two")
         let r = runCLI(["trash-files", k1.path, k2.path, "--yes"], home: home, scratch: dir)
         try? fm.removeItem(at: lockBlocker)
+        if hadLock { fm.createFile(atPath: lockBlocker.path, contents: savedLock ?? Data()) }   // put back what was there
         let outLines = r.out.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         // The result follows the preview: everything after the "Going ahead" line.
         let result = outLines.drop { !$0.hasPrefix("Going ahead") }

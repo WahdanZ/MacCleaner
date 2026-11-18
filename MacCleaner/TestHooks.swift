@@ -26,10 +26,8 @@ enum TestHooks {
 
         if let path = env["MACCLEANER_TEST_HOME_PROBE"] { append(SafetyGuard.home.path, to: path) }
 
-        if env["MACCLEANER_TEST_APP_RUNNING"] == "1" { AppEngine.testRunningOverride = true }
-        if env["MACCLEANER_TEST_APP_QUIT"] == "0" { AppEngine.testQuitOverride = false }
-
         if let path = env["MACCLEANER_TEST_APPROVAL_PROBE"] {
+            let answer = env["MACCLEANER_TEST_APPROVAL_ANSWER"] == "yes"   // default: the probe says no
             let delayMS = env["MACCLEANER_TEST_APPROVAL_DELAY_MS"].flatMap(Int.init) ?? 0
             let timer = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + 0.05, 0.05, 0, 0) { _ in
                 ticks += 1
@@ -40,7 +38,7 @@ enum TestHooks {
                 let mode = CFRunLoopCopyCurrentMode(CFRunLoopGetCurrent()).map { ($0.rawValue as String) } ?? "nil"
                 append("main=\(pthread_main_np()) isMainThread=\(Thread.isMainThread) "
                        + "mainRunLoop=\(CFRunLoopGetCurrent() == CFRunLoopGetMain()) mode=\(mode) ticks=\(ticks)", to: path)
-                return false
+                return answer
             }
         }
     }

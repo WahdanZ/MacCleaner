@@ -138,9 +138,11 @@ ties the identity to the folder that passed the check; it closes neither of thes
 a main-actor task plus `CFRunLoopRun`, never `dispatchMain`, which leaves the main run loop's default modes
 unserviced). `--cli bench`, the self-test and the window app keep their own paths. A dedicated thread reads stdin
 with the same `readLine` framing into an **unbounded** `AsyncStream`; one main-actor loop handles the lines strictly
-one at a time with a synchronous `handle`, and writes each reply before taking the next line. The approval dialog
-therefore never runs alongside another request, and the preview stays single-use (consumed before the person is
-asked). The process exits 0 only after stdin reached EOF and every buffered line was handled.
+one at a time: the single consumer awaits `handle` before taking the next line, so replies are in request order
+(never handle lines in separate tasks). `handle` may await the cleanup executor (PR 2: `approveTrash`/`moveToTrash`
+are async); while it does, no `next()` is pending, so the reader thread can only buffer. The person's approval
+dialog itself stays synchronous on the main actor, so it never runs alongside another request, and the preview stays
+single-use (consumed before the person is asked). The process exits 0 only after stdin reached EOF and every buffered line was handled.
 **Accepted consequences (user decisions, 2026-11-18):** (1) the buffer is unbounded so no request is ever dropped and
 replies stay in order; the pipe no longer applies back-pressure, so a client that keeps writing while a dialog is
 open (up to 120 s) grows memory (RISK-018). (2) EOF while a dialog is open keeps the previous behavior: the dialog

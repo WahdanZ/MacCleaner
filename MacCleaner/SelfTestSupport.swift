@@ -21,6 +21,14 @@ extension SelfTest {
     }
 
     static func mcpCall(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
-        try MainActor.assumeIsolated { try MCPServer.call(name, a, approval: approval) }
+        let r = wait { () async -> Result<Any, Error> in
+            do { return .success(try await MCPServer.call(name, a, approval: approval)) } catch { return .failure(error) }
+        }
+        // A timeout is a failure, never a silent pass: record a failed check and throw so every caller sees it.
+        guard let r else {
+            check("MCP call \(name) did not finish in time", false)
+            throw MCPServer.ToolError(description: "MCP call \(name) did not finish in time")
+        }
+        return try r.get()
     }
 }

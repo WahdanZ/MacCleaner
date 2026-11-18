@@ -34,34 +34,22 @@ enum ToolConfirmation {
     }
 
     /// Approves the preview's Trash plan, attributed to whoever confirmed it. nil when the preview had no Trash
-    /// items. Waits for the executor (the MCP server and the CLI are synchronous).
-    static func approveTrash(_ confirmed: MCPServer.ConfirmedPreview) -> ReviewApproval? {
+    /// items. Awaits the executor.
+    static func approveTrash(_ confirmed: MCPServer.ConfirmedPreview) async -> ReviewApproval? {
         guard let plan = confirmed.cleanupPlan else { return nil }
         if let why = AppCleanup.nonTrashRefusal(plan) { return .refused(plan: plan, reason: why) }
         let approver = approver(for: confirmed.approvedBy)
-        let slot = ApprovalSlot()
-        let done = DispatchSemaphore(value: 0)
-        Task.detached {
-            do {
-                slot.value = .approved(ApprovedTrash(plan: plan, approval: try await AppCleanup.executor.approve(plan, by: approver)))
-            } catch {
-                slot.value = .refused(plan: plan, reason: "No approval was issued (\(error)); nothing was moved")
-            }
-            done.signal()
+        do {
+            return .approved(ApprovedTrash(plan: plan, approval: try await AppCleanup.executor.approve(plan, by: approver)))
+        } catch {
+            return .refused(plan: plan, reason: "No approval was issued (\(error)); nothing was moved")
         }
-        done.wait()
-        return slot.value
     }
 
     /// Approves the preview's Trash plan and moves it to the Trash through the cleanup executor (recorded per item
     /// for Put Back).
-    static func moveToTrash(_ confirmed: MCPServer.ConfirmedPreview) -> TrashRun {
-        guard let decision = approveTrash(confirmed) else { return TrashRun() }
-        return AppCleanup.moveToTrashBlocking(decision, source: trashSource(for: confirmed.approvedBy))
+    static func moveToTrash(_ confirmed: MCPServer.ConfirmedPreview) async -> TrashRun {
+        guard let decision = await approveTrash(confirmed) else { return TrashRun() }
+        return await AppCleanup.moveToTrash(decision, source: trashSource(for: confirmed.approvedBy))
     }
-}
-
-/// Carries the approval out of the detached task (written once before the semaphore is signalled).
-private final class ApprovalSlot: @unchecked Sendable {
-    var value: ReviewApproval?
 }

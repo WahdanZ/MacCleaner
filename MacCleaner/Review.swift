@@ -55,6 +55,9 @@ struct ReviewRequest: Identifiable {
     /// Runs the cleanup with the ids of the rows that were shown and not blocked. Builders map these back to the
     /// exact objects they listed (captured when the review opened), so what runs is what was reviewed, even if a
     /// rescan changes the screen's live selection while the sheet is open.
+    ///
+    /// Approved-plan builders pass a no-op `{ _ in }` here: `ReviewConfirmation.confirm` never calls it when
+    /// `performApproved` is set (it is the legacy flow, see there).
     let perform: (Set<String>) -> Void
     /// Approved-Trash flows (M01-04b): the Trash plan built when the sheet opened from the snapshots it shows.
     var cleanupPlan: CleanupPlan? = nil

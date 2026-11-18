@@ -149,4 +149,8 @@ open (up to 120 s) grows memory (RISK-018). (2) EOF while a dialog is open keeps
 stays until the person answers or it times out, and an approval then still moves exactly the reviewed items although
 the client is gone (RISK-019). (3) SIGTERM/SIGKILL in the middle of an approved move is not handled, as before
 (RISK-020).
+**Cancellation (since PR 2):** the executor's `Task.isCancelled` check now sees the caller's task (the `runOnMain`
+root task, or the self-test's `wait` task) instead of a detached one. Neither is ever cancelled today. If a future
+change cancels the root task, an approved plan stops between items and the rest are reported `.cancelled` (nothing
+half-moved); that is the safe direction, but such a change must say so and keep the per-item report.
 

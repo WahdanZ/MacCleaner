@@ -28,6 +28,9 @@ enum Entry {
                 // Bench spins the main run loop itself (Bench.time); it would hang inside runOnMain's loop.
                 exit(MainActor.assumeIsolated { CLI.run(cliArgs) })
             }
+            if CLI.subcommand(cliArgs) == "mcp" {
+                runOnMain { await MCPServer.run(); return 0 }
+            }
             runOnMain { CLI.run(cliArgs) }
         }
         if CommandLine.arguments.contains("--selftest") {
@@ -35,7 +38,7 @@ enum Entry {
             exit(SelfTest.run() ? 0 : 1)
         }
         if CommandLine.arguments.contains("--mcp") {
-            runOnMain { MCPServer.run(); return 0 }
+            runOnMain { await MCPServer.run(); return 0 }
         }
         MacCleanerApp.main()
     }
@@ -51,8 +54,8 @@ enum Entry {
     ///
     /// Bench (`--cli bench`) and the self-test stay outside: both spin `RunLoop.main` themselves and wait for work
     /// from the main thread, which would hang or re-enter if they ran inside a main-queue callout.
-    static func runOnMain(_ body: @escaping @MainActor () -> Int32) -> Never {
-        Task { @MainActor in exit(body()) }
+    static func runOnMain(_ body: @escaping @MainActor () async -> Int32) -> Never {
+        Task { @MainActor in exit(await body()) }
         while true { CFRunLoopRun() }
     }
 }

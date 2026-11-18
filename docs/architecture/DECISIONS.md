@@ -132,3 +132,19 @@ yours after the step) or the skill folder in the instant between the preconditio
 checks the folder's identity, not every nested file. (2) The staging check covers the folder's direct entries, not the
 contents of a moved item such as a bundle. Taking the staging folder's trust check and identity from one stat only
 ties the identity to the folder that passed the check; it closes neither of these.
+
+### D-018 The MCP server reads stdin on its own thread and handles one request at a time (2026-11-18)
+**Decision (M01-04d slice 4, PR 1a/1b):** `--mcp` and `--cli` run inside a live main run loop (`Entry.runOnMain`:
+a main-actor task plus `CFRunLoopRun`, never `dispatchMain`, which leaves the main run loop's default modes
+unserviced). `--cli bench`, the self-test and the window app keep their own paths. A dedicated thread reads stdin
+with the same `readLine` framing into an **unbounded** `AsyncStream`; one main-actor loop handles the lines strictly
+one at a time with a synchronous `handle`, and writes each reply before taking the next line. The approval dialog
+therefore never runs alongside another request, and the preview stays single-use (consumed before the person is
+asked). The process exits 0 only after stdin reached EOF and every buffered line was handled.
+**Accepted consequences (user decisions, 2026-11-18):** (1) the buffer is unbounded so no request is ever dropped and
+replies stay in order; the pipe no longer applies back-pressure, so a client that keeps writing while a dialog is
+open (up to 120 s) grows memory (RISK-018). (2) EOF while a dialog is open keeps the previous behavior: the dialog
+stays until the person answers or it times out, and an approval then still moves exactly the reviewed items although
+the client is gone (RISK-019). (3) SIGTERM/SIGKILL in the middle of an approved move is not handled, as before
+(RISK-020).
+

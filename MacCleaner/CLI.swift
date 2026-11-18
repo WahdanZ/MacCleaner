@@ -109,10 +109,10 @@ enum CLI {
         var args = argv
         let json = args.contains("--json"); args.removeAll { $0 == "--json" }
         let yes = args.contains("--yes") || args.contains("-y"); args.removeAll { $0 == "--yes" || $0 == "-y" }
-        guard let name = args.first, !["help", "-h", "--help"].contains(name) else { printHelp(); return 0 }
+        guard let name = subcommand(argv), !["help", "-h", "--help"].contains(name) else { printHelp(); return 0 }
 
         switch name {
-        case "mcp": MCPServer.run(); return 0
+        case "mcp": err("mcp runs from the app entry point."); return 64   // Entry awaits MCPServer.run
         case "bench": return Bench.run(Array(args.dropFirst()))
         case "install":
             switch CLIInstaller.install() {

@@ -34,8 +34,30 @@ enum MCPServer {
 
     // MARK: - Loop
 
-    @MainActor static func run() {
-        while let line = readLine() {
+    /// Reads stdin on a dedicated thread and handles each line on the main actor, strictly one at a time.
+    ///
+    /// The buffer is unbounded on purpose (user decision): no request is ever dropped and replies stay strictly in
+    /// request order, so never use `bufferingNewest`/`bufferingOldest`. The cost is that the pipe no longer applies
+    /// back-pressure to the client while a slow request (e.g. an approval dialog) is being handled.
+    /// Stdout writes stay synchronous on the main actor (`send`), as before.
+    ///
+    /// Invariant: one request at a time; an approval never yields. The guarantee is structural: this is the only
+    /// consumer of the stream and `handle` is synchronous, so while a request (and its approval dialog) is being
+    /// handled no `next()` is pending and the reader thread can only buffer; the next request starts only after
+    /// `handle` returned and its reply was written. Do not add an `await` between taking a line and writing its
+    /// reply, and never handle lines in separate tasks. (A second layer, not relied on: `handle` runs inside a
+    /// main-queue job, and the dialog's nested modal loop does not drain the main queue.)
+    /// Returns (so the caller exits 0) only after stdin hit EOF and every buffered line was handled. The reader
+    /// thread is the only stdin reader and never calls exit.
+    @MainActor static func run() async {
+        let (stream, continuation) = AsyncStream<String>.makeStream(bufferingPolicy: .unbounded)
+        let reader = Thread {
+            while let l = readLine() { continuation.yield(l) }
+            continuation.finish()
+        }
+        reader.name = "mcp-stdin"
+        reader.start()
+        for await line in stream {
             guard !line.isEmpty, let data = line.data(using: .utf8),
                   let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             handle(msg)

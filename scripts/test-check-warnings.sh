@@ -29,4 +29,5 @@ log "A|$A" "B|$B26";          expect fail "reintroducing the warning later fails
 log "B|$B26" "B2|$B26";       expect fail "an unlisted warning with the same text in another file fails"
 : > "$D/log"; base "$ENTRY_A"; expect fail "no warnings at all while the baseline still lists one fails"
 : > "$D/log"; base;           expect pass "no warnings and an empty baseline passes"
+log "C|new"; base;            expect fail "a new warning with an empty baseline fails"
 (( FAILS == 0 )) && print "check-warnings tests passed" || { print "$FAILS check-warnings test(s) failed" >&2; exit 1; }

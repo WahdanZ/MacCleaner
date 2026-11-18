@@ -25,7 +25,8 @@ if (( LIST )); then cat "$CURRENT"; exit 0; fi
 # A baseline line may list the same warning as worded by different compilers: "<key> || <key>". CI (Xcode 16.x)
 # and local builds (Xcode 26.x) word a few diagnostics differently. The first form is the canonical one.
 awk -F' \\|\\| ' '{print $1}' "$CURRENT.raw" | sort > "$CURRENT.base"
-awk -F' \\|\\| ' 'NR==FNR { for (i=2;i<=NF;i++) alias[$i]=$1; next } { print (($0 in alias) ? alias[$0] : $0) }' "$CURRENT.raw" "$CURRENT" | sort > "$CURRENT.canon"
+# FILENAME, not NR==FNR: with an empty baseline NR==FNR also holds for the log, which would swallow every warning.
+awk -F' \\|\\| ' 'FILENAME == ARGV[1] { for (i=2;i<=NF;i++) alias[$i]=$1; next } { print (($0 in alias) ? alias[$0] : $0) }' "$CURRENT.raw" "$CURRENT" | sort > "$CURRENT.canon"
 NEW="$(comm -13 "$CURRENT.base" "$CURRENT.canon")"
 GONE="$(comm -23 "$CURRENT.base" "$CURRENT.canon")"
 TOTAL=$(wc -l < "$CURRENT" | tr -d ' ')

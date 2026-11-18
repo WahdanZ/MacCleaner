@@ -41,9 +41,12 @@ enum MCPServer {
     /// back-pressure to the client while a slow request (e.g. an approval dialog) is being handled.
     /// Stdout writes stay synchronous on the main actor (`send`), as before.
     ///
-    /// Invariant: one request at a time; an approval never yields. `handle` is synchronous and runs inside one
-    /// main-queue job of this consumer, so the approval dialog's nested modal loop cannot start another request.
-    /// Do not add an `await` between taking a line and writing its reply.
+    /// Invariant: one request at a time; an approval never yields. The guarantee is structural: this is the only
+    /// consumer of the stream and `handle` is synchronous, so while a request (and its approval dialog) is being
+    /// handled no `next()` is pending and the reader thread can only buffer; the next request starts only after
+    /// `handle` returned and its reply was written. Do not add an `await` between taking a line and writing its
+    /// reply, and never handle lines in separate tasks. (A second layer, not relied on: `handle` runs inside a
+    /// main-queue job, and the dialog's nested modal loop does not drain the main queue.)
     /// Returns (so the caller exits 0) only after stdin hit EOF and every buffered line was handled. The reader
     /// thread is the only stdin reader and never calls exit.
     @MainActor static func run() async {

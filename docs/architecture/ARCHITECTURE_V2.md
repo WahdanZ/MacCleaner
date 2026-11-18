@@ -100,11 +100,18 @@ separate **`AutomationPolicy`**, which the user turns on explicitly in Settings 
   (today: `AutoClean.select` / `AutoClean.narrowed` — tool caches, logs except crash reports, caches of apps
   that are not running). Never command targets (simulators, Docker, `tmutil`), never review-required or
   potential-user-data items, never Trash-only items, never anything privileged.
-* **Versioned:** the policy records which categories it covers. A new app version that adds a category does not
-  extend an existing policy; the user must re-enable it after seeing the new scope.
+* **Versioned:** the policy is a frozen scope in code (an allow-list of path patterns). A new app version that adds a
+  category is a **new version**; an enabled policy keeps running the version the user granted and the user must grant the new
+  one after seeing its scope. New *locations* and *categories* always need new consent; a new *member* of an already-permitted
+  path class (a newly installed app's cache folder) does not, and the Enable sheet says so. Details: `M01-13_DESIGN.md`.
+* **Capped:** one run frees at most the version's byte budget (20 GB in v1), enforced by charging each entry before it is removed.
 * **Same executor, same guards:** protection, exclusions and identity revalidation apply exactly as in an
   interactive run; anything changed or protected is skipped.
-* **Recorded:** each run is a history session with `approvedBy: .standingPolicy`, listing every item.
+* **Recorded:** each run is a history session with `approvedBy: .standingPolicy`. It lists every candidate (rule, path, final
+  status) and every item that was **not** removed (skipped, kept, failed, deferred, each with its reason), plus exact counts of
+  successful, skipped, failed and deferred units; successfully removed entries are counted, not listed one by one. More than 500
+  exceptions are truncated with a visible count. A run that dies is `interrupted` with its freed bytes **unknown** (at least the
+  confirmed amount), never recorded as 0.
 * **Revocable:** turning it off cancels future runs; it never runs again until turned back on.
 * The CLI and MCP cannot create or widen a policy.
 

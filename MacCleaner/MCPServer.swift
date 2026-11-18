@@ -34,8 +34,27 @@ enum MCPServer {
 
     // MARK: - Loop
 
-    @MainActor static func run() {
-        while let line = readLine() {
+    /// Reads stdin on a dedicated thread and handles each line on the main actor, strictly one at a time.
+    ///
+    /// The buffer is unbounded on purpose (user decision): no request is ever dropped and replies stay strictly in
+    /// request order, so never use `bufferingNewest`/`bufferingOldest`. The cost is that the pipe no longer applies
+    /// back-pressure to the client while a slow request (e.g. an approval dialog) is being handled.
+    /// Stdout writes stay synchronous on the main actor (`send`), as before.
+    ///
+    /// Invariant: one request at a time; an approval never yields. `handle` is synchronous and runs inside one
+    /// main-queue job of this consumer, so the approval dialog's nested modal loop cannot start another request.
+    /// Do not add an `await` between taking a line and writing its reply.
+    /// Returns (so the caller exits 0) only after stdin hit EOF and every buffered line was handled. The reader
+    /// thread is the only stdin reader and never calls exit.
+    @MainActor static func run() async {
+        let (stream, continuation) = AsyncStream<String>.makeStream(bufferingPolicy: .unbounded)
+        let reader = Thread {
+            while let l = readLine() { continuation.yield(l) }
+            continuation.finish()
+        }
+        reader.name = "mcp-stdin"
+        reader.start()
+        for await line in stream {
             guard !line.isEmpty, let data = line.data(using: .utf8),
                   let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             handle(msg)

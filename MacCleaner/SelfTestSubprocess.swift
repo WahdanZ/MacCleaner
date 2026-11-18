@@ -94,6 +94,17 @@ extension SelfTest {
             return (process.terminationStatus, rest)
         }
 
+        /// Sends SIGTERM (stdin stays open), collects what the child still writes and waits (bounded) for it to exit.
+        func terminate(timeout: TimeInterval = SelfTest.childDeadline) -> (reason: Process.TerminationReason?, status: Int32?, rest: [String]) {
+            Darwin.kill(process.processIdentifier, SIGTERM)
+            let end = Date().addingTimeInterval(timeout)
+            var rest: [String] = []
+            while let line = readLine(timeout: max(0, end.timeIntervalSinceNow)) { rest.append(line) }
+            while process.isRunning && Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            if process.isRunning { kill(); return (nil, nil, rest) }
+            return (process.terminationReason, process.terminationStatus, rest)
+        }
+
         func kill() {
             if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
         }
@@ -193,6 +204,7 @@ extension SelfTest {
         }
         mcpFraming(home: home)
         mcpBurst(home: home)
+        mcpIdleSigterm(home: home)
         cliUnknownScan(home: home, scratch: dir)
         cliBenchRoutes(home: home, scratch: dir)
         cliMcpPing(home: home, scratch: dir)
@@ -202,6 +214,7 @@ extension SelfTest {
             mcpOrdering(home: home, dir: dir, runID: runID)
             mcpApprovalProbe(home: home, dir: dir, runID: runID)
             mcpReplyAfterMove(home: home, dir: dir, runID: runID)
+            mcpStdinThread(home: home, dir: dir, runID: runID)
             cliTrashFiles(home: home, dir: dir, runID: runID)
             cliUnrecordedHumanOutput(home: home, dir: dir, runID: runID)
         }
@@ -276,6 +289,18 @@ extension SelfTest {
         let ids = lines.map { replyID(jsonObject($0)) }
         check("--mcp: 50 pings then immediate EOF are answered 50 times, ids 1…50 in order, and the exit status is 0",
               started && ids == (1...50).map { Optional($0) } && status == 0)
+    }
+
+    /// `--mcp` waiting for input (stdin open) must still die on the default SIGTERM action (no handler is installed).
+    private static func mcpIdleSigterm(home: String) {
+        var ping: [String: Any]?, done: (reason: Process.TerminationReason?, status: Int32?, rest: [String]) = (nil, nil, [])
+        let started = withMcpChild(home: home) { c in
+            c.send(rpc(1, "ping"))
+            ping = c.readReply()
+            done = c.terminate()
+        }
+        check("--mcp idle (waiting for input) still terminates on SIGTERM: killed by the signal (SIGTERM), no extra stdout",
+              started && replyID(ping) == 1 && done.reason == .uncaughtSignal && done.status == SIGTERM && done.rest.isEmpty)
     }
 
     // MARK: 7. CLI unknown scan (both builds)
@@ -509,9 +534,9 @@ extension SelfTest {
             _ = c.finish()
         }
         let lines6 = probeLines(probe6.path)
-        check("PR 1a: the MCP approval runs inside the running main run loop (mode=kCFRunLoopDefaultMode, main=1); ticks stay 0 until stdin moves off main in PR 1b",
+        check("PR 1b: the MCP approval runs in the main run loop (mode=kCFRunLoopDefaultMode, main=1) and the loop was free while waiting for input (ticks>0)",
               ok6 && replyID(ping6) == 1 && lines6.count == 1 && lines6.first?["main"] == "1"
-              && lines6.first?["mode"] == "kCFRunLoopDefaultMode" && lines6.first?["ticks"] == "0" && fm.fileExists(atPath: f6.path))
+              && lines6.first?["mode"] == "kCFRunLoopDefaultMode" && (Int(lines6.first?["ticks"] ?? "") ?? 0) > 0 && fm.fileExists(atPath: f6.path))
         if let l = lines6.first { print("    (run-loop fingerprint today: \(l))") }
     }
 
@@ -549,6 +574,87 @@ extension SelfTest {
               goneWhenReplyRead && trashedWhenReplyRead)
         check("--mcp reply only after the move: the ping's reply is second and EOF exits 0", replyID(second) == 3 && status == 0)
         if let e = TrashLog.shared.present().first(where: { $0.original == AppCleanup.physicalPath(f) }) { _ = TrashOps.restore(e) }
+    }
+
+    // MARK: PR 1b: stdin on its own thread, requests handled one at a time
+
+    static func mcpStdinThread(home: String, dir: URL, runID: String) {
+        let fm = FileManager.default
+        let trashBefore = isolatedTrashCount()
+
+        // b. Re-entrancy: while the first confirm's dialog (600 ms, no) is open, a second confirm is already queued.
+        let fa = sandboxFile(dir, "reent-a", runID), fb = sandboxFile(dir, "reent-b", runID)
+        let probeB = dir.appendingPathComponent("approval-probe-reent-\(runID).txt")
+        var r1: [String: Any]?, r2: [String: Any]?, r3: [String: Any]?, askedAfterFirst = -1, askedAfterSecond = -1, askedAfterReuse = -1
+        let okB = withMcpChild(home: home, extra: ["MACCLEANER_TEST_APPROVAL_PROBE": probeB.path,
+                                                   "MACCLEANER_TEST_APPROVAL_DELAY_MS": "600"]) { c in
+            guard let pa = previewMove(c, id: 1, path: fa.path), let pb = previewMove(c, id: 2, path: fb.path) else { return }
+            c.send(confirmLine(3, path: fa.path, previewID: pa))
+            c.send(confirmLine(4, path: fb.path, previewID: pb))
+            r1 = c.readReply(); askedAfterFirst = probeLines(probeB.path).count
+            r2 = c.readReply(); askedAfterSecond = probeLines(probeB.path).count
+            c.send(confirmLine(5, path: fa.path, previewID: pa))   // the first preview was consumed by its confirm
+            r3 = c.readReply(); askedAfterReuse = probeLines(probeB.path).count
+            _ = c.finish()
+        }
+        check("--mcp re-entrancy: with a 600 ms dialog open and a second confirm queued, the person was asked once while the first was pending (no nested ask)",
+              okB && askedAfterFirst == 1 && replyID(r1) == 3 && toolText(r1)?.text.contains("did not approve") == true)
+        check("--mcp re-entrancy: the second confirm's reply comes strictly after the first's, and it was asked only then",
+              replyID(r2) == 4 && askedAfterSecond == 2 && toolText(r2)?.text.contains("did not approve") == true)
+        check("--mcp re-entrancy: previews stay consistent: re-using the first preview_id is refused without a new question; nothing moved",
+              replyID(r3) == 5 && toolText(r3)?.isError == true && askedAfterReuse == 2
+              && fm.fileExists(atPath: fa.path) && fm.fileExists(atPath: fb.path) && isolatedTrashCount() == trashBefore)
+
+        // e. EOF while a dialog is open: the dialog is answered, its reply is written, then exit 0, nothing else.
+        let fe = sandboxFile(dir, "eof-dialog", runID)
+        let probeE = dir.appendingPathComponent("approval-probe-eofdialog-\(runID).txt")
+        var linesE: [String] = [], statusE: Int32?
+        let okE = withMcpChild(home: home, extra: ["MACCLEANER_TEST_APPROVAL_PROBE": probeE.path,
+                                                   "MACCLEANER_TEST_APPROVAL_DELAY_MS": "600"]) { c in
+            guard let pid = previewMove(c, id: 1, path: fe.path) else { return }
+            c.send(confirmLine(2, path: fe.path, previewID: pid))
+            let done = c.finish()   // stdin closed right away
+            linesE = done.rest; statusE = done.status
+        }
+        let repliesE: [[String: Any]] = linesE.compactMap { jsonObject($0) }
+        check("--mcp EOF during an open dialog: the dialog is still answered, its reply (id 2) is written, nothing else, exit 0",
+              okE && repliesE.count == 1 && linesE.count == 1 && replyID(repliesE.first) == 2
+              && toolText(repliesE.first)?.text.contains("did not approve") == true && probeLines(probeE.path).count == 1 && statusE == 0)
+
+        // f. EOF during an approved move: exit only after the move and its Put Back record.
+        let ff = sandboxFile(dir, "eof-move", runID, "moved on eof")
+        let probeF = dir.appendingPathComponent("approval-probe-eofmove-\(runID).txt")
+        var linesF: [String] = [], statusF: Int32?
+        let okF = withMcpChild(home: home, extra: ["MACCLEANER_TEST_APPROVAL_PROBE": probeF.path,
+                                                   "MACCLEANER_TEST_APPROVAL_DELAY_MS": "400",
+                                                   "MACCLEANER_TEST_APPROVAL_ANSWER": "yes"]) { c in
+            guard let pid = previewMove(c, id: 1, path: ff.path) else { return }
+            c.send(confirmLine(2, path: ff.path, previewID: pid))
+            let done = c.finish()
+            linesF = done.rest; statusF = done.status
+        }
+        let replyF: [String: Any]? = linesF.first.flatMap { jsonObject($0) }
+        let logText = (try? String(contentsOfFile: home + "/Library/Application Support/Mac Cleaner/trash-log.json", encoding: .utf8)) ?? ""
+        check("--mcp EOF during an approved move: the reply is written (file reported moved) and the exit status is 0",
+              okF && linesF.count == 1 && replyID(replyF) == 2 && toolText(replyF)?.isError == false
+              && (toolText(replyF)?.json?["moved_to_trash"] as? [String]) == [Scanner.tilde(ff)] && statusF == 0)
+        check("--mcp EOF during an approved move: the file is in the isolated Trash and its Put Back record is in the log before the exit",
+              !fm.fileExists(atPath: ff.path) && isolatedTrashCount() == trashBefore + 1 && logText.contains(ff.lastPathComponent))
+        if let e = TrashLog.shared.present().first(where: { $0.original == AppCleanup.physicalPath(ff) }) { _ = TrashOps.restore(e) }
+
+        // h. Back-pressure: 30 requests queued behind a 600 ms dialog, stdin kept open until all replies are read.
+        let fh = sandboxFile(dir, "backlog", runID)
+        let probeH = dir.appendingPathComponent("approval-probe-backlog-\(runID).txt")
+        var repliesH: [[String: Any]?] = [], statusH: Int32?
+        let okH = withMcpChild(home: home, extra: ["MACCLEANER_TEST_APPROVAL_PROBE": probeH.path,
+                                                   "MACCLEANER_TEST_APPROVAL_DELAY_MS": "600"]) { c in
+            guard let pid = previewMove(c, id: 1, path: fh.path) else { return }
+            c.send(confirmLine(2, path: fh.path, previewID: pid) + "\n" + (3...32).map { rpc($0, "ping") }.joined(separator: "\n"))
+            repliesH = (2...32).map { _ in c.readReply() }
+            statusH = c.finish().status
+        }
+        check("--mcp backlog: 30 requests queued behind a 600 ms dialog are none dropped, ids 2…32 in order, exit 0",
+              okH && repliesH.map { replyID($0) } == (2...32).map { Optional($0) } && statusH == 0 && fm.fileExists(atPath: fh.path))
     }
 
     // MARK: 8. CLI trash-files: --yes vs. no TTY

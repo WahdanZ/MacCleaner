@@ -42,6 +42,12 @@ jobs:
           test -x "$APP/Contents/MacOS/Mac Cleaner"
           N=$(nm -U "$APP/Contents/MacOS/Mac Cleaner" | grep -c MacCleanerCore || true); [ "$N" -gt 0 ] || { echo "::error::MacCleanerCore is not linked into the app"; exit 1; }; echo "MacCleanerCore linked ($N symbols)"
 
+      # The budget only goes down: any Swift warning not in scripts/warnings-baseline.txt fails the build.
+      - name: Warning budget
+        run: |
+          scripts/test-check-warnings.sh
+          scripts/check-warnings.sh
+
       - name: Safety self-test (throwaway home folder)
         run: scripts/selftest.sh "$APP"
 

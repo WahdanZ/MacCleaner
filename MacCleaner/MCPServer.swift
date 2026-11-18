@@ -41,12 +41,12 @@ enum MCPServer {
     /// back-pressure to the client while a slow request (e.g. an approval dialog) is being handled.
     /// Stdout writes stay synchronous on the main actor (`send`), as before.
     ///
-    /// Invariant: one request at a time; an approval never yields. The guarantee is structural: this is the only
-    /// consumer of the stream and `handle` is synchronous, so while a request (and its approval dialog) is being
-    /// handled no `next()` is pending and the reader thread can only buffer; the next request starts only after
-    /// `handle` returned and its reply was written. Do not add an `await` between taking a line and writing its
-    /// reply, and never handle lines in separate tasks. (A second layer, not relied on: `handle` runs inside a
-    /// main-queue job, and the dialog's nested modal loop does not drain the main queue.)
+    /// Invariant: one request at a time, replies in request order. The guarantee is structural: this is the only
+    /// consumer of the stream and it awaits `handle` before taking the next line, so while a request is being
+    /// handled no `next()` is pending and the reader thread can only buffer. `handle` may await the cleanup
+    /// executor (approval, Trash moves), but the next request starts only after it returned and its reply was
+    /// written. Never handle lines in separate tasks. The person's approval dialog itself stays synchronous on the
+    /// main actor (`HumanApproval.ask`).
     /// Returns (so the caller exits 0) only after stdin hit EOF and every buffered line was handled. The reader
     /// thread is the only stdin reader and never calls exit.
     @MainActor static func run() async {
@@ -60,7 +60,7 @@ enum MCPServer {
         for await line in stream {
             guard !line.isEmpty, let data = line.data(using: .utf8),
                   let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            handle(msg)
+            await handle(msg)
         }
     }
 
@@ -87,7 +87,7 @@ enum MCPServer {
         send(["jsonrpc": "2.0", "id": id, "result": result])
     }
 
-    @MainActor private static func handle(_ msg: [String: Any]) {
+    @MainActor private static func handle(_ msg: [String: Any]) async {
         guard let id = msg["id"] else { return }   // notifications need no answer
         let method = msg["method"] as? String ?? ""
         let params = msg["params"] as? [String: Any] ?? [:]
@@ -107,7 +107,7 @@ enum MCPServer {
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
             do {
-                let result = try call(name, args)
+                let result = try await call(name, args)
                 reply(id, ["content": [["type": "text", "text": json(result)]], "isError": false])
             } catch {
                 reply(id, ["content": [["type": "text", "text": "Error: \(error)"]], "isError": true])
@@ -244,7 +244,7 @@ enum MCPServer {
     /// `approval` is set only by the CLI: `.terminal` when a person typed "yes" at its prompt, `.yesFlag` for the
     /// `--yes` override (no prompt, not a person's confirmation). Calls from the MCP connection pass nil, so every
     /// confirm from an AI client also needs the person's yes in Mac Cleaner's own window.
-    @MainActor static func call(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
+    @MainActor static func call(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) async throws -> Any {
         let confirm = a["confirm"] as? Bool ?? false
         switch name {
         case "disk_status":
@@ -397,7 +397,8 @@ enum MCPServer {
             if AppEngine.isRunning(app), !AppEngine.quit(app) {
                 throw ToolError(description: "\(app.name) did not quit. Ask the user to quit it, then try again.")
             }
-            let r = AppEngine.uninstall(app, picked: picked, trash: ToolConfirmation.approveTrash(confirmed),
+            let trash = await ToolConfirmation.approveTrash(confirmed)
+            let r = AppEngine.uninstall(app, picked: picked, trash: trash,
                                         source: ToolConfirmation.trashSource("Uninstall \(app.name)", for: approval))
             if r.appRemoved { appCache.removeAll { $0.id == app.id } }
             return ["app_removed": r.appRemoved, "moved_to_trash": size(r.bytes), "errors": r.errors,
@@ -487,7 +488,8 @@ enum MCPServer {
                         cleanupPlan: AppCleanup.trashPlan(archives, module: "sdks"))
             }
             let confirmed = try approve(name, digest, a, approval)
-            let r = SDKEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
+            let trash = await ToolConfirmation.approveTrash(confirmed)
+            let r = SDKEngine.remove(list, trash: trash,
                                      trashSource: ToolConfirmation.trashSource("Developer SDKs", for: approval))
             HistoryStore.add(title: "Developer SDKs Removed", bytes: r.bytes - r.trashed, symbol: "shippingbox", outcome: .deleted)
             HistoryStore.add(title: "Xcode Archives Moved to Trash", bytes: r.trashed, symbol: "archivebox", outcome: .trashed)
@@ -533,7 +535,8 @@ enum MCPServer {
                         cleanupPlan: AppCleanup.trashPlan(trashItems, module: "system-data"))
             }
             let confirmed = try approve(name, digest, a, approval)
-            let r = SystemDataEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
+            let trash = await ToolConfirmation.approveTrash(confirmed)
+            let r = SystemDataEngine.remove(list, trash: trash,
                                             trashSource: ToolConfirmation.trashSource("System Data", for: approval))
             HistoryStore.add(title: "Snapshots Deleted", bytes: r.freed, symbol: "clock.arrow.circlepath",
                              outcome: .deleted, measuredFreeChange: r.freed)
@@ -653,7 +656,7 @@ enum MCPServer {
             }
             let confirmed = try approve(name, digest, a, approval)
             let planned = Set(confirmed.cleanupPlan?.candidates.map(\.id) ?? [])
-            let run = ToolConfirmation.moveToTrash(confirmed)
+            let run = await ToolConfirmation.moveToTrash(confirmed)
             var moved: [String] = [], errors: [String] = [], reported = Set<String>()
             for u in urls {
                 guard planned.contains(u.path) else {
@@ -700,7 +703,7 @@ enum MCPServer {
     /// A confirm that `approve` has checked: its single-use preview, the same items, and the person's yes in Mac
     /// Cleaner's window (`approvedBy` nil), at the terminal (`.terminal`) or the `--yes` override (`.yesFlag`).
     /// Only `approve` can make one.
-    struct ConfirmedPreview {
+    struct ConfirmedPreview: Sendable {
         let tool: String
         let approvedBy: ToolApproval?
         /// What the preview captured for an approved-Trash tool (move_to_trash).

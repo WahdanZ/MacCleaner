@@ -105,7 +105,14 @@ enum CLI {
         argv.first { !["--json", "--yes", "-y"].contains($0) }
     }
 
-    @MainActor static func run(_ argv: [String]) -> Int32 {
+    /// `bench`'s arguments as `run` passed them to `Bench.run`: the flags set aside, then the subcommand dropped.
+    @MainActor static func bench(_ argv: [String]) -> Int32 {
+        var args = argv
+        args.removeAll { ["--json", "--yes", "-y"].contains($0) }
+        return Bench.run(Array(args.dropFirst()))
+    }
+
+    @MainActor static func run(_ argv: [String]) async -> Int32 {
         var args = argv
         let json = args.contains("--json"); args.removeAll { $0 == "--json" }
         let yes = args.contains("--yes") || args.contains("-y"); args.removeAll { $0 == "--yes" || $0 == "-y" }
@@ -113,7 +120,7 @@ enum CLI {
 
         switch name {
         case "mcp": err("mcp runs from the app entry point."); return 64   // Entry awaits MCPServer.run
-        case "bench": return Bench.run(Array(args.dropFirst()))
+        case "bench": err("bench runs from the app entry point."); return 64   // Entry calls CLI.bench (it spins the main run loop)
         case "install":
             switch CLIInstaller.install() {
             case .success(let u):
@@ -138,11 +145,11 @@ enum CLI {
                 // "yes"): preview the same arguments, then confirm that preview.
                 if a["preview_id"] == nil {
                     var p = a; p["confirm"] = false
-                    do { a["preview_id"] = (try MCPServer.call(args[1], p) as? [String: Any])?["preview_id"] }
+                    do { a["preview_id"] = (try await MCPServer.call(args[1], p) as? [String: Any])?["preview_id"] }
                     catch { err("\(error)"); return 1 }
                 }
             }
-            return call(args[1], a, json: json)
+            return await call(args[1], a, json: json)
         default: break
         }
 
@@ -156,17 +163,17 @@ enum CLI {
                 if !json { FileHandle.standardError.write(Data(dim("Scanning first…\n").utf8)) }
                 var prepArgs: [String: Any] = [:]
                 if prep == "scan_projects" { prepArgs = projectArgs(parsed); prepArgs["limit"] = 100_000 }
-                let scan = try MCPServer.call(prep, prepArgs)
+                let scan = try await MCPServer.call(prep, prepArgs)
                 if a.removeValue(forKey: "__all_projects") != nil {
                     let ids = ((scan as? [String: Any])?["projects"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
                     guard !ids.isEmpty else { print("No projects match."); return 0 }
                     a["project_ids"] = ids
                 }
             }
-            guard cmd.destructive else { return output(try MCPServer.call(cmd.tool, a), json: json) }
+            guard cmd.destructive else { return output(try await MCPServer.call(cmd.tool, a), json: json) }
 
             // Destructive: preview → explicit yes → confirm.
-            let preview = try MCPServer.call(cmd.tool, a)
+            let preview = try await MCPServer.call(cmd.tool, a)
             _ = output(preview, json: json, hideNext: true)
             guard (preview as? [String: Any])?["preview"] as? Bool == true else { return 0 }
             if yes {
@@ -178,16 +185,16 @@ enum CLI {
             }
             a["confirm"] = true
             a["preview_id"] = (preview as? [String: Any])?["preview_id"]
-            return output(try MCPServer.call(cmd.tool, a, approval: yes ? .yesFlag : .terminal), json: json)
+            return output(try await MCPServer.call(cmd.tool, a, approval: yes ? .yesFlag : .terminal), json: json)
         } catch {
             err("\(error)"); return 1
         }
     }
 
     /// A confirm reaching here came with --yes (`tool` refuses confirm without it): a non-interactive override.
-    @MainActor private static func call(_ tool: String, _ a: [String: Any], json: Bool) -> Int32 {
+    @MainActor private static func call(_ tool: String, _ a: [String: Any], json: Bool) async -> Int32 {
         let approval: ToolApproval? = (a["confirm"] as? Bool) == true ? .yesFlag : nil
-        do { return output(try MCPServer.call(tool, a, approval: approval), json: json) } catch { err("\(error)"); return 1 }
+        do { return output(try await MCPServer.call(tool, a, approval: approval), json: json) } catch { err("\(error)"); return 1 }
     }
 
     static func parse(_ args: [String]) -> Parsed {

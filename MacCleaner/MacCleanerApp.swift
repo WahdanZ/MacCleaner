@@ -26,12 +26,12 @@ enum Entry {
             let cliArgs = Array(args.dropFirst(2))
             if CLI.subcommand(cliArgs) == "bench" {
                 // Bench spins the main run loop itself (Bench.time); it would hang inside runOnMain's loop.
-                exit(MainActor.assumeIsolated { CLI.run(cliArgs) })
+                exit(MainActor.assumeIsolated { CLI.bench(cliArgs) })
             }
             if CLI.subcommand(cliArgs) == "mcp" {
                 runOnMain { await MCPServer.run(); return 0 }
             }
-            runOnMain { CLI.run(cliArgs) }
+            runOnMain { await CLI.run(cliArgs) }
         }
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.installTestApprover()   // never show a real confirmation window during the self-test

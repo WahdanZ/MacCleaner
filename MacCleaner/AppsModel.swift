@@ -589,8 +589,17 @@ enum AppEngine {
         }
     }
 
+    #if MACCLEANER_TEST_HOOKS
+    /// Self-test only (test-hooks build): stand in for "is it running" / "did it quit" without a real process.
+    nonisolated(unsafe) static var testRunningOverride: Bool?
+    nonisolated(unsafe) static var testQuitOverride: Bool?
+    #endif
+
     static func isRunning(_ a: AppInfo) -> Bool {
-        !a.bundleID.isEmpty && !NSRunningApplication.runningApplications(withBundleIdentifier: a.bundleID).isEmpty
+        #if MACCLEANER_TEST_HOOKS
+        if let o = testRunningOverride { return o }
+        #endif
+        return !a.bundleID.isEmpty && !NSRunningApplication.runningApplications(withBundleIdentifier: a.bundleID).isEmpty
     }
 
     private static func alive(_ pids: [pid_t]) -> Bool {
@@ -599,6 +608,9 @@ enum AppEngine {
 
     /// Stops the app's launch agents, asks it to quit, waits 5 s, then force-quits. Blocks up to ~8 s.
     static func quit(_ a: AppInfo) -> Bool {
+        #if MACCLEANER_TEST_HOOKS
+        if let o = testQuitOverride { return o }
+        #endif
         guard !a.isSelf, !a.isApple else { return false }
         let uid = getuid()
         for l in a.leftovers where !l.needsAdmin {

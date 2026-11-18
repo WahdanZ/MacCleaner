@@ -14,7 +14,7 @@ enum SelfTest {
     private static var passed = 0
     private static var failed: [String] = []
 
-    private static func check(_ name: String, _ ok: Bool) {
+    static func check(_ name: String, _ ok: Bool) {
         if ok { passed += 1 } else { failed.append(name) }
         print((ok ? "  ✓ " : "  ✗ ") + name)
     }
@@ -1439,6 +1439,7 @@ extension SelfTest {
         trashLogDurability(dir: dir, runID: runID, file: file, run: run, putBack: putBack)
         sharedFileLocking(dir: dir)
         mcpAndCLITrash(dir: dir, runID: runID)
+        subprocessPins(dir: dir, runID: runID)
         engineTrash(dir: dir, runID: runID)
         shredReview(dir: dir, runID: runID, savedProtected: savedProtected)
         shredScreen(dir: dir, runID: runID, savedProtected: savedProtected)

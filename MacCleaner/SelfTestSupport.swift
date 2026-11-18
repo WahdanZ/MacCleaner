@@ -11,6 +11,16 @@ extension SelfTest {
 
     /// Called before `run()` (see `Entry.main`): MCP confirms in the self-test are answered by `approvals`.
     static func installTestApprover() {
-        HumanApproval.ask = { r in approvals.asked.append(r); return approvals.answer }
+        setApprover { r in approvals.asked.append(r); return approvals.answer }
+    }
+
+    // MCPServer and HumanApproval.ask are main-actor state. The self-test runs synchronously on the main thread
+    // (never inside a main-queue callout), so these assume that isolation instead of hopping.
+    static func setApprover(_ ask: @escaping @MainActor (ApprovalRequest) -> Bool) {
+        MainActor.assumeIsolated { HumanApproval.ask = ask }
+    }
+
+    static func mcpCall(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
+        try MainActor.assumeIsolated { try MCPServer.call(name, a, approval: approval) }
     }
 }

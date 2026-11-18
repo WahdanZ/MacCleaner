@@ -1,17 +1,18 @@
 import AppKit
 import Foundation
 import MacCleanerCore
+import os
 
 /// Model Context Protocol server over stdio. Start with: "Mac Cleaner" --mcp
 /// Every tool that deletes or moves something returns a preview unless called with confirm: true.
 enum MCPServer {
     struct ToolError: Error, CustomStringConvertible { let description: String }
 
-    private static var cacheScan: [CleanTarget] = []
-    private static var appCache: [AppInfo] = []
-    private static var projectScan: [DevProject] = []
-    private static var sdkScan = SDKScan()
-    private static var sysReport = SysReport()
+    @MainActor private static var cacheScan: [CleanTarget] = []
+    @MainActor private static var appCache: [AppInfo] = []
+    @MainActor private static var projectScan: [DevProject] = []
+    @MainActor private static var sdkScan = SDKScan()
+    @MainActor private static var sysReport = SysReport()
 
     static let instructions = """
     Mac Cleaner frees disk space on this Mac. Rules for using it:
@@ -33,12 +34,26 @@ enum MCPServer {
 
     // MARK: - Loop
 
-    static func run() {
+    @MainActor static func run() {
         while let line = readLine() {
             guard !line.isEmpty, let data = line.data(using: .utf8),
                   let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             handle(msg)
         }
+    }
+
+    /// Measures every scan location in parallel, one slot per location (nonisolated: no main-actor state involved).
+    /// The array is pre-sized (all nil) before any iteration starts. Each iteration measures outside the lock, then
+    /// writes only its own index under the lock. `concurrentPerform` is synchronous and returns only after every
+    /// iteration finished, so the final read sees all writes (the lock also gives happens-before). Same result as
+    /// the old unsafe-buffer version: slot i holds `Scanner.measure(plan[i])`.
+    private nonisolated static func measureAll(_ plan: [CleanTarget]) -> [CleanTarget?] {
+        let slots = OSAllocatedUnfairLock<[CleanTarget?]>(initialState: Array(repeating: nil, count: plan.count))
+        DispatchQueue.concurrentPerform(iterations: plan.count) { i in
+            let m = Scanner.measure(plan[i])
+            slots.withLock { $0[i] = m }
+        }
+        return slots.withLock { $0 }
     }
 
     private static func send(_ obj: [String: Any]) {
@@ -50,7 +65,7 @@ enum MCPServer {
         send(["jsonrpc": "2.0", "id": id, "result": result])
     }
 
-    private static func handle(_ msg: [String: Any]) {
+    @MainActor private static func handle(_ msg: [String: Any]) {
         guard let id = msg["id"] else { return }   // notifications need no answer
         let method = msg["method"] as? String ?? ""
         let params = msg["params"] as? [String: Any] ?? [:]
@@ -207,7 +222,7 @@ enum MCPServer {
     /// `approval` is set only by the CLI: `.terminal` when a person typed "yes" at its prompt, `.yesFlag` for the
     /// `--yes` override (no prompt, not a person's confirmation). Calls from the MCP connection pass nil, so every
     /// confirm from an AI client also needs the person's yes in Mac Cleaner's own window.
-    static func call(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
+    @MainActor static func call(_ name: String, _ a: [String: Any], approval: ToolApproval? = nil) throws -> Any {
         let confirm = a["confirm"] as? Bool ?? false
         switch name {
         case "disk_status":
@@ -218,10 +233,7 @@ enum MCPServer {
         case "scan_caches":
             let minBytes = Int64((a["min_size_mb"] as? Double ?? 1) * 1_000_000)
             let plan = Scanner.plan()
-            var measured = [CleanTarget?](repeating: nil, count: plan.count)
-            measured.withUnsafeMutableBufferPointer { buf in
-                DispatchQueue.concurrentPerform(iterations: plan.count) { i in buf[i] = Scanner.measure(plan[i]) }
-            }
+            let measured = Self.measureAll(plan)
             cacheScan = Scanner.finalize(measured.compactMap { $0 })
             let shown = cacheScan.filter { $0.sizeBytes >= minBytes }.sorted { $0.sizeBytes > $1.sizeBytes }
             return [
@@ -648,13 +660,13 @@ enum MCPServer {
     /// A confirm only runs a plan the user was shown: each preview gets a single-use id, valid for
     /// 10 minutes, tied to the tool and to a digest of the exact items. The confirm recomputes the
     /// digest from the same arguments, so a different app, path or selection is refused.
-    private static var previews: [String: (tool: String, digest: String, expires: Date, request: ApprovalRequest,
+    @MainActor private static var previews: [String: (tool: String, digest: String, expires: Date, request: ApprovalRequest,
                                            cleanupPlan: CleanupPlan?)] = [:]
     static let previewLifetime: TimeInterval = 600
 
     static func plan(_ parts: [String]) -> String { parts.sorted().joined(separator: "\n") }
 
-    static func issuePreview(_ tool: String, _ digest: String, now: Date = Date(), request: ApprovalRequest? = nil,
+    @MainActor static func issuePreview(_ tool: String, _ digest: String, now: Date = Date(), request: ApprovalRequest? = nil,
                              cleanupPlan: CleanupPlan? = nil) -> String {
         previews = previews.filter { $0.value.expires > now }
         let id = UUID().uuidString.lowercased()
@@ -683,7 +695,7 @@ enum MCPServer {
     /// "yes", or the --yes override), Mac Cleaner asks the person in its own window, showing the preview's list. The preview is used up
     /// either way, so a refused confirm can't be retried without a new preview.
     @discardableResult
-    static func approve(_ tool: String, _ digest: String, _ a: [String: Any], _ approval: ToolApproval? = nil,
+    @MainActor static func approve(_ tool: String, _ digest: String, _ a: [String: Any], _ approval: ToolApproval? = nil,
                         now: Date = Date()) throws -> ConfirmedPreview {
         guard let id = a["preview_id"] as? String, !id.isEmpty else {
             throw ToolError(description: "confirm: true needs the preview_id from this tool's preview. Call it without confirm, show the user the list, and confirm only after they say yes.")
@@ -766,7 +778,7 @@ enum MCPServer {
 
     /// `lines` replaces the window's list when the JSON result shows only part of it (e.g. a huge Trash):
     /// the person always sees every item.
-    private static func withPreview(_ tool: String, _ digest: String, _ result: [String: Any],
+    @MainActor private static func withPreview(_ tool: String, _ digest: String, _ result: [String: Any],
                                     lines: [String]? = nil, cleanupPlan: CleanupPlan? = nil) -> [String: Any] {
         var r = result
         let request = ApprovalRequest(tool: tool, verb: verb(for: tool), lines: lines ?? approvalLines(result))
@@ -777,7 +789,7 @@ enum MCPServer {
 
     // MARK: - Helpers
 
-    private static func findApp(_ a: [String: Any]) throws -> AppInfo {
+    @MainActor private static func findApp(_ a: [String: Any]) throws -> AppInfo {
         guard let q = a["app"] as? String, !q.isEmpty else { throw ToolError(description: "Pass app (name, bundle id or path).") }
         if appCache.isEmpty { appCache = AppEngine.scanAll() }
         if let hit = AppEngine.find(q, in: appCache) { return hit }
@@ -786,7 +798,7 @@ enum MCPServer {
         throw ToolError(description: "No installed app matches \"\(q)\". Use list_apps to see names.")
     }
 
-    private static func replace(_ app: AppInfo) {
+    @MainActor private static func replace(_ app: AppInfo) {
         if let i = appCache.firstIndex(where: { $0.id == app.id }) { appCache[i] = app }
     }
 

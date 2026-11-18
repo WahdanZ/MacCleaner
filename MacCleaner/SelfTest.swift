@@ -128,8 +128,8 @@ enum SelfTest {
             ProtectedPaths.set(ProtectedPaths.all + ["/Library/LaunchDaemons/com.example.keep.plist"])
             return !AdminGuard.isAllowed(URL(fileURLWithPath: "/Library/LaunchDaemons/com.example.keep.plist"))
         }())
-        let keepPreview = (try? MCPServer.call("move_to_trash", ["paths": [keep.path]])) as? [String: Any]
-        let mcp = (try? MCPServer.call("move_to_trash", ["paths": [keep.path], "confirm": true,
+        let keepPreview = (try? mcpCall("move_to_trash", ["paths": [keep.path]])) as? [String: Any]
+        let mcp = (try? mcpCall("move_to_trash", ["paths": [keep.path], "confirm": true,
                                                          "preview_id": keepPreview?["preview_id"] as? String ?? ""])) as? [String: Any]
         check("MCP move_to_trash refuses protected even with an approved confirm",
               (mcp?["moved_to_trash"] as? [String])?.isEmpty == true && fm.fileExists(atPath: keep.path))
@@ -590,63 +590,65 @@ enum SelfTest {
         fm.createFile(atPath: mB.path, contents: Data("b".utf8))
         let bothThere = { fm.fileExists(atPath: mA.path) && fm.fileExists(atPath: mB.path) }
         check("confirm without a preview_id is refused, nothing moved",
-              (try? MCPServer.call("move_to_trash", ["paths": [mA.path], "confirm": true])) == nil && bothThere())
-        let pv = (try? MCPServer.call("move_to_trash", ["paths": [mA.path]])) as? [String: Any]
+              (try? mcpCall("move_to_trash", ["paths": [mA.path], "confirm": true])) == nil && bothThere())
+        let pv = (try? mcpCall("move_to_trash", ["paths": [mA.path]])) as? [String: Any]
         let pid = pv?["preview_id"] as? String ?? ""
         check("a preview returns a preview_id", !pid.isEmpty)
         check("confirming a different list than the preview is refused",
-              (try? MCPServer.call("move_to_trash", ["paths": [mA.path, mB.path], "confirm": true, "preview_id": pid])) == nil && bothThere())
+              (try? mcpCall("move_to_trash", ["paths": [mA.path, mB.path], "confirm": true, "preview_id": pid])) == nil && bothThere())
         check("a preview_id works once",
-              (try? MCPServer.call("move_to_trash", ["paths": [mA.path], "confirm": true, "preview_id": pid])) == nil && bothThere())
-        let okID = MCPServer.issuePreview("clean_caches", "plan")
-        check("matching tool and plan is approved", (try? MCPServer.approve("clean_caches", "plan", ["preview_id": okID])) != nil)
-        let otherTool = MCPServer.issuePreview("clean_caches", "plan")
+              (try? mcpCall("move_to_trash", ["paths": [mA.path], "confirm": true, "preview_id": pid])) == nil && bothThere())
+        let okID = MainActor.assumeIsolated { MCPServer.issuePreview("clean_caches", "plan") }
+        check("matching tool and plan is approved",
+              MainActor.assumeIsolated { (try? MCPServer.approve("clean_caches", "plan", ["preview_id": okID])) != nil })
+        let otherTool = MainActor.assumeIsolated { MCPServer.issuePreview("clean_caches", "plan") }
         check("a preview_id from another tool is refused",
-              (try? MCPServer.approve("empty_trash", "plan", ["preview_id": otherTool])) == nil)
-        let old = MCPServer.issuePreview("clean_caches", "plan", now: Date().addingTimeInterval(-MCPServer.previewLifetime - 1))
-        check("an expired preview_id is refused", (try? MCPServer.approve("clean_caches", "plan", ["preview_id": old])) == nil)
+              MainActor.assumeIsolated { (try? MCPServer.approve("empty_trash", "plan", ["preview_id": otherTool])) == nil })
+        let old = MainActor.assumeIsolated { MCPServer.issuePreview("clean_caches", "plan", now: Date().addingTimeInterval(-MCPServer.previewLifetime - 1)) }
+        check("an expired preview_id is refused",
+              MainActor.assumeIsolated { (try? MCPServer.approve("clean_caches", "plan", ["preview_id": old])) == nil })
 
         print("MCP: the person approves in Mac Cleaner's own window, for the exact files (SAFE-03)")
         let hA = sandbox.appendingPathComponent("mcp-human.txt")
         fm.createFile(atPath: hA.path, contents: Data("h".utf8))
         approvals.asked = []; approvals.answer = false
-        let hPreview = (try? MCPServer.call("move_to_trash", ["paths": [hA.path]])) as? [String: Any]
+        let hPreview = (try? mcpCall("move_to_trash", ["paths": [hA.path]])) as? [String: Any]
         let hID = hPreview?["preview_id"] as? String ?? ""
-        let declined = (try? MCPServer.call("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
+        let declined = (try? mcpCall("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
         check("an AI confirm the person declines in Mac Cleaner's window changes nothing",
               declined && fm.fileExists(atPath: hA.path) && approvals.asked.count == 1)
         check("the window lists exactly the previewed item, with Mac Cleaner's own wording",
               approvals.asked.first?.verb == "Move to Trash"
               && approvals.asked.first?.lines.contains { $0.contains("mcp-human.txt") } == true)
         check("a declined preview can't be confirmed again",
-              (try? MCPServer.call("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
+              (try? mcpCall("move_to_trash", ["paths": [hA.path], "confirm": true, "preview_id": hID])) == nil
               && fm.fileExists(atPath: hA.path))
         // A path that doesn't exist: the call goes through (and is skipped) without touching the real Trash.
         let ghost = sandbox.appendingPathComponent("mcp-ghost.txt").path
         approvals.asked = []; approvals.answer = true
-        let gID = ((try? MCPServer.call("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        let gID = ((try? mcpCall("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
         check("an AI confirm the person approves goes ahead",
-              (try? MCPServer.call("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": gID])) != nil
+              (try? mcpCall("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": gID])) != nil
               && approvals.asked.count == 1)
         approvals.asked = []; approvals.answer = false
-        let tID = ((try? MCPServer.call("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        let tID = ((try? mcpCall("move_to_trash", ["paths": [ghost]])) as? [String: Any])?["preview_id"] as? String ?? ""
         check("a CLI confirm (the person said yes at the terminal) needs no second window",
-              (try? MCPServer.call("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": tID], approval: .terminal)) != nil
+              (try? mcpCall("move_to_trash", ["paths": [ghost], "confirm": true, "preview_id": tID], approval: .terminal)) != nil
               && approvals.asked.isEmpty)
         // Same path, different file: replaced (new inode) or edited (size/time) between preview and confirm.
         approvals.asked = []; approvals.answer = true
         let hR = sandbox.appendingPathComponent("mcp-replaced.txt")
         fm.createFile(atPath: hR.path, contents: Data("v1".utf8))
-        let rID = ((try? MCPServer.call("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        let rID = ((try? mcpCall("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
         try? fm.removeItem(at: hR)
         fm.createFile(atPath: hR.path, contents: Data("v2".utf8))
         check("a file replaced at the same path after the preview is refused before anyone is asked",
-              (try? MCPServer.call("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": rID])) == nil
+              (try? mcpCall("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": rID])) == nil
               && (try? String(contentsOf: hR, encoding: .utf8)) == "v2" && approvals.asked.isEmpty)
-        let eID = ((try? MCPServer.call("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
+        let eID = ((try? mcpCall("move_to_trash", ["paths": [hR.path]])) as? [String: Any])?["preview_id"] as? String ?? ""
         if let fh = try? FileHandle(forWritingTo: hR) { fh.seekToEndOfFile(); fh.write(Data("more".utf8)); try? fh.close() }
         check("a file edited after the preview is refused",
-              (try? MCPServer.call("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": eID])) == nil
+              (try? mcpCall("move_to_trash", ["paths": [hR.path], "confirm": true, "preview_id": eID])) == nil
               && fm.fileExists(atPath: hR.path) && approvals.asked.isEmpty)
         let idDir = sandbox.appendingPathComponent("mcp-dir")
         try? fm.createDirectory(at: idDir, withIntermediateDirectories: true)
@@ -748,8 +750,8 @@ enum SelfTest {
             let many = (0..<600).map { homeTrash.appendingPathComponent(String(format: "selftest-%03d.txt", $0)) }
             for f in many { fm.createFile(atPath: f.path, contents: Data("t".utf8)) }
             approvals.asked = []; approvals.answer = false
-            let tp = (try? MCPServer.call("empty_trash", [:])) as? [String: Any]
-            _ = try? MCPServer.call("empty_trash", ["confirm": true, "preview_id": tp?["preview_id"] as? String ?? ""])
+            let tp = (try? mcpCall("empty_trash", [:])) as? [String: Any]
+            _ = try? mcpCall("empty_trash", ["confirm": true, "preview_id": tp?["preview_id"] as? String ?? ""])
             let shownLines = approvals.asked.first?.lines ?? []
             check("a large Trash: the JSON lists 500 and says how many more; the window lists every item",
                   (tp?["listed"] as? [String])?.count == 500 && (tp?["listed_more"] as? Int).map { $0 >= 100 } == true
@@ -1598,10 +1600,10 @@ extension SelfTest {
         func log(_ u: URL) -> [TrashedItem] { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) } }
         func putBack(_ u: URL) -> Bool { log(u).first.map { TrashOps.restore($0) == nil } ?? false }
         func previewID(_ paths: [URL]) -> String {
-            ((try? MCPServer.call("move_to_trash", ["paths": paths.map(\.path)])) as? [String: Any])?["preview_id"] as? String ?? ""
+            ((try? mcpCall("move_to_trash", ["paths": paths.map(\.path)])) as? [String: Any])?["preview_id"] as? String ?? ""
         }
         func confirm(_ paths: [URL], _ id: String, _ approval: ToolApproval? = nil) -> [String: Any]? {
-            (try? MCPServer.call("move_to_trash", ["paths": paths.map(\.path), "confirm": true, "preview_id": id],
+            (try? mcpCall("move_to_trash", ["paths": paths.map(\.path), "confirm": true, "preview_id": id],
                                  approval: approval)) as? [String: Any]
         }
         let outstanding = { wait { await AppCleanup.executor.outstandingApprovals } ?? -1 }
@@ -1641,14 +1643,14 @@ extension SelfTest {
 
         // Changed or replaced while the person was looking at the window (after the digest check).
         let s = file("mcp-stale")
-        HumanApproval.ask = { _ in try? Data("written while asking".utf8).write(to: s); return true }
+        setApprover { _ in try? Data("written while asking".utf8).write(to: s); return true }
         let stale = confirm([s], previewID([s]))
         check("a file changed during the confirmation is left alone and reported",
               (stale?["moved_to_trash"] as? [String])?.isEmpty == true
               && (stale?["errors"] as? [String])?.first?.contains("changed after you reviewed") == true
               && (try? String(contentsOf: s, encoding: .utf8)) == "written while asking")
         let p = file("mcp-replaced", "v1")
-        HumanApproval.ask = { _ in try? fm.removeItem(at: p); try? Data("v2".utf8).write(to: p); return true }
+        setApprover { _ in try? fm.removeItem(at: p); try? Data("v2".utf8).write(to: p); return true }
         let replaced = confirm([p], previewID([p]))
         installTestApprover(); approvals.answer = true
         check("a file replaced during the confirmation is left alone and reported",
@@ -2348,15 +2350,15 @@ extension SelfTest {
         approvals.asked = []; approvals.answer = true
         /// The id the tool itself reports for the item (as an AI client would use it).
         func toolID(_ tool: String, _ args: [String: Any], endingWith tail: String) -> String {
-            let items = ((try? MCPServer.call(tool, args)) as? [String: Any])?["items"] as? [[String: Any]] ?? []
+            let items = ((try? mcpCall(tool, args)) as? [String: Any])?["items"] as? [[String: Any]] ?? []
             return items.compactMap { $0["id"] as? String }.first { $0.hasSuffix(tail) } ?? "missing"
         }
         let archTail = "/Archives/2026-01-01/SelfTest-\(runID).xcarchive"
         func sdkConfirm(_ approval: ToolApproval?) -> [String: Any]? {
             let sdkID = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
-            let pv = (try? MCPServer.call("remove_sdks", ["ids": [sdkID]])) as? [String: Any]
+            let pv = (try? mcpCall("remove_sdks", ["ids": [sdkID]])) as? [String: Any]
             let id = pv?["preview_id"] as? String ?? ""
-            return (try? MCPServer.call("remove_sdks", ["ids": [sdkID], "confirm": true, "preview_id": id], approval: approval)) as? [String: Any]
+            return (try? mcpCall("remove_sdks", ["ids": [sdkID], "confirm": true, "preview_id": id], approval: approval)) as? [String: Any]
         }
         let m1 = sdkConfirm(nil)
         check("MCP remove_sdks moves the archive through the executor after the window, logged as the AI assistant",
@@ -2368,7 +2370,7 @@ extension SelfTest {
               (m2?["errors"] as? [String])?.isEmpty == true
               && log(mcpArch).first?.source == "Developer SDKs · Command line (--yes, not confirmed by a person)")
         _ = putBack(mcpArch)
-        HumanApproval.ask = { _ in try? fm.removeItem(at: mcpArch); _ = folder(mcpArch, "replaced while asking"); return true }
+        setApprover { _ in try? fm.removeItem(at: mcpArch); _ = folder(mcpArch, "replaced while asking"); return true }
         let m3 = sdkConfirm(nil)
         installTestApprover(); approvals.answer = true
         check("an archive replaced during the confirmation window is left alone and reported",
@@ -2378,9 +2380,9 @@ extension SelfTest {
         _ = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
         let scanID = toolID("list_sdks", ["group": "Xcode"], endingWith: archTail)
         try? fm.removeItem(at: mcpArch); _ = folder(mcpArch, "replaced after list_sdks")
-        let rpv = (try? MCPServer.call("remove_sdks", ["ids": [scanID]])) as? [String: Any]
+        let rpv = (try? mcpCall("remove_sdks", ["ids": [scanID]])) as? [String: Any]
         let rRow = (rpv?["items"] as? [[String: Any]])?.first
-        let rc = (try? MCPServer.call("remove_sdks", ["ids": [scanID], "confirm": true,
+        let rc = (try? mcpCall("remove_sdks", ["ids": [scanID], "confirm": true,
                                                       "preview_id": rpv?["preview_id"] as? String ?? ""])) as? [String: Any]
         check("an archive replaced between list_sdks and the preview is refused and isn't moved",
               rRow?["allowed"] as? Bool == false && (rRow?["reason"] as? String)?.contains("changed since the scan") == true
@@ -2388,8 +2390,8 @@ extension SelfTest {
 
         let mcpBackup = folder(home.appendingPathComponent("Library/Application Support/MobileSync/Backup/selftest-\(runID)"), "mcp backup")
         let backupID = toolID("system_data", [:], endingWith: "/MobileSync/Backup/selftest-\(runID)")
-        let spv = (try? MCPServer.call("remove_system_data", ["ids": [backupID]])) as? [String: Any]
-        let sm = (try? MCPServer.call("remove_system_data", ["ids": [backupID], "confirm": true,
+        let spv = (try? mcpCall("remove_system_data", ["ids": [backupID]])) as? [String: Any]
+        let sm = (try? mcpCall("remove_system_data", ["ids": [backupID], "confirm": true,
                                                              "preview_id": spv?["preview_id"] as? String ?? ""], approval: .terminal)) as? [String: Any]
         check("MCP remove_system_data moves the backup through the executor, logged with who confirmed",
               (sm?["errors"] as? [String])?.isEmpty == true && !fm.fileExists(atPath: mcpBackup.path)
@@ -3148,8 +3150,8 @@ extension SelfTest {
             .write(to: mcpApp.appendingPathComponent("Contents/Info.plist"), atomically: true)
         approvals.asked = []; approvals.answer = true
         let mcpBundleID = "com.example.selftest.uninstall\(runID)"   // unique: only this fake app can match it
-        let up = (try? MCPServer.call("uninstall_app", ["app": mcpBundleID])) as? [String: Any]
-        let uc = (try? MCPServer.call("uninstall_app", ["app": mcpBundleID, "confirm": true,
+        let up = (try? mcpCall("uninstall_app", ["app": mcpBundleID])) as? [String: Any]
+        let uc = (try? mcpCall("uninstall_app", ["app": mcpBundleID, "confirm": true,
                                                         "preview_id": up?["preview_id"] as? String ?? ""])) as? [String: Any]
         check("MCP uninstall_app removes the previewed app through the executor after the window, logged with who confirmed",
               uc?["app_removed"] as? Bool == true && !fm.fileExists(atPath: mcpApp.path) && approvals.asked.count == 1

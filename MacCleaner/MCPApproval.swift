@@ -23,7 +23,7 @@ struct ApprovalRequest: Sendable {
 /// itself. So before any MCP tool changes anything, Mac Cleaner asks the person in its own window.
 enum HumanApproval {
     /// How Mac Cleaner asks. Replaced only by the self-test.
-    nonisolated(unsafe) static var ask: (ApprovalRequest) -> Bool = askWithDialog
+    @MainActor static var ask: @MainActor (ApprovalRequest) -> Bool = askWithDialog
     /// The dialog cancels itself after this long, so an unattended request never goes ahead.
     /// MACCLEANER_APPROVAL_TIMEOUT can only shorten it (1–120 s), for testing the cancel path.
     static var timeout: TimeInterval {

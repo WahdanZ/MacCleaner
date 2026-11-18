@@ -194,6 +194,8 @@ extension SelfTest {
         mcpFraming(home: home)
         mcpBurst(home: home)
         cliUnknownScan(home: home, scratch: dir)
+        cliBenchRoutes(home: home, scratch: dir)
+        cliMcpPing(home: home, scratch: dir)
         #if MACCLEANER_TEST_HOOKS
         // Every child that could move a file is gated on the isolated Trash AND on the sandbox home.
         if subprocessTrashIsIsolated() && childHomeIsSandbox(home: home, scratch: dir) {
@@ -284,6 +286,23 @@ extension SelfTest {
               r.code == 64 && r.err.hasPrefix("Unknown scan “nosuchscan”. Scans: junk, storage,") && r.out.isEmpty)
     }
 
+    // MARK: 8. CLI bench stays on the sync path (PR 1a)
+
+    /// `--cli bench` spins the main run loop itself, so it must not run inside Entry.runOnMain. A hang fails by the deadline.
+    private static func cliBenchRoutes(home: String, scratch: URL) {
+        let r = runCLI(["bench", "sdks"], home: home, timeout: 60, scratch: scratch)
+        check("--cli bench sdks on the sandbox home exits 0 within 60 s and prints the bench header and its result row (bench stays outside runOnMain)",
+              r.code == 0 && r.out.contains("scan") && r.out.contains("median s") && r.out.contains("sdks") && r.err.isEmpty)
+    }
+
+    /// `--cli mcp` is the same one stdin reader as `--mcp`: a ping, then end of input, gives one reply and exit 0.
+    private static func cliMcpPing(home: String, scratch: URL) {
+        let r = runCLI(["mcp"], home: home, input: .text(rpc(1, "ping") + "\n"), scratch: scratch)
+        let lines = r.out.split(separator: "\n").map(String.init)
+        check("--cli mcp with a ping then end of input: one reply (id 1) and exit 0",
+              r.code == 0 && lines.count == 1 && replyID(jsonObject(lines.first)) == 1)
+    }
+
     // MARK: In-process pins
 
     private static func inProcessPins(dir: URL, runID: String) {
@@ -302,8 +321,8 @@ extension SelfTest {
         approvals.asked = []; approvals.answer = true
         chflags(locked.path, UInt32(UF_IMMUTABLE))
         let paths = [free.path, locked.path]
-        let preview = (try? MCPServer.call("move_to_trash", ["paths": paths])) as? [String: Any]
-        let reply = (try? MCPServer.call("move_to_trash", ["paths": paths, "confirm": true,
+        let preview = (try? mcpCall("move_to_trash", ["paths": paths])) as? [String: Any]
+        let reply = (try? mcpCall("move_to_trash", ["paths": paths, "confirm": true,
                                                            "preview_id": preview?["preview_id"] as? String ?? ""])) as? [String: Any]
         chflags(locked.path, 0)
         let errors = reply?["errors"] as? [String] ?? []
@@ -336,10 +355,10 @@ extension SelfTest {
         approvals.asked = []; approvals.answer = true
         let outstanding = { wait { await AppCleanup.executor.outstandingApprovals } ?? -1 }
         let before = outstanding()
-        let appPreview = (try? MCPServer.call("uninstall_app", ["app": bundleID])) as? [String: Any]
+        let appPreview = (try? mcpCall("uninstall_app", ["app": bundleID])) as? [String: Any]
         var failure = ""
         do {
-            _ = try MCPServer.call("uninstall_app", ["app": bundleID, "confirm": true,
+            _ = try mcpCall("uninstall_app", ["app": bundleID, "confirm": true,
                                                      "preview_id": appPreview?["preview_id"] as? String ?? ""])
         } catch { failure = "\(error)" }
         check("MCP uninstall_app preview of a running app reports running: true",
@@ -427,6 +446,8 @@ extension SelfTest {
         check("--mcp behind a slow confirm: the confirm's reply is the declined error, the pings' results are empty objects",
               toolText(replies3.first)?.isError == true && toolText(replies3.first)?.text.contains("did not approve") == true
               && replies3.dropFirst().allSatisfy { ($0["result"] as? [String: Any])?.isEmpty == true })
+        check("--mcp behind a slow confirm: the simulated dialog's modal-mode timer fired inside the main run loop (modalTimerFired=true)",
+              probeLines(probe3.path).count == 1 && probeLines(probe3.path).first?["modalTimerFired"] == "true")
         check("--mcp behind a slow confirm: the file is untouched and the isolated Trash unchanged",
               fm.fileExists(atPath: f3.path) && isolatedTrashCount() == trashBefore)
 
@@ -444,6 +465,8 @@ extension SelfTest {
         }
         check("--mcp reply-after-dialog ordering: after a 400 ms dialog the confirm's reply (id 2) is the first line and the ping's (id 3) the second",
               ok5 && replyID(first) == 2 && toolText(first)?.text.contains("did not approve") == true && replyID(second) == 3 && status5 == 0)
+        check("--mcp reply-after-dialog ordering: the simulated dialog's modal-mode timer fired (modalTimerFired=true)",
+              probeLines(probe5.path).count == 1 && probeLines(probe5.path).first?["modalTimerFired"] == "true")
         check("--mcp reply-after-dialog ordering: the file is untouched", fm.fileExists(atPath: f5.path) && isolatedTrashCount() == trashBefore)
     }
 
@@ -472,7 +495,7 @@ extension SelfTest {
         check("--mcp approval probe: the file is unmoved and unchanged, and the isolated Trash is unchanged",
               (try? String(contentsOf: f4, encoding: .utf8)) == "keep me" && isolatedTrashCount() == trashBefore)
 
-        // 6. Baseline before PR 1a: the sync read loop never spins the main run loop.
+        // 6. Fingerprint (PR 1a): the approval runs inside the running main run loop (Entry.runOnMain).
         let f6 = sandboxFile(dir, "baseline", runID)
         let probe6 = dir.appendingPathComponent("approval-probe-baseline-\(runID).txt")
         var ping6: [String: Any]?
@@ -486,9 +509,9 @@ extension SelfTest {
             _ = c.finish()
         }
         let lines6 = probeLines(probe6.path)
-        check("baseline (sync loop, before PR 1a): the main run loop isn't running while MCP handles a request (probe: ticks=0, mode=nil)",
-              ok6 && replyID(ping6) == 1 && lines6.count == 1 && lines6.first?["ticks"] == "0" && lines6.first?["mode"] == "nil"
-              && fm.fileExists(atPath: f6.path))
+        check("PR 1a: the MCP approval runs inside the running main run loop (mode=kCFRunLoopDefaultMode, main=1); ticks stay 0 until stdin moves off main in PR 1b",
+              ok6 && replyID(ping6) == 1 && lines6.count == 1 && lines6.first?["main"] == "1"
+              && lines6.first?["mode"] == "kCFRunLoopDefaultMode" && lines6.first?["ticks"] == "0" && fm.fileExists(atPath: f6.path))
         if let l = lines6.first { print("    (run-loop fingerprint today: \(l))") }
     }
 
@@ -518,6 +541,8 @@ extension SelfTest {
         check("--mcp reply only after the move: an approved confirm (400 ms dialog, answer yes) asks once on the main thread (main=1)",
               ok && probeLines(probe.path).count == 1 && probeLines(probe.path).first?["main"] == "1"
               && probeLines(probe.path).first?["isMainThread"] == "true")
+        check("--mcp reply only after the move: the simulated dialog's modal-mode timer fired (modalTimerFired=true)",
+              probeLines(probe.path).first?["modalTimerFired"] == "true")
         check("--mcp reply only after the move: the confirm's reply is the first line and reports the file moved",
               replyID(first) == 2 && toolText(first)?.isError == false && moved == [Scanner.tilde(f)])
         check("--mcp reply only after the move: when that reply is read the file is already gone from its place and in the isolated Trash",

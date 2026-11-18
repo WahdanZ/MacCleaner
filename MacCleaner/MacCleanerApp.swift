@@ -23,17 +23,38 @@ enum Entry {
         #endif
         SettingsMigration.migrate()
         if args.count > 1 && args[1] == "--cli" {
-            exit(CLI.run(Array(args.dropFirst(2))))
+            let cliArgs = Array(args.dropFirst(2))
+            // Same flag stripping as CLI.run, so the subcommand is found the way CLI.run finds it.
+            let name = cliArgs.first { !["--json", "--yes", "-y"].contains($0) }
+            if name == "bench" {
+                // Bench spins the main run loop itself (Bench.time); it would hang inside runOnMain's loop.
+                exit(MainActor.assumeIsolated { CLI.run(cliArgs) })
+            }
+            runOnMain { CLI.run(cliArgs) }
         }
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.installTestApprover()   // never show a real confirmation window during the self-test
             exit(SelfTest.run() ? 0 : 1)
         }
         if CommandLine.arguments.contains("--mcp") {
-            MCPServer.run()
-            exit(0)
+            runOnMain { MCPServer.run(); return 0 }
         }
         MacCleanerApp.main()
+    }
+
+    /// Runs `body` on the main actor inside a running main run loop, then exits with its code. Used by `--mcp` and
+    /// `--cli` only. The body starts from a main-queue task, so everything it does (including the approval dialog's
+    /// run-loop mode and any `@MainActor` hop) sees a live main run loop.
+    ///
+    /// Never `dispatchMain()`: it parks the main thread in the dispatch main-queue drain and does not run the main
+    /// CFRunLoop, so `RunLoop.main`, timers and `NSAlert.runModal` (the approval dialog) would never be serviced.
+    /// `CFRunLoopRun()` returns when no sources remain, hence the loop. Exit codes go through `exit(...)` unchanged.
+    ///
+    /// Bench (`--cli bench`) and the self-test stay outside: both spin `RunLoop.main` themselves and wait for work
+    /// from the main thread, which would hang or re-enter if they ran inside a main-queue callout.
+    static func runOnMain(_ body: @escaping @MainActor () -> Int32) -> Never {
+        Task { @MainActor in exit(body()) }
+        while true { CFRunLoopRun() }
     }
 }
 

@@ -33,13 +33,13 @@ enum TestHooks {
                 ticks += 1
             }
             CFRunLoopAddTimer(CFRunLoopGetMain(), timer, .commonModes)
-            HumanApproval.ask = { _ in
+            MainActor.assumeIsolated { HumanApproval.ask = { _ in
                 if delayMS > 0 { usleep(UInt32(delayMS) * 1000) }   // stands in for an open dialog
                 let mode = CFRunLoopCopyCurrentMode(CFRunLoopGetCurrent()).map { ($0.rawValue as String) } ?? "nil"
                 append("main=\(pthread_main_np()) isMainThread=\(Thread.isMainThread) "
                        + "mainRunLoop=\(CFRunLoopGetCurrent() == CFRunLoopGetMain()) mode=\(mode) ticks=\(ticks)", to: path)
                 return answer
-            }
+            } }
         }
     }
 }

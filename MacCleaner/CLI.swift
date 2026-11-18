@@ -100,7 +100,7 @@ enum CLI {
 
     // MARK: Run
 
-    static func run(_ argv: [String]) -> Int32 {
+    @MainActor static func run(_ argv: [String]) -> Int32 {
         var args = argv
         let json = args.contains("--json"); args.removeAll { $0 == "--json" }
         let yes = args.contains("--yes") || args.contains("-y"); args.removeAll { $0 == "--yes" || $0 == "-y" }
@@ -108,7 +108,7 @@ enum CLI {
 
         switch name {
         case "mcp": MCPServer.run(); return 0
-        case "bench": return MainActor.assumeIsolated { Bench.run(Array(args.dropFirst())) }
+        case "bench": return Bench.run(Array(args.dropFirst()))
         case "install":
             switch CLIInstaller.install() {
             case .success(let u):
@@ -180,7 +180,7 @@ enum CLI {
     }
 
     /// A confirm reaching here came with --yes (`tool` refuses confirm without it): a non-interactive override.
-    private static func call(_ tool: String, _ a: [String: Any], json: Bool) -> Int32 {
+    @MainActor private static func call(_ tool: String, _ a: [String: Any], json: Bool) -> Int32 {
         let approval: ToolApproval? = (a["confirm"] as? Bool) == true ? .yesFlag : nil
         do { return output(try MCPServer.call(tool, a, approval: approval), json: json) } catch { err("\(error)"); return 1 }
     }

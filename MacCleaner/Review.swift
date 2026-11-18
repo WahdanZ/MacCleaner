@@ -57,10 +57,10 @@ struct ReviewRequest: Identifiable {
     /// rescan changes the screen's live selection while the sheet is open.
     let perform: (Set<String>) -> Void
     /// Approved-Trash flows (M01-04b): the Trash plan built when the sheet opened from the snapshots it shows.
-    var trashPlan: CleanupPlan? = nil
-    /// Approved-Trash flows: runs instead of `perform` with the shown, allowed ids and the approval for `trashPlan`
+    var cleanupPlan: CleanupPlan? = nil
+    /// Approved-Trash flows: runs instead of `perform` with the shown, allowed ids and the approval for `cleanupPlan`
     /// (nil when there is nothing to move to the Trash).
-    var performApproved: ((Set<String>, TrashApproval?) -> Void)? = nil
+    var performApproved: ((Set<String>, ReviewApproval?) -> Void)? = nil
 
     var allowed: [ReviewItem] { items.filter { $0.blocked == nil } }
     var total: Int64 { allowed.reduce(0) { $0 + ($1.size ?? 0) } }

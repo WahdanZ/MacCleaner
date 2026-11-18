@@ -1176,8 +1176,8 @@ extension SelfTest {
     /// Opens a review for `urls`, confirms it through the review sheet's own confirmation, and returns what the
     /// sheet handed to the screen.
     @MainActor
-    static func confirmTrashReview(_ urls: [URL]) -> TrashApproval?? {
-        let got = Slot<TrashApproval?>()
+    static func confirmReview(_ urls: [URL]) -> ReviewApproval?? {
+        let got = Slot<ReviewApproval?>()
         let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
                                              urls.map { ($0, 1, nil) }) { _, approval in got.value = .some(approval) }
         ReviewConfirmation.confirm(request)
@@ -1196,11 +1196,11 @@ extension SelfTest {
             try? Data(text.utf8).write(to: u)
             return u
         }
-        func run(_ a: TrashApproval??, _ source: String = "Self-test") -> TrashRun? {
+        func run(_ a: ReviewApproval??, _ source: String = "Self-test") -> TrashRun? {
             guard case .some(.some(let approval)) = a else { return nil }
             return wait { await AppCleanup.moveToTrash(approval, source: source) }
         }
-        func approved(_ a: TrashApproval??) -> ApprovedTrash? {
+        func approved(_ a: ReviewApproval??) -> ApprovedTrash? {
             if case .some(.some(.approved(let x))) = a { return x }
             return nil
         }
@@ -1221,7 +1221,7 @@ extension SelfTest {
 
         // Confirmed, moved, logged, and put back.
         let ok = file("ok", "roundtrip")
-        let okReview = MainActor.assumeIsolated { confirmTrashReview([ok]) }
+        let okReview = MainActor.assumeIsolated { confirmReview([ok]) }
         let okRun = run(okReview)
         check("a confirmed review moves exactly the reviewed item to the Trash",
               okRun?.moved[ok.path] != nil && okRun?.problems.isEmpty == true && !fm.fileExists(atPath: ok.path))
@@ -1237,8 +1237,8 @@ extension SelfTest {
 
         // Stale identity: the file was written to after the sheet opened.
         let stale = file("stale")
-        let staleReview = MainActor.assumeIsolated { () -> TrashApproval?? in
-            let got = Slot<TrashApproval?>()
+        let staleReview = MainActor.assumeIsolated { () -> ReviewApproval?? in
+            let got = Slot<ReviewApproval?>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(stale, 1, nil)]) {
                 got.value = .some($1)
             }
@@ -1255,8 +1255,8 @@ extension SelfTest {
 
         // Replaced: same name, different file.
         let replaced = file("replaced")
-        let replacedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
-            let got = Slot<TrashApproval?>()
+        let replacedReview = MainActor.assumeIsolated { () -> ReviewApproval?? in
+            let got = Slot<ReviewApproval?>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(replaced, 1, nil)]) {
                 got.value = .some($1)
             }
@@ -1274,8 +1274,8 @@ extension SelfTest {
 
         // Protected after review.
         let guarded = file("guarded")
-        let guardedReview = MainActor.assumeIsolated { () -> TrashApproval?? in
-            let got = Slot<TrashApproval?>()
+        let guardedReview = MainActor.assumeIsolated { () -> ReviewApproval?? in
+            let got = Slot<ReviewApproval?>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(guarded, 1, nil)]) {
                 got.value = .some($1)
             }
@@ -1293,7 +1293,7 @@ extension SelfTest {
         // Partial failure: one of two can't be moved.
         let free = file("free"), locked = file("locked")
         chflags(locked.path, UInt32(UF_IMMUTABLE))
-        let partial = run(MainActor.assumeIsolated { confirmTrashReview([free, locked]) })
+        let partial = run(MainActor.assumeIsolated { confirmReview([free, locked]) })
         chflags(locked.path, 0)
         check("a partial failure moves what it can and reports the rest",
               partial?.moved[free.path] != nil && partial?.moved[locked.path] == nil
@@ -1302,7 +1302,7 @@ extension SelfTest {
 
         // The approved list is what the sheet showed: nothing added later, nothing missing at open.
         let shown = file("shown")
-        let shownReview = MainActor.assumeIsolated { confirmTrashReview([shown]) }
+        let shownReview = MainActor.assumeIsolated { confirmReview([shown]) }
         let later = file("added-later")
         check("the approval covers exactly the items the sheet showed",
               approved(shownReview)?.plan.candidates.map(\.id) == [shown.path])
@@ -1310,7 +1310,7 @@ extension SelfTest {
             ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(shown, 1, "keeps a copy")]) { _, _ in }
         }
         check("the plan keeps each reviewed item's note as its explanation",
-              noted.trashPlan?.candidates.first?.explanation == "keeps a copy")
+              noted.cleanupPlan?.candidates.first?.explanation == "keeps a copy")
         let shownRun = run(shownReview)
         check("an item added after the review isn't moved", shownRun?.moved.keys.sorted() == [shown.path]
               && fm.fileExists(atPath: later.path))
@@ -1326,8 +1326,8 @@ extension SelfTest {
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])
-        let mixed = MainActor.assumeIsolated { () -> ([URL], TrashApproval?)? in
-            let got = Slot<([URL], TrashApproval?)>()
+        let mixed = MainActor.assumeIsolated { () -> ([URL], ReviewApproval?)? in
+            let got = Slot<([URL], ReviewApproval?)>()
             let request = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest",
                                                  [(allowedOne, 1, nil), (blockedOne, 1, nil)]) { got.value = ($0, $1) }
             ReviewConfirmation.confirm(request)
@@ -1344,19 +1344,19 @@ extension SelfTest {
             ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(gone, 1, nil)]) { _, _ in }
         }
         check("an item missing when the sheet opens is blocked and not in the plan",
-              goneRequest.items.first?.blocked != nil && goneRequest.trashPlan == nil)
+              goneRequest.items.first?.blocked != nil && goneRequest.cleanupPlan == nil)
     }
 
     // MARK: Trash log per move (crash safety)
 
     static func trashLogDurability(dir: URL, runID: String, file: (String, String) -> URL,
-                                   run: (TrashApproval??, String) -> TrashRun?, putBack: (URL) -> Bool) {
+                                   run: (ReviewApproval??, String) -> TrashRun?, putBack: (URL) -> Bool) {
         let fm = FileManager.default
         func entries(_ u: URL) -> Int { TrashLog.shared.present().filter { $0.original == AppCleanup.physicalPath(u) }.count }
 
         // Several moves, each recorded once.
         let m1 = file("multi-1", "one"), m2 = file("multi-2", "two")
-        let both = run(MainActor.assumeIsolated { confirmTrashReview([m1, m2]) }, "Self-test")
+        let both = run(MainActor.assumeIsolated { confirmReview([m1, m2]) }, "Self-test")
         check("several moves are each recorded once in the Trash log",
               both?.moved.count == 2 && entries(m1) == 1 && entries(m2) == 1)
         check("each of them can be put back", putBack(m1) && putBack(m2)
@@ -1365,7 +1365,7 @@ extension SelfTest {
         // Interrupted after the first move: the first is recorded, the second untouched.
         let i1 = file("interrupt-1", "first"), i2 = file("interrupt-2", "second")
         AppCleanup.afterRecording = { _ in withUnsafeCurrentTask { $0?.cancel() } }
-        let interrupted = run(MainActor.assumeIsolated { confirmTrashReview([i1, i2]) }, "Self-test")
+        let interrupted = run(MainActor.assumeIsolated { confirmReview([i1, i2]) }, "Self-test")
         AppCleanup.afterRecording = nil
         check("an interruption after the first move keeps its record and leaves the second alone",
               interrupted?.moved.keys.sorted() == [i1.path] && entries(i1) == 1 && fm.fileExists(atPath: i2.path)
@@ -1405,7 +1405,7 @@ extension SelfTest {
         let f1 = file("unrecorded-1", "reviewed"), f2 = file("unrecorded-2", "reviewed")
         let saved = AppCleanup.recordMove
         AppCleanup.recordMove = { _, _, _, _, _ in false }
-        let failed = run(MainActor.assumeIsolated { confirmTrashReview([f1, f2]) }, "Self-test")
+        let failed = run(MainActor.assumeIsolated { confirmReview([f1, f2]) }, "Self-test")
         AppCleanup.recordMove = saved
         let f1Message = failed?.problems.first { $0.id == f1.path }?.message ?? ""
         check("a move whose record can't be written is reported as not restorable from Mac Cleaner",
@@ -1818,10 +1818,10 @@ extension SelfTest {
             let base1 = base.appendingPathComponent("tree")
             guard let r1 = review(m1, [base1]) else { check("review: the sheet was presented", false); return }
             check("review: the sheet lists the item ready with its measured size and a shred plan",
-                  r1.items.first?.blocked == nil && (r1.items.first?.size ?? 0) > 0 && r1.trashPlan != nil
+                  r1.items.first?.blocked == nil && (r1.items.first?.size ?? 0) > 0 && r1.cleanupPlan != nil
                   && m1.items.first?.isPreview == false && !m1.preparing)
             check("review: the plan's disposition is overwrite-then-delete for module shredder",
-                  r1.trashPlan?.entries.allSatisfy { $0.disposition == .overwriteThenDelete && $0.candidate.module == "shredder" } == true)
+                  r1.cleanupPlan?.entries.allSatisfy { $0.disposition == .overwriteThenDelete && $0.candidate.module == "shredder" } == true)
             confirm(m1, r1)
             check("an approved shred removes the folder and its sub-folders and the row", !fm.fileExists(atPath: base1.path) && m1.items.isEmpty)
             let recs = shredRecords()
@@ -1845,7 +1845,7 @@ extension SelfTest {
             let r2 = review(m2, [hard1, locked, lnk, outside])
             check("review: a hard link, a locked file, a link as the item and an item outside home are all blocked rows",
                   r2?.items.count == 4 && r2?.items.allSatisfy { $0.blocked != nil } == true && m2.ready.isEmpty)
-            check("review: with no ready row there is no plan, so confirm has nothing to approve", r2?.trashPlan == nil && r2?.allowed.isEmpty == true)
+            check("review: with no ready row there is no plan, so confirm has nothing to approve", r2?.cleanupPlan == nil && r2?.allowed.isEmpty == true)
             if let r2 { confirm(m2, r2) }
             check("a nil approval shreds nothing and says so",
                   m2.message?.text.hasPrefix("Nothing was shredded") == true && m2.message?.isError == true
@@ -1855,7 +1855,7 @@ extension SelfTest {
             // 3. A refused approval
             let m3 = ShredderModel()
             let t3 = make("t3/a.txt")
-            if let r3 = review(m3, [base.appendingPathComponent("t3")]), let plan = r3.trashPlan {
+            if let r3 = review(m3, [base.appendingPathComponent("t3")]), let plan = r3.cleanupPlan {
                 m3.message = nil
                 Task { @MainActor in await m3.shred(rows: [], approval: .refused(plan: plan, reason: "No approval was issued")) }
                 spin { m3.message != nil }
@@ -1918,7 +1918,7 @@ extension SelfTest {
             // 8. Root replaced after shredding: the replacement stays, blocked, untouched
             let x8 = make("t8/x.txt", "reviewed")
             let rows8 = ShredReview.snapshots([(id: x8.path, url: x8)])
-            if let plan8 = ReviewBuild.shred(rows: rows8, perform: { _, _ in }).trashPlan, let target8 = plan8.candidates.first?.targets.first {
+            if let plan8 = ReviewBuild.shred(rows: rows8, perform: { _, _ in }).cleanupPlan, let target8 = plan8.candidates.first?.targets.first {
                 let m8 = ShredderModel()
                 m8.add([x8])
                 try? fm.removeItem(at: x8)
@@ -1934,7 +1934,7 @@ extension SelfTest {
             // 8b. Missing at execution, then a different item appeared at the path: the row stays, blocked, untouched
             let x8b = make("t8b/x.txt", "reviewed")
             let rows8b = ShredReview.snapshots([(id: x8b.path, url: x8b)])
-            if let plan8b = ReviewBuild.shred(rows: rows8b, perform: { _, _ in }).trashPlan, let target8b = plan8b.candidates.first?.targets.first {
+            if let plan8b = ReviewBuild.shred(rows: rows8b, perform: { _, _ in }).cleanupPlan, let target8b = plan8b.candidates.first?.targets.first {
                 let m8b = ShredderModel()
                 m8b.add([x8b])
                 try? fm.removeItem(at: x8b)
@@ -1961,7 +1961,7 @@ extension SelfTest {
             // 9. Gone, but its work folder is left behind
             let d9 = make("t9/item/a.txt")
             let rows9 = ShredReview.snapshots([(id: d9.deletingLastPathComponent().path, url: d9.deletingLastPathComponent())])
-            if let plan9 = ReviewBuild.shred(rows: rows9, perform: { _, _ in }).trashPlan, let target9 = plan9.candidates.first?.targets.first {
+            if let plan9 = ReviewBuild.shred(rows: rows9, perform: { _, _ in }).cleanupPlan, let target9 = plan9.candidates.first?.targets.first {
                 let m9 = ShredderModel()
                 m9.add([d9.deletingLastPathComponent()])
                 try? fm.removeItem(at: d9.deletingLastPathComponent())
@@ -2009,7 +2009,7 @@ extension SelfTest {
             // failing disk write, which only the package tests can make; the model's mapping is fed the outcome shape).
             let d11 = make("t11/item/a.txt", "AAAAAAAA"); make("t11/item/b.txt", "B")
             let rows11 = ShredReview.snapshots([(id: "t11", url: d11.deletingLastPathComponent())])
-            if let plan11 = ReviewBuild.shred(rows: rows11, perform: { _, _ in }).trashPlan, let target11 = plan11.candidates.first?.targets.first {
+            if let plan11 = ReviewBuild.shred(rows: rows11, perform: { _, _ in }).cleanupPlan, let target11 = plan11.candidates.first?.targets.first {
                 let m11 = ShredderModel()
                 m11.add([d11.deletingLastPathComponent()])
                 let out = ItemOutcome(candidateID: "t11", target: target11,
@@ -2037,7 +2037,7 @@ extension SelfTest {
             let ok14b = make("t14/ok2/b.txt")
             if let r14 = review(m14, [ok14, hl14, ok14b.deletingLastPathComponent()]) {
                 check("mixed review: the allowed row ids are exactly the plan's candidate ids",
-                      Set(r14.allowed.map(\.id)) == Set(r14.trashPlan?.candidates.map(\.id) ?? ["no plan"])
+                      Set(r14.allowed.map(\.id)) == Set(r14.cleanupPlan?.candidates.map(\.id) ?? ["no plan"])
                       && r14.allowed.count == 2 && r14.items.count == 3 && r14.items.contains { $0.blocked != nil })
             } else { check("mixed review: review was built", false) }
 
@@ -2045,9 +2045,9 @@ extension SelfTest {
             let m15 = ShredderModel()
             let keep15 = make("t15/keep.txt", "keep")
             let rows15 = ShredReview.snapshots([(id: "k15", url: keep15)])
-            let got15 = Slot<TrashApproval?>()
+            let got15 = Slot<ReviewApproval?>()
             let shredReq = ReviewBuild.shred(rows: rows15) { _, approval in got15.value = .some(approval) }
-            check("a shred plan is refused by the Trash approval guard", shredReq.trashPlan.flatMap { AppCleanup.nonTrashRefusal($0) } != nil)
+            check("a shred plan is refused by the Trash approval guard", shredReq.cleanupPlan.flatMap { AppCleanup.nonTrashRefusal($0) } != nil)
             ReviewConfirmation.confirm(shredReq)
             spin { got15.value != nil }
             if case .some(.some(let shredApproval)) = got15.value {
@@ -2055,9 +2055,9 @@ extension SelfTest {
                 check("a shred-disposition plan is refused by moveToTrash and nothing is touched",
                       ran?.moved.isEmpty == true && ran?.problems.isEmpty == false && text(keep15) == "keep")
             } else { check("a shred approval was issued for the guard test", false) }
-            if case .some(.some(let trashApproval)) = confirmTrashReview([make("t15/trash-me.txt", "trash")]) {
+            if case .some(.some(let approval)) = confirmReview([make("t15/trash-me.txt", "trash")]) {
                 m15.message = nil
-                Task { @MainActor in await m15.shred(rows: [], approval: trashApproval) }
+                Task { @MainActor in await m15.shred(rows: [], approval: approval) }
                 spin { m15.message != nil }
                 check("a Trash plan is refused by ShredderModel.shred and nothing is touched",
                       m15.message?.text.contains("isn't a shred plan") == true && text(base.appendingPathComponent("t15/trash-me.txt")) == "trash")
@@ -2099,9 +2099,9 @@ extension SelfTest {
         }
         /// Opens the review the screen opens, confirms it through the review sheet's confirmation, returns what the
         /// screen gets.
-        @MainActor func confirmed<I>(_ build: (@escaping ([I], TrashApproval?) -> Void) -> ReviewRequest,
-                                     beforeConfirm: () -> Void = {}) -> ([I], TrashApproval?)? {
-            let got = Slot<([I], TrashApproval?)>()
+        @MainActor func confirmed<I>(_ build: (@escaping ([I], ReviewApproval?) -> Void) -> ReviewRequest,
+                                     beforeConfirm: () -> Void = {}) -> ([I], ReviewApproval?)? {
+            let got = Slot<([I], ReviewApproval?)>()
             let request = build { got.value = ($0, $1) }
             beforeConfirm()
             ReviewConfirmation.confirm(request)
@@ -2187,12 +2187,12 @@ extension SelfTest {
         // Replaced between the scan and opening the sheet: the row describes the scanned item, so it is refused.
         let scannedY = archive("Y", y)
         try? fm.removeItem(at: y); _ = folder(y, "replaced before the sheet opened")
-        let rescan = MainActor.assumeIsolated { () -> (ReviewRequest, ([SDKItem], TrashApproval?)?) in
+        let rescan = MainActor.assumeIsolated { () -> (ReviewRequest, ([SDKItem], ReviewApproval?)?) in
             let request = ReviewBuild.sdks([scannedY]) { _, _ in }
             return (request, confirmed { ReviewBuild.sdks([scannedY], perform: $0) })
         }
         check("an archive replaced between the scan and the review is blocked and needs a rescan",
-              rescan.0.items.first?.blocked?.contains("changed since the scan") == true && rescan.0.trashPlan == nil)
+              rescan.0.items.first?.blocked?.contains("changed since the scan") == true && rescan.0.cleanupPlan == nil)
         let afterRescanRefusal = SDKEngine.remove(rescan.1?.0 ?? [], trash: rescan.1?.1)
         check("…and nothing moves", afterRescanRefusal.trashed == 0 && fm.fileExists(atPath: y.path))
         let unscanned = MainActor.assumeIsolated { ReviewBuild.sdks([archive("Y", y, identity: .some(nil))]) { _, _ in } }
@@ -2595,8 +2595,8 @@ extension SelfTest {
             AppInfo(id: u.path, url: u, name: name, bundleID: "com.example.selftest.\(name)", version: "1", isApple: false,
                     appSize: 10, lastUsed: nil, leftovers: leftovers, caches: [], identity: AppCleanup.snapshot(u))
         }
-        @MainActor func confirmed(_ a: AppInfo, beforeConfirm: () -> Void = {}) -> ([AppLeftover], TrashApproval?)? {
-            let got = Slot<([AppLeftover], TrashApproval?)>()
+        @MainActor func confirmed(_ a: AppInfo, beforeConfirm: () -> Void = {}) -> ([AppLeftover], ReviewApproval?)? {
+            let got = Slot<([AppLeftover], ReviewApproval?)>()
             let request = ReviewBuild.uninstall(a, running: false) { got.value = ($0, $1) }
             beforeConfirm()
             ReviewConfirmation.confirm(request)
@@ -3260,7 +3260,7 @@ extension SelfTest {
         let urls = [URL(fileURLWithPath: args[1]), URL(fileURLWithPath: args[2])]
         // Kill this process the moment the first move has been recorded: no cleanup, no flushing.
         AppCleanup.afterRecording = { _ in kill(getpid(), SIGKILL) }
-        let approval = MainActor.assumeIsolated { confirmTrashReview(urls) }
+        let approval = MainActor.assumeIsolated { confirmReview(urls) }
         guard case .some(.some(let a)) = approval else { return 3 }
         _ = wait { await AppCleanup.moveToTrash(a, source: "Self-test") }
         return 4   // not reached when the first move succeeds

@@ -106,7 +106,7 @@ final class OverviewModel {
 
     /// Moves exactly the reviewed old downloads to the Trash (approved path: each one is re-checked against what
     /// the review sheet showed, and left alone if it changed).
-    func trashDownloads(_ files: [BigFile], _ approval: TrashApproval) async -> Int64 {
+    func trashDownloads(_ files: [BigFile], _ approval: ReviewApproval) async -> Int64 {
         let run = await AppCleanup.moveToTrash(approval, source: "Old Downloads")
         var bytes: Int64 = 0
         var moved: Set<String> = []

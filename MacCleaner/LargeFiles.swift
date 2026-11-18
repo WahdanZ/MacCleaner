@@ -171,7 +171,7 @@ final class LargeFilesModel {
 
     /// Moves exactly the reviewed files to the Trash (approved path: each one is re-checked against what the review
     /// sheet showed, and left alone if it changed).
-    func trashMarked(_ items: [BigFile], _ approval: TrashApproval?) async {
+    func trashMarked(_ items: [BigFile], _ approval: ReviewApproval?) async {
         guard let approval, !items.isEmpty else { return }
         phase = .trashing
         let run = await AppCleanup.moveToTrash(approval, source: "Large & Old Files")

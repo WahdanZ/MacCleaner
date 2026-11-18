@@ -37,7 +37,7 @@ extension AppEngine {
         _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"], timeout: 15)
     }
 
-    static func uninstall(_ a: AppInfo, picked: [AppLeftover], trash approval: TrashApproval?, source: String? = nil,
+    static func uninstall(_ a: AppInfo, picked: [AppLeftover], trash approval: ReviewApproval?, source: String? = nil,
                           adminStep: AdminStepRunner = defaultAdminStep,
                           adminAllowed: @escaping @Sendable (URL) -> Bool = { AdminGuard.isAllowed($0) },
                           stopUserJob: @Sendable (String) -> Void = defaultStopUserJob) -> UninstallResult {

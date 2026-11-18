@@ -94,14 +94,14 @@ final class ShredderModel {
     }
 
     /// Shreds exactly the plan that was approved (the rows the sheet showed), through the cleanup executor.
-    func shred(rows: [ShredReviewRow], approval: TrashApproval?) async {
+    func shred(rows: [ShredReviewRow], approval: ReviewApproval?) async {
         guard !working else { message = ("Already shredding", true); return }
         working = true
         await perform(rows: rows, approval: approval)
     }
 
     /// The run itself. `working` is already set by the caller and is cleared here.
-    private func perform(rows: [ShredReviewRow], approval: TrashApproval?) async {
+    private func perform(rows: [ShredReviewRow], approval: ReviewApproval?) async {
         defer { working = false }
         let approved: ApprovedTrash
         switch approval {

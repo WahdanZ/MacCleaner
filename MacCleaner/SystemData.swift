@@ -160,7 +160,7 @@ enum SystemDataEngine {
     /// `bytes` = total; `freed` = the free-space change after deleting snapshots (they have no size up front).
     /// Trash items move only through `trash`, the approval given at the review sheet or the MCP/CLI confirm for
     /// exactly the items it showed (never made here); without it they stay and say so.
-    static func remove(_ items: [SysItem], trash: TrashApproval? = nil, trashSource: String = "System Data")
+    static func remove(_ items: [SysItem], trash: ReviewApproval? = nil, trashSource: String = "System Data")
         -> (bytes: Int64, freed: Int64, errors: [String], cancelled: Bool) {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, freed: Int64 = 0, errors: [String] = [], cancelled = false
@@ -214,7 +214,7 @@ final class SystemDataModel {
     }
 
     /// Removes exactly the reviewed items.
-    func remove(_ list: [SysItem], _ trash: TrashApproval?) async {
+    func remove(_ list: [SysItem], _ trash: ReviewApproval?) async {
         guard !list.isEmpty else { return }
         busy = true
         let r = await Task.detached { SystemDataEngine.remove(list, trash: trash) }.value

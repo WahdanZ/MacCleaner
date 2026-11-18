@@ -15,7 +15,7 @@ enum AlertConfirmation {
     /// alert appeared. `then` gets the approval, or why there is none (nothing is approved for a stale item).
     @MainActor
     static func confirm(id: String, name: String, shown: (identity: FileIdentity?, refusal: String?), module: String,
-                        then run: @escaping @MainActor (TrashApproval?, String?) -> Void) {
+                        then run: @escaping @MainActor (ReviewApproval?, String?) -> Void) {
         guard let identity = shown.identity,
               let plan = AppCleanup.trashPlan([(id, name, identity, 0, "Confirmed in the Remove alert")], module: module) else {
             run(nil, shown.refusal ?? "It couldn't be identified. Scan again")

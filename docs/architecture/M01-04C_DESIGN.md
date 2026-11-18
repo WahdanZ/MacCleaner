@@ -173,7 +173,7 @@ The digest binds the **reviewed values**. It is computed from the plan, not from
 
 ### 5. Approval only through `ReviewConfirmation`
 
-- `ReviewBuild.shred` sets `trashPlan` to the `.tree` plan and `performApproved`. Its `perform` is `{ _ in }`.
+- `ReviewBuild.shred` sets `cleanupPlan` (named `trashPlan` until M01-04d) to the `.tree` plan and `performApproved`. Its `perform` is `{ _ in }`.
 - `ReviewConfirmation.confirm` approves it as `.userInApp`. No new approval site is added.
 - `ShredderModel.shred(reviewed, approval)` runs exactly that plan through `AppCleanup.executor`. With no approval, or a refused one, nothing is shredded and each item says why.
 - `ShredEngine.shred(…)` (both overloads) and the in-app overwrite code are **deleted**.
@@ -183,7 +183,7 @@ The digest binds the **reviewed values**. It is computed from the plan, not from
   - `.overwriteThenDelete` plans built only in `ReviewBuild.shred`.
   - `ShredEngine.shred(` may not appear anywhere.
 
-**Naming trade-off.** The review plumbing keeps its Trash-specific names (`trashPlan`, `TrashApproval`) in this PR. The rename goes to 04d.
+**Naming trade-off.** The review plumbing kept its Trash-specific names (`trashPlan`, `TrashApproval`) in this PR. M01-04d slice 2 renamed them: the `trashPlan` field on `ReviewRequest` / `ConfirmedPreview` is now `cleanupPlan`, and `TrashApproval` is now `ReviewApproval`. The `AppCleanup.trashPlan(...)` builders keep their name because they only build Trash plans.
 
 ### 6. Tests
 
@@ -310,7 +310,7 @@ Limits: the damaged-file message (#8) and the work-folder message use outcomes o
 6. **The executor is busy during a long shred.** One executor per process means a Trash move waits until the shred finishes. Acceptable for a desktop action the person starts; to revisit in 04d if needed.
 7. **Plan size grows with the tree** (one identity per entry, digested once). No new cap; there is none today.
 8. **`linkCount`/`flags` are in the digest for `.tree` only.** Other encodings are unchanged, and extending them is a 04d item.
-9. **Naming debt** (`trashPlan`, `TrashApproval`) deferred to 04d.
+9. **Naming debt** (`trashPlan`, `TrashApproval`) deferred to 04d. Done in M01-04d slice 2 (`cleanupPlan`, `ReviewApproval`).
 
 ## Unchanged limits (SAFETY_MODEL.md)
 

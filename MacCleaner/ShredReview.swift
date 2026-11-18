@@ -234,7 +234,7 @@ enum ShredReview {
 extension ReviewBuild {
     /// The Shredder's review, built only from the rows the review made (no file access here). `perform` is unused;
     /// the confirmed approval goes to `performApproved` with the same rows the sheet shows.
-    static func shred(rows: [ShredReviewRow], perform: @escaping ([ShredReviewRow], TrashApproval?) -> Void) -> ReviewRequest {
+    static func shred(rows: [ShredReviewRow], perform: @escaping ([ShredReviewRow], ReviewApproval?) -> Void) -> ReviewRequest {
         let entries = rows.compactMap { r in r.candidate.map { CleanupPlan.Entry($0, .overwriteThenDelete) } }
         return ReviewRequest(title: "Shred Permanently",
                              explanation: "Shredding skips the Trash and cannot be undone.",
@@ -243,7 +243,7 @@ extension ReviewBuild {
                                             action: .delete, risk: .review, note: "cannot be recovered", blocked: $0.blockedReason)
                              },
                              verb: "Shred", perform: { _ in },
-                             trashPlan: entries.isEmpty ? nil : try? CleanupPlan(entries),
+                             cleanupPlan: entries.isEmpty ? nil : try? CleanupPlan(entries),
                              performApproved: { _, approval in perform(rows, approval) })
     }
 }

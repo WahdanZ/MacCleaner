@@ -83,7 +83,7 @@ enum AppCleanup {
     /// record of a move that was made. If a record can't be written, the run stops there and says so. `precondition`
     /// can refuse single items right before they move. `executor` is the one that issued the approval (AppOwnedTrash
     /// passes its own); `restorable` is what the Trash log records.
-    static func moveToTrash(_ decision: TrashApproval, source: String,
+    static func moveToTrash(_ decision: ReviewApproval, source: String,
                             precondition: CleanupExecutor.Precondition? = nil,
                             stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil,
                             executor: CleanupExecutor = AppCleanup.executor, restorable: Bool = true) async -> TrashRun {
@@ -133,7 +133,7 @@ enum AppCleanup {
 
     /// `moveToTrash` for synchronous code (the engines, the MCP server, the CLI): waits for it. Nothing on this path
     /// needs the main thread, so it may be called on it.
-    static func moveToTrashBlocking(_ decision: TrashApproval, source: String,
+    static func moveToTrashBlocking(_ decision: ReviewApproval, source: String,
                                     precondition: CleanupExecutor.Precondition? = nil,
                                     stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil) -> TrashRun {
         let slot = RunSlot()
@@ -169,7 +169,7 @@ enum AppCleanup {
     /// of `items` by id, have exactly one target whose path is that item's `.trash` URL and whose identity is the
     /// item's scanned identity, and no two entries may name the same target. A reviewed item not in the plan is
     /// reported and left alone.
-    static func engineTrash(_ items: [EngineTrashItem], module: String, _ decision: TrashApproval?, source: String,
+    static func engineTrash(_ items: [EngineTrashItem], module: String, _ decision: ReviewApproval?, source: String,
                             stopAfter: (@Sendable (ItemOutcome) -> String?)? = nil) -> EngineTrashResult {
         guard !items.isEmpty else { return EngineTrashResult() }
         guard let decision else {
@@ -264,8 +264,9 @@ final class IDSet: @unchecked Sendable {   // `ids` behind `lock`
     func contains(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ids.contains(id) }
 }
 
-/// The outcome of a confirmation for the Trash part of a review.
-enum TrashApproval: Sendable {
+/// The outcome of confirming a review's `cleanupPlan` (a Trash plan, or the Shredder's `.overwriteThenDelete` plan).
+/// Not the executor's `CleanupApproval`: `.approved` carries one, paired with its plan, inside `ApprovedTrash`.
+enum ReviewApproval: Sendable {
     case approved(ApprovedTrash)
     /// The executor wouldn't issue an approval; nothing is moved, and every item says why.
     case refused(plan: CleanupPlan, reason: String)

@@ -304,7 +304,7 @@ final class DiskMapModel {
 
     /// Moves exactly the reviewed items to the Trash (approved path: each one is re-checked against what the review
     /// sheet showed, and left alone if it changed) and updates the tree.
-    func trashMarked(_ items: [DiskNode], _ approval: TrashApproval?) async {
+    func trashMarked(_ items: [DiskNode], _ approval: ReviewApproval?) async {
         guard let approval, !items.isEmpty else { return }
         phase = .trashing
         let run = await AppCleanup.moveToTrash(approval, source: "Storage Analysis")

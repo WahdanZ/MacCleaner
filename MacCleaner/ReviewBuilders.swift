@@ -32,7 +32,7 @@ enum ReviewBuild {
 
     /// Caches stay on the legacy path; old downloads are approved-Trash items (snapshots taken now).
     static func overview(_ m: CleanerModel, downloads: [BigFile],
-                         perform: @escaping ([CleanTarget], [BigFile], TrashApproval?) -> Void) -> ReviewRequest {
+                         perform: @escaping ([CleanTarget], [BigFile], ReviewApproval?) -> Void) -> ReviewRequest {
         let targets = m.chosen
         let dl = downloads.map { f -> ReviewItem in
             let snap = AppCleanup.snapshot(f.url)
@@ -44,7 +44,7 @@ enum ReviewBuild {
                              explanation: "Caches and logs are deleted permanently and rebuild on their own. Old downloads go to the Trash, so you can put them back until you empty it.",
                              items: cacheItems(targets) + dl, verb: "Clean",
                              perform: { _ in },
-                             trashPlan: AppCleanup.trashPlan(dl, module: "downloads"),
+                             cleanupPlan: AppCleanup.trashPlan(dl, module: "downloads"),
                              performApproved: { ok, approval in
                                  perform(targets.filter { ok.contains("cache:\($0.id)") },
                                          downloads.filter { ok.contains("dl:\($0.id)") }, approval)
@@ -57,7 +57,7 @@ enum ReviewBuild {
     /// sheet opens; the plan is built from exactly these snapshots. `perform` gets the reviewed, allowed URLs (the
     /// ones in the plan; blocked items are left out, as before) and the approval for them.
     static func trashFiles(title: String, explanation: String, module: String, _ files: [(URL, Int64, String?)],
-                           perform: @escaping ([URL], TrashApproval?) -> Void) -> ReviewRequest {
+                           perform: @escaping ([URL], ReviewApproval?) -> Void) -> ReviewRequest {
         let urls = files.map(\.0)
         let items = files.map { u, size, note -> ReviewItem in
             let snap = AppCleanup.snapshot(u)
@@ -66,11 +66,11 @@ enum ReviewBuild {
                               snapshot: snap)
         }
         return ReviewRequest(title: title, explanation: explanation, items: items, verb: "Move", perform: { _ in },
-                             trashPlan: AppCleanup.trashPlan(items, module: module),
+                             cleanupPlan: AppCleanup.trashPlan(items, module: module),
                              performApproved: { ok, approval in perform(urls.filter { ok.contains($0.path) }, approval) })
     }
 
-    static func diskMap(_ m: DiskMapModel, perform: @escaping ([DiskNode], TrashApproval?) -> Void) -> ReviewRequest {
+    static func diskMap(_ m: DiskMapModel, perform: @escaping ([DiskNode], ReviewApproval?) -> Void) -> ReviewRequest {
         let nodes = m.topLevelMarked
         return trashFiles(title: "Move to Trash",
                           explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
@@ -81,7 +81,7 @@ enum ReviewBuild {
                           })
     }
 
-    static func largeFiles(_ m: LargeFilesModel, perform: @escaping ([BigFile], TrashApproval?) -> Void) -> ReviewRequest {
+    static func largeFiles(_ m: LargeFilesModel, perform: @escaping ([BigFile], ReviewApproval?) -> Void) -> ReviewRequest {
         let files = m.markedFiles
         return trashFiles(title: "Move Large & Old Files to Trash",
                           explanation: "These go to the Trash. You can put them back until you empty it; space is freed only then.",
@@ -92,7 +92,7 @@ enum ReviewBuild {
                           })
     }
 
-    static func duplicates(_ m: DupFinder, perform: @escaping ([URL], TrashApproval?) -> Void) -> ReviewRequest {
+    static func duplicates(_ m: DupFinder, perform: @escaping ([URL], ReviewApproval?) -> Void) -> ReviewRequest {
         var files: [(URL, Int64, String?)] = []
         for g in m.groups {
             let marked = g.files.filter { m.marked.contains($0) }
@@ -112,7 +112,7 @@ enum ReviewBuild {
     /// scan captured (what the sheet describes), only if the same items are still there when it opens (otherwise
     /// blocked: scan again). Leftovers outside your home folder go through the password step, which checks their
     /// scanned identity at the privileged move; a leftover that changed since the scan is blocked here too.
-    static func uninstall(_ a: AppInfo, running: Bool, perform: @escaping ([AppLeftover], TrashApproval?) -> Void) -> ReviewRequest {
+    static func uninstall(_ a: AppInfo, running: Bool, perform: @escaping ([AppLeftover], ReviewApproval?) -> Void) -> ReviewRequest {
         let (bundleSnap, bundleStale) = AppCleanup.scannedSnapshot(a.url, scanned: a.identity)
         var items = [ReviewItem(id: a.url.path, name: "\(a.name).app", location: a.url.path, size: a.appSize,
                                 action: a.url.path.hasPrefix("/Applications/") ? .adminTrash : .trash,
@@ -143,7 +143,7 @@ enum ReviewBuild {
                                 + (admin ? " Items outside your home folder need your password once." : "")
                                 + (running ? " \(a.name) is running and will be quit first." : ""),
                              items: items, verb: "Uninstall", perform: { _ in },
-                             trashPlan: AppCleanup.trashPlan(items, module: "uninstall"),
+                             cleanupPlan: AppCleanup.trashPlan(items, module: "uninstall"),
                              performApproved: { ok, approval in
                                  guard ok.contains(a.url.path) else { return }
                                  perform(a.leftovers.filter { $0.include && ok.contains($0.id) }, approval)
@@ -176,14 +176,14 @@ enum ReviewBuild {
                       verb: "Clean", perform: { ok in perform(pairs.filter { ok.contains($0.0.id) }) })
     }
 
-    static func sdks(_ m: SDKModel, perform: @escaping ([SDKItem], TrashApproval?) -> Void) -> ReviewRequest {
+    static func sdks(_ m: SDKModel, perform: @escaping ([SDKItem], ReviewApproval?) -> Void) -> ReviewRequest {
         sdks(m.chosen, perform: perform)
     }
 
     /// Archives (`.trash`) are approved-Trash items: the plan holds the identity the scan captured (what the sheet
     /// describes), and only if the same item is still there when the sheet opens; otherwise the row is blocked and
     /// needs a rescan. Everything else keeps its own flow.
-    static func sdks(_ chosen: [SDKItem], perform: @escaping ([SDKItem], TrashApproval?) -> Void) -> ReviewRequest {
+    static func sdks(_ chosen: [SDKItem], perform: @escaping ([SDKItem], ReviewApproval?) -> Void) -> ReviewRequest {
         let items = chosen.map { i -> ReviewItem in
             let action: ReviewItem.Action = {
                 switch i.action {
@@ -205,19 +205,19 @@ enum ReviewBuild {
         return ReviewRequest(title: "Review Developer SDKs",
                       explanation: "Runtimes and SDK parts are deleted permanently and can be downloaded again, which takes time and bandwidth. Xcode archives go to the Trash. Docker volumes and stopped containers hold data that can't be rebuilt.",
                       items: items, verb: "Remove", perform: { _ in },
-                      trashPlan: AppCleanup.trashPlan(items, module: "sdks"),
+                      cleanupPlan: AppCleanup.trashPlan(items, module: "sdks"),
                       performApproved: { ok, approval in perform(chosen.filter { ok.contains($0.id) }, approval) })
     }
 
     // MARK: System Data, Shredder
 
-    static func systemData(_ m: SystemDataModel, perform: @escaping ([SysItem], TrashApproval?) -> Void) -> ReviewRequest {
+    static func systemData(_ m: SystemDataModel, perform: @escaping ([SysItem], ReviewApproval?) -> Void) -> ReviewRequest {
         systemData(m.chosen, perform: perform)
     }
 
     /// Trash items are approved-Trash items: the plan holds the scan's identity, only if the same item is still
     /// there when the sheet opens (otherwise blocked, rescan). Snapshots keep their password flow.
-    static func systemData(_ chosen: [SysItem], perform: @escaping ([SysItem], TrashApproval?) -> Void) -> ReviewRequest {
+    static func systemData(_ chosen: [SysItem], perform: @escaping ([SysItem], ReviewApproval?) -> Void) -> ReviewRequest {
         let items = chosen.map { i -> ReviewItem in
             let snapshot: Bool = { if case .snapshot = i.action { return true }; return false }()
             var snap: FileIdentity?
@@ -232,7 +232,7 @@ enum ReviewBuild {
         return ReviewRequest(title: "Review System Data",
                       explanation: "Device backups and attachments go to the Trash; they can't be recreated without the device or the sender. Time Machine snapshots are deleted permanently after you enter your password.",
                       items: items, verb: "Remove", perform: { _ in },
-                      trashPlan: AppCleanup.trashPlan(items, module: "system-data"),
+                      cleanupPlan: AppCleanup.trashPlan(items, module: "system-data"),
                       performApproved: { ok, approval in perform(chosen.filter { ok.contains($0.id) }, approval) })
     }
 }

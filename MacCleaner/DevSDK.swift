@@ -398,7 +398,7 @@ enum SDKEngine {
     /// Removes the reviewed items. Archives (`.trash`) move only through `trash`, the approval given at the review sheet
     /// or the MCP/CLI confirm for exactly the archives it showed (never made here); without it they stay and say so.
     /// Everything else runs as before.
-    static func remove(_ items: [SDKItem], trash: TrashApproval? = nil, trashSource: String = "Developer SDKs",
+    static func remove(_ items: [SDKItem], trash: ReviewApproval? = nil, trashSource: String = "Developer SDKs",
                        progress: (String) -> Void = { _ in }) -> (bytes: Int64, trashed: Int64, errors: [String]) {
         SizeCache.clear(); defer { SizeCache.clear() }   // sizes measured before this are out of date
         var bytes: Int64 = 0, trashed: Int64 = 0
@@ -523,7 +523,7 @@ final class SDKModel {
     func selectUnused() { selected.formUnion(items.filter(\.isUnused).map(\.id)) }
 
     /// Removes exactly the reviewed items.
-    func remove(_ list: [SDKItem], _ trash: TrashApproval?) async {
+    func remove(_ list: [SDKItem], _ trash: ReviewApproval?) async {
         guard !list.isEmpty else { return }
         phase = .removing
         let r = await Task.detached(priority: .userInitiated) { () -> (bytes: Int64, trashed: Int64, errors: [String]) in

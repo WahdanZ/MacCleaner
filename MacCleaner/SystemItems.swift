@@ -78,7 +78,7 @@ final class ExtensionsModel {
     /// users through the password step, which checks its scanned identity at the privileged move.
     /// `refusal` is what the alert found when it was shown (stale, replaced, missing or unidentified): then nothing
     /// happens, no password prompt either. `adminStep` is passed only by the self-test.
-    func remove(_ x: ExtItem, trash: TrashApproval?, refusal: String?,
+    func remove(_ x: ExtItem, trash: ReviewApproval?, refusal: String?,
                 adminStep: @escaping AppEngine.AdminStepRunner = AppEngine.defaultAdminStep) async {
         busy = true
         var movedToTrash = false   // from the outcome itself, never from the original being gone
@@ -264,7 +264,7 @@ final class StartupModel {
     /// Yours: its file goes to the Trash through `trash`, and only once it has moved is its job stopped, so a refused
     /// approval or a changed file never stops anything. Others: the password step, which stops the job only after
     /// verifying and moving its file. `adminStep` and `stopJob` are passed only by the self-test.
-    func remove(_ s: StartupItem, trash: TrashApproval?, refusal: String?,
+    func remove(_ s: StartupItem, trash: ReviewApproval?, refusal: String?,
                 adminStep: @escaping AppEngine.AdminStepRunner = AppEngine.defaultAdminStep,
                 stopJob: @escaping @Sendable (String) -> Void = AppEngine.defaultStopUserJob) async {
         busy = true

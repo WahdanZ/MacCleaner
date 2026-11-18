@@ -325,7 +325,7 @@ final class DupFinder {
     /// sheet showed, and left alone if it changed). Right before each one it checks that a copy that stays still
     /// exists and still has the same content, so editing or deleting the kept copy after the scan never leaves you
     /// without one.
-    func trashMarked(_ urls: [URL], _ approval: TrashApproval?) async {
+    func trashMarked(_ urls: [URL], _ approval: ReviewApproval?) async {
         let chosen = Set(urls)
         guard let approval, !chosen.isEmpty else { return }
         phase = .trashing

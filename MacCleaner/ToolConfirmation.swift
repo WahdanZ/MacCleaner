@@ -35,8 +35,8 @@ enum ToolConfirmation {
 
     /// Approves the preview's Trash plan, attributed to whoever confirmed it. nil when the preview had no Trash
     /// items. Waits for the executor (the MCP server and the CLI are synchronous).
-    static func approveTrash(_ confirmed: MCPServer.ConfirmedPreview) -> TrashApproval? {
-        guard let plan = confirmed.trashPlan else { return nil }
+    static func approveTrash(_ confirmed: MCPServer.ConfirmedPreview) -> ReviewApproval? {
+        guard let plan = confirmed.cleanupPlan else { return nil }
         if let why = AppCleanup.nonTrashRefusal(plan) { return .refused(plan: plan, reason: why) }
         let approver = approver(for: confirmed.approvedBy)
         let slot = ApprovalSlot()
@@ -63,5 +63,5 @@ enum ToolConfirmation {
 
 /// Carries the approval out of the detached task (written once before the semaphore is signalled).
 private final class ApprovalSlot: @unchecked Sendable {
-    var value: TrashApproval?
+    var value: ReviewApproval?
 }

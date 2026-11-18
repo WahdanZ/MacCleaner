@@ -16,7 +16,7 @@ enum ReviewConfirmation {
             request.perform(ids)   // legacy flow
             return
         }
-        guard let plan = request.trashPlan else {
+        guard let plan = request.cleanupPlan else {
             run(ids, nil)
             return
         }
@@ -27,7 +27,7 @@ enum ReviewConfirmation {
 
     /// Records the approval. If the executor refuses to issue one, says why, so nothing is moved silently or
     /// reported as done.
-    private static func approve(_ plan: CleanupPlan) async -> TrashApproval {
+    private static func approve(_ plan: CleanupPlan) async -> ReviewApproval {
         do {
             return .approved(ApprovedTrash(plan: plan, approval: try await AppCleanup.executor.approve(plan, by: .userInApp)))
         } catch {

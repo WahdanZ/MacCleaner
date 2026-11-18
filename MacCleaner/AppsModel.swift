@@ -505,7 +505,7 @@ final class AppsModel {
     /// Full uninstall: stop background jobs, app + checked leftovers → Trash,
     /// then one password prompt (macOS's own) for items outside your home folder.
     /// Uninstalls the app that was reviewed, with exactly the reviewed leftovers.
-    func uninstall(_ a: AppInfo, picked: [AppLeftover], trash: TrashApproval?) async {
+    func uninstall(_ a: AppInfo, picked: [AppLeftover], trash: ReviewApproval?) async {
         guard uninstallBlock(a) == nil else { return }
         phase = .working
         if isRunning(a), !(await quit(a)) { phase = .done; return }

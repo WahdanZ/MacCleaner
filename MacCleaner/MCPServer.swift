@@ -357,7 +357,7 @@ enum MCPServer {
                     "needs_password": picked.contains(where: \.needsAdmin),
                     "total": size(app.appSize + picked.reduce(0) { $0 + $1.size }),
                     "next": "Show this to the user. Only after an explicit yes, call uninstall_app again with confirm: true and the preview_id. If needs_password is true, macOS will show a password dialog the user must answer.",
-                ], trashPlan: trashPlan)
+                ], cleanupPlan: trashPlan)
             }
             let confirmed = try approve(name, digest, a, approval)
             if AppEngine.isRunning(app), !AppEngine.quit(app) {
@@ -450,7 +450,7 @@ enum MCPServer {
                 // The confirm can only approve exactly these archives.
                 return withPreview(name, digest, ["preview": true, "items": preview, "total": size(list.reduce(0) { $0 + $1.size }),
                         "next": "Show this to the user, point out in_use and review items. Only after an explicit yes, call remove_sdks again with confirm: true and the preview_id."],
-                        trashPlan: AppCleanup.trashPlan(archives, module: "sdks"))
+                        cleanupPlan: AppCleanup.trashPlan(archives, module: "sdks"))
             }
             let confirmed = try approve(name, digest, a, approval)
             let r = SDKEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
@@ -496,7 +496,7 @@ enum MCPServer {
                         "items": list.map { ["name": $0.section.rawValue + ": " + $0.name, "size": $0.size.map(size) ?? "unknown",
                                              "allowed": refusals[$0.id] == nil, "reason": refusals[$0.id] ?? NSNull()] as [String: Any] },
                         "next": "Show this to the user (backups and attachments can't be recreated). Only after an explicit yes, call again with confirm: true and the preview_id."],
-                        trashPlan: AppCleanup.trashPlan(trashItems, module: "system-data"))
+                        cleanupPlan: AppCleanup.trashPlan(trashItems, module: "system-data"))
             }
             let confirmed = try approve(name, digest, a, approval)
             let r = SystemDataEngine.remove(list, trash: ToolConfirmation.approveTrash(confirmed),
@@ -615,10 +615,10 @@ enum MCPServer {
                 }
                 return withPreview(name, digest, ["preview": true, "items": items,
                         "next": "Show this to the user. Only after an explicit yes, call move_to_trash again with the same paths, confirm: true and the preview_id. Items with allowed=false will be skipped."],
-                        trashPlan: AppCleanup.trashPlan(snapshots, module: "mcp"))
+                        cleanupPlan: AppCleanup.trashPlan(snapshots, module: "mcp"))
             }
             let confirmed = try approve(name, digest, a, approval)
-            let planned = Set(confirmed.trashPlan?.candidates.map(\.id) ?? [])
+            let planned = Set(confirmed.cleanupPlan?.candidates.map(\.id) ?? [])
             let run = ToolConfirmation.moveToTrash(confirmed)
             var moved: [String] = [], errors: [String] = [], reported = Set<String>()
             for u in urls {
@@ -649,17 +649,17 @@ enum MCPServer {
     /// 10 minutes, tied to the tool and to a digest of the exact items. The confirm recomputes the
     /// digest from the same arguments, so a different app, path or selection is refused.
     private static var previews: [String: (tool: String, digest: String, expires: Date, request: ApprovalRequest,
-                                           trashPlan: CleanupPlan?)] = [:]
+                                           cleanupPlan: CleanupPlan?)] = [:]
     static let previewLifetime: TimeInterval = 600
 
     static func plan(_ parts: [String]) -> String { parts.sorted().joined(separator: "\n") }
 
     static func issuePreview(_ tool: String, _ digest: String, now: Date = Date(), request: ApprovalRequest? = nil,
-                             trashPlan: CleanupPlan? = nil) -> String {
+                             cleanupPlan: CleanupPlan? = nil) -> String {
         previews = previews.filter { $0.value.expires > now }
         let id = UUID().uuidString.lowercased()
         previews[id] = (tool, digest, now.addingTimeInterval(previewLifetime),
-                        request ?? ApprovalRequest(tool: tool, verb: verb(for: tool), lines: []), trashPlan)
+                        request ?? ApprovalRequest(tool: tool, verb: verb(for: tool), lines: []), cleanupPlan)
         return id
     }
 
@@ -670,11 +670,11 @@ enum MCPServer {
         let tool: String
         let approvedBy: ToolApproval?
         /// What the preview captured for an approved-Trash tool (move_to_trash).
-        let trashPlan: CleanupPlan?
-        fileprivate init(tool: String, approvedBy: ToolApproval?, trashPlan: CleanupPlan?) {
+        let cleanupPlan: CleanupPlan?
+        fileprivate init(tool: String, approvedBy: ToolApproval?, cleanupPlan: CleanupPlan?) {
             self.tool = tool
             self.approvedBy = approvedBy
-            self.trashPlan = trashPlan
+            self.cleanupPlan = cleanupPlan
         }
     }
 
@@ -700,7 +700,7 @@ enum MCPServer {
                 throw ToolError(description: "The person did not approve this in Mac Cleaner's confirmation window (or the window couldn't be shown, e.g. no one is logged in at the screen). Nothing was changed.")
             }
         }
-        return ConfirmedPreview(tool: tool, approvedBy: approval, trashPlan: p.trashPlan)
+        return ConfirmedPreview(tool: tool, approvedBy: approval, cleanupPlan: p.cleanupPlan)
     }
 
     /// "path|device:inode:type[:size:mtime]" — tells the same file apart from a different one at the same path.
@@ -767,10 +767,10 @@ enum MCPServer {
     /// `lines` replaces the window's list when the JSON result shows only part of it (e.g. a huge Trash):
     /// the person always sees every item.
     private static func withPreview(_ tool: String, _ digest: String, _ result: [String: Any],
-                                    lines: [String]? = nil, trashPlan: CleanupPlan? = nil) -> [String: Any] {
+                                    lines: [String]? = nil, cleanupPlan: CleanupPlan? = nil) -> [String: Any] {
         var r = result
         let request = ApprovalRequest(tool: tool, verb: verb(for: tool), lines: lines ?? approvalLines(result))
-        r["preview_id"] = issuePreview(tool, digest, request: request, trashPlan: trashPlan)
+        r["preview_id"] = issuePreview(tool, digest, request: request, cleanupPlan: cleanupPlan)
         r["approval"] = "When you confirm, Mac Cleaner shows the person this list in its own window. Nothing happens unless they approve there."
         return r
     }

@@ -83,6 +83,8 @@ There is no separate menu-bar helper process; the menu bar panel (`MenuBarPopove
   `reason(_:)` is case-insensitive; `isInsideProtected(_:)` is **case-sensitive** (see RISK-012).
 * **Review sheet** — every UI destructive flow builds a `ReviewRequest`; `perform` receives the ids of the rows
   shown, and builders map them back to the objects captured when the sheet opened (fixed in #18).
+  `ReviewConfirmation.confirm` keeps the legacy `perform` fallback for reviews without `performApproved` (junk, build
+  files, app cache, Homebrew uninstall) until M01-06…; the self-test pins three of those four (junk, build files, app cache), not the inline Homebrew review.
 * **MCP** — preview/confirm with a single-use `preview_id` bound to tool name + digest of item ids/paths (#15).
 * **Admin uninstall** — root script stages into `mktemp -d` under `/private/var/tmp`, re-checks ownership,
   `mv -n`, chowns only the staging dir (#16).

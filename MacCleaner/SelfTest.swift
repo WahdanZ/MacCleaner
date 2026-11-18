@@ -1186,6 +1186,127 @@ extension SelfTest {
         return got.value
     }
 
+    /// ReviewConfirmation's routing (M01-04d): the legacy `perform` fallback is kept for the reviews not yet on the
+    /// executor, and nothing with a plan can end up on it.
+    @MainActor
+    static func reviewRouting(dir: URL, runID: String) {
+        print("Review confirmation routing: legacy fallback and approved flows (M01-04d)")
+        let fm = FileManager.default
+        func file(_ name: String) -> URL {
+            let u = dir.appendingPathComponent("routing-\(name)-\(runID).txt")
+            try? Data("routing".utf8).write(to: u)
+            return u
+        }
+        func item(_ id: String, blocked: String? = nil) -> ReviewItem {
+            ReviewItem(id: id, name: id, location: id, size: 1, action: .delete, blocked: blocked)
+        }
+        func spinUntil(_ done: () -> Bool) {
+            let end = Date().addingTimeInterval(30)
+            while !done() && Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        }
+
+        // a. Legacy flow: perform runs once, with exactly the allowed ids.
+        var legacyCalls: [Set<String>] = []
+        let legacy = ReviewRequest(title: "Self-test", explanation: "", items: [item("a"), item("b", blocked: "protected"), item("c")],
+                                   verb: "Clean", perform: { legacyCalls.append($0) })
+        ReviewConfirmation.confirm(legacy)
+        check("legacy review: confirm calls perform once with exactly the allowed ids (a blocked item is excluded)",
+              legacyCalls == [["a", "c"]])
+
+        // b. Approved flow: perform is never called; performApproved gets the allowed ids (and the approval for a plan).
+        var plainPerform = 0
+        var plainApproved: [Set<String>] = []
+        var plainApproval: [Bool] = []
+        let plain = ReviewRequest(title: "Self-test", explanation: "", items: [item("a"), item("b", blocked: "protected")],
+                                  verb: "Clean", perform: { _ in plainPerform += 1 },
+                                  performApproved: { ids, approval in plainApproved.append(ids); plainApproval.append(approval == nil) })
+        ReviewConfirmation.confirm(plain)
+        check("approved review without a plan: confirm never calls perform; performApproved gets the allowed ids and no approval",
+              plainPerform == 0 && plainApproved == [["a"]] && plainApproval == [true])
+
+        let moved = file("moved")
+        let built = ReviewBuild.trashFiles(title: "Self-test", explanation: "", module: "selftest", [(moved, 1, nil)]) { _, _ in }
+        let gotIDs = Slot<Set<String>>(), gotApproval = Slot<ReviewApproval?>()
+        var plannedPerform = 0
+        let planned = ReviewRequest(title: "Self-test", explanation: "", items: built.items, verb: "Move",
+                                    perform: { _ in plannedPerform += 1 }, cleanupPlan: built.cleanupPlan,
+                                    performApproved: { ids, approval in gotIDs.value = ids; gotApproval.value = .some(approval) })
+        ReviewConfirmation.confirm(planned)
+        spinUntil { gotApproval.value != nil }
+        let approval = gotApproval.value ?? nil
+        check("approved review with a plan: confirm never calls perform; performApproved gets the allowed ids and the approval",
+              plannedPerform == 0 && gotIDs.value == [moved.path] && planned.cleanupPlan != nil
+              && { if case .approved? = approval { return true }; return false }())
+        // Use the approval up and put the sandbox file back, so no approval stays outstanding.
+        if case .approved? = approval {
+            _ = wait { await AppCleanup.moveToTrash(approval!, source: "Self-test") }
+            let left = !fm.fileExists(atPath: moved.path)
+            let entry = TrashLog.shared.present().first(where: { $0.original == AppCleanup.physicalPath(moved) })
+            let restored = entry.map { TrashOps.restore($0) == nil } ?? false
+            check("the approved plan's file was moved by the approval and put back", left && restored && fm.fileExists(atPath: moved.path))
+        }
+        try? fm.removeItem(at: moved)
+
+        // c. Every production builder that sets a plan also sets performApproved. Each builder is built from real
+        // sandbox files where cheap, so it has a plan. Not built: the Homebrew uninstall request (inline in AppsView,
+        // not a builder).
+        let sdkFile = file("sdk"), sysFile = file("sys"), shredFile = file("shred"), tfFile = file("tf")
+        let mapFile = file("map"), bigFile = file("big"), dupA = file("dupa"), dupB = file("dupb"), dlFile = file("dl")
+        let appDir = dir.appendingPathComponent("Routing-\(runID).app")
+        try? fm.createDirectory(at: appDir, withIntermediateDirectories: true)
+        defer {
+            for u in [sdkFile, sysFile, shredFile, tfFile, mapFile, bigFile, dupA, dupB, dlFile, appDir] { try? fm.removeItem(at: u) }
+        }
+        let sdk = SDKItem(id: sdkFile.path, group: .xcode, kind: "Archives", name: "A", detail: "", size: 1, reveal: sdkFile,
+                          action: .trash(sdkFile), review: true, regen: "x", identity: AppCleanup.snapshot(sdkFile))
+        let sys = SysItem(id: sysFile.path, section: .backups, name: "B", detail: "", size: 1, reveal: sysFile,
+                          action: .trash(sysFile), identity: AppCleanup.snapshot(sysFile))
+        let app = AppInfo(id: appDir.path, url: appDir, name: "Routing", bundleID: "com.example.maccleaner-selftest-routing",
+                          version: "1", isApple: false, appSize: 0, lastUsed: nil, leftovers: [], caches: [],
+                          identity: AppCleanup.snapshot(appDir))
+        let rows = ShredReview.snapshots([(id: shredFile.path, url: shredFile)])
+        let diskMap = DiskMapModel()
+        let mapNode = DiskNode(url: mapFile, name: mapFile.lastPathComponent, isDirectory: false)
+        diskMap.marked[mapNode.id] = mapNode
+        let large = LargeFilesModel()
+        let big = BigFile(id: bigFile.path, url: bigFile, size: 1, modified: nil, lastOpened: nil)
+        large.files = [big]
+        large.marked = [big.id]
+        let dups = DupFinder()
+        dups.groups = [DupGroup(id: "g", size: 1, files: [dupA, dupB])]
+        dups.marked = [dupB]
+        let dl = BigFile(id: dlFile.path, url: dlFile, size: 1, modified: nil, lastOpened: nil)
+        let approved: [(String, ReviewRequest)] = [
+            ("trashFiles", ReviewBuild.trashFiles(title: "", explanation: "", module: "selftest", [(tfFile, 1, nil)]) { _, _ in }),
+            ("diskMap", ReviewBuild.diskMap(diskMap) { _, _ in }),
+            ("largeFiles", ReviewBuild.largeFiles(large) { _, _ in }),
+            ("duplicates", ReviewBuild.duplicates(dups) { _, _ in }),
+            ("overview", ReviewBuild.overview(CleanerModel(), downloads: [dl]) { _, _, _ in }),
+            ("uninstall", ReviewBuild.uninstall(app, running: false) { _, _ in }),
+            ("sdks", ReviewBuild.sdks([sdk]) { _, _ in }),
+            ("systemData", ReviewBuild.systemData([sys]) { _, _ in }),
+            ("shred", ReviewBuild.shred(rows: rows) { _, _ in }),
+        ]
+        for (name, request) in approved {
+            check("review builder \(name): the request has a real cleanup plan and sets performApproved",
+                  request.cleanupPlan != nil && request.performApproved != nil)
+        }
+        check("review builders that set a cleanup plan always also set performApproved",
+              approved.allSatisfy { $0.1.cleanupPlan == nil || $0.1.performApproved != nil })
+
+        // d. The legacy builders stay on perform until their module moves to the executor (M01-06...). If one is
+        // migrated, update ReviewConfirmation's doc, docs/architecture/MIGRATION_PLAN.md and these checks together.
+        let legacyBuilt: [(String, ReviewRequest)] = [
+            ("junk", ReviewBuild.junk(CleanerModel()) { _ in }),
+            ("appCache", ReviewBuild.appCache(app) { _ in }),
+            ("projects", ReviewBuild.projects(ProjectsModel()) { _ in }),
+        ]
+        for (name, request) in legacyBuilt {
+            check("review builder \(name) is still a legacy review (no plan, no performApproved)",
+                  request.cleanupPlan == nil && request.performApproved == nil)
+        }
+    }
+
     static func approvedTrash(sandbox: URL, runID: String, savedProtected: [String]) {
         print("Approved Trash: review sheet → approval → executor (M01-04b)")
         let fm = FileManager.default
@@ -1323,6 +1444,7 @@ extension SelfTest {
         shredScreen(dir: dir, runID: runID, savedProtected: savedProtected)
         uninstallAndAlerts(dir: dir, runID: runID, savedProtected: savedProtected)
         MainActor.assumeIsolated { installedSkills(dir: dir, runID: runID) }
+        MainActor.assumeIsolated { reviewRouting(dir: dir, runID: runID) }
 
         let allowedOne = file("allowed"), blockedOne = file("blocked")
         ProtectedPaths.set(savedProtected + [blockedOne.path])

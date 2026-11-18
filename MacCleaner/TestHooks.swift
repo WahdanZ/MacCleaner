@@ -34,10 +34,19 @@ enum TestHooks {
             }
             CFRunLoopAddTimer(CFRunLoopGetMain(), timer, .commonModes)
             MainActor.assumeIsolated { HumanApproval.ask = { _ in
-                if delayMS > 0 { usleep(UInt32(delayMS) * 1000) }   // stands in for an open dialog
                 let mode = CFRunLoopCopyCurrentMode(CFRunLoopGetCurrent()).map { ($0.rawValue as String) } ?? "nil"
+                // Stands in for an open dialog: spin the main run loop in modal-panel mode (as NSAlert.runModal does)
+                // until a one-shot modal-mode timer fires, with a hard upper bound.
+                var fired = false
+                if delayMS > 0 {
+                    let t = Timer(timeInterval: Double(delayMS) / 1000, repeats: false) { _ in fired = true }
+                    RunLoop.main.add(t, forMode: .modalPanel)
+                    let limit = Date().addingTimeInterval(Double(delayMS) / 1000 + 5)
+                    while !fired && Date() < limit { RunLoop.main.run(mode: .modalPanel, before: Date().addingTimeInterval(0.01)) }
+                    t.invalidate()
+                }
                 append("main=\(pthread_main_np()) isMainThread=\(Thread.isMainThread) "
-                       + "mainRunLoop=\(CFRunLoopGetCurrent() == CFRunLoopGetMain()) mode=\(mode) ticks=\(ticks)", to: path)
+                       + "mainRunLoop=\(CFRunLoopGetCurrent() == CFRunLoopGetMain()) mode=\(mode) ticks=\(ticks) modalTimerFired=\(delayMS > 0 ? "\(fired)" : "n/a")", to: path)
                 return answer
             } }
         }

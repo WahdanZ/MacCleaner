@@ -100,6 +100,11 @@ enum CLI {
 
     // MARK: Run
 
+    /// The subcommand as `run` sees it: the first argument once `--json`, `--yes` and `-y` are set aside.
+    static func subcommand(_ argv: [String]) -> String? {
+        argv.first { !["--json", "--yes", "-y"].contains($0) }
+    }
+
     @MainActor static func run(_ argv: [String]) -> Int32 {
         var args = argv
         let json = args.contains("--json"); args.removeAll { $0 == "--json" }

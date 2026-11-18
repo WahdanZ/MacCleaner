@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MacCleanerCore
+import os
 
 /// Model Context Protocol server over stdio. Start with: "Mac Cleaner" --mcp
 /// Every tool that deletes or moves something returns a preview unless called with confirm: true.
@@ -42,17 +43,18 @@ enum MCPServer {
     }
 
     /// Measures every scan location in parallel, one slot per location (nonisolated: no main-actor state involved).
+    /// The array is pre-sized (all nil) before any iteration starts. Each iteration measures outside the lock, then
+    /// writes only its own index under the lock. `concurrentPerform` is synchronous and returns only after every
+    /// iteration finished, so the final read sees all writes (the lock also gives happens-before). Same result as
+    /// the old unsafe-buffer version: slot i holds `Scanner.measure(plan[i])`.
     private nonisolated static func measureAll(_ plan: [CleanTarget]) -> [CleanTarget?] {
-        var measured = [CleanTarget?](repeating: nil, count: plan.count)
-        measured.withUnsafeMutableBufferPointer { buf in
-            let slots = Slots(base: buf.baseAddress)
-            DispatchQueue.concurrentPerform(iterations: plan.count) { i in slots.base?[i] = Scanner.measure(plan[i]) }
+        let slots = OSAllocatedUnfairLock<[CleanTarget?]>(initialState: Array(repeating: nil, count: plan.count))
+        DispatchQueue.concurrentPerform(iterations: plan.count) { i in
+            let m = Scanner.measure(plan[i])
+            slots.withLock { $0[i] = m }
         }
-        return measured
+        return slots.withLock { $0 }
     }
-
-    /// Each parallel iteration writes only its own slot.
-    private struct Slots: @unchecked Sendable { let base: UnsafeMutablePointer<CleanTarget?>? }
 
     private static func send(_ obj: [String: Any]) {
         guard let d = try? JSONSerialization.data(withJSONObject: obj, options: [.withoutEscapingSlashes]) else { return }

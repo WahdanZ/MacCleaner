@@ -24,9 +24,7 @@ enum Entry {
         SettingsMigration.migrate()
         if args.count > 1 && args[1] == "--cli" {
             let cliArgs = Array(args.dropFirst(2))
-            // Same flag stripping as CLI.run, so the subcommand is found the way CLI.run finds it.
-            let name = cliArgs.first { !["--json", "--yes", "-y"].contains($0) }
-            if name == "bench" {
+            if CLI.subcommand(cliArgs) == "bench" {
                 // Bench spins the main run loop itself (Bench.time); it would hang inside runOnMain's loop.
                 exit(MainActor.assumeIsolated { CLI.run(cliArgs) })
             }
@@ -46,8 +44,9 @@ enum Entry {
     /// `--cli` only. The body starts from a main-queue task, so everything it does (including the approval dialog's
     /// run-loop mode and any `@MainActor` hop) sees a live main run loop.
     ///
-    /// Never `dispatchMain()`: it parks the main thread in the dispatch main-queue drain and does not run the main
-    /// CFRunLoop, so `RunLoop.main`, timers and `NSAlert.runModal` (the approval dialog) would never be serviced.
+    /// Never `dispatchMain()`: it parks the main thread in the dispatch main-queue drain, so the main CFRunLoop is not
+    /// run in its default/common modes (the probe reports mode=nil) and `RunLoop.main` timers and sources outside a
+    /// modal are not serviced. (`NSAlert.runModal` would still spin the loop itself.)
     /// `CFRunLoopRun()` returns when no sources remain, hence the loop. Exit codes go through `exit(...)` unchanged.
     ///
     /// Bench (`--cli bench`) and the self-test stay outside: both spin `RunLoop.main` themselves and wait for work
